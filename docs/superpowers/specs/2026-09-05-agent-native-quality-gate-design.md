@@ -106,7 +106,7 @@ Security pack, core subset free:
 - Framework rules, Express: route handler registered without any middleware when config declares an auth middleware name; `cors()` with wildcard origin on a route marked authenticated; cookies set without httpOnly or secure. A01, A05, CWE-306, CWE-614.
 
 ### 4.2 Held for release two
-- `already-exists`: new or changed function near-duplicates an existing one. The spike measured precision 0.69 at recall 0.91 against the 0.85 bar (spike/fingerprint/REPORT.md, provisional pending founder spot-check), so it waits here until the fingerprint clears the bar. Reports the existing symbol and suggests reuse.
+- `already-exists`: new or changed function near-duplicates an existing one. The spike measured precision 0.69 sample-pooled and 0.61 population-weighted at recall 0.91 against the 0.85 bar (spike/fingerprint/REPORT.md, provisional pending founder spot-check), so it waits here until the fingerprint clears the bar. Reports the existing symbol and suggests reuse.
 - `pattern-fragmentation`: multiple wrappers around the same external. Needs clustering that the corpus proves.
 - `boundary-inferred`: conventions inferred from the import graph.
 - `test-mock-only`: tests that assert only on mock calls.

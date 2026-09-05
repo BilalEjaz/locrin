@@ -7,7 +7,7 @@ Run: `.venv/Scripts/python -m pytest` for tests. Pipeline commands are in
 `docs/superpowers/plans/2026-09-05-fingerprint-spike.md`. The result lives in `REPORT.md`.
 
 The headline in `REPORT.md` reproduces from the committed evidence in `labels-2026-09-05/`
-(`labels.jsonl` and `sample_keys.json`) plus a same-snapshot `data/candidates.jsonl`, by
+(`labels.jsonl` and `sample_keys.json`) plus the same-snapshot `data/candidates.jsonl`, `data/candidates_planted.jsonl` and `data/planted.jsonl`, by
 re-running `fp.evaluate` with `--status` and `--extra report-extra.md`; that snapshot cannot
 be regenerated, because the source repos drift and every rebuild draws a different corpus.
 
