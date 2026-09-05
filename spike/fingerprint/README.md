@@ -62,6 +62,20 @@ identical copies, 15 `literals` and 1 `insert`. `plant` now walks a seeded shuff
 the corpus and skips any base whose mutation does not change the source, so every
 planted pair is a genuine near-duplicate. Reaching 100 real plants took 19 skips.
 
+Task 10 regeneration (2026-09-05), both files back to back from one corpus snapshot, then never
+regenerated again:
+
+```
+functions=4373 pairs=32897 -> data/candidates.jsonl
+real    0m19.359s
+functions=4373 planted=100 -> data/candidates_planted.jsonl, data/planted.jsonl
+real    0m19.181s
+```
+
+Labelled 240 pairs (`sample_for_labelling`, seed 7): 89 dup, 145 not, 6 unsure. Result:
+precision 0.69 at t=0.70 (recall 0.91), verdict FAIL, tuning pass not run because the condition
+did not hold; see `REPORT.md`. The 50-pair blind spot-check for the founder is `SPOTCHECK-50.md`.
+
 The rest of this section describes the pre-LSH-fix behaviour and is kept for the record.
 
 `data/candidates.jsonl` for that second run is 16 GB. The pair count is dominated by
