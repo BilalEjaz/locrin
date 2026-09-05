@@ -60,11 +60,12 @@ def extract_functions(path: str, source: str) -> list[FunctionRecord]:
     out: list[FunctionRecord] = []
     for node in function_nodes(tree):
         start_line = node.start_point[0] + 1
+        start_col = node.start_point[1]
         end_line = node.end_point[0] + 1
         name = _name_of(node)
         text = src_bytes[node.start_byte:node.end_byte].decode("utf8", errors="replace")
         out.append(FunctionRecord(
-            id=f"{file}:{start_line}:{name}",
+            id=f"{file}:{start_line}:{start_col}:{name}",
             file=file,
             name=name,
             start_line=start_line,
