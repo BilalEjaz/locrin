@@ -41,6 +41,19 @@ comfortably inside the ten minute budget. The corpus shrank from 20453 functions
 4327 because 960 of the 1904 source files were test code: 958 matched `.test.` or
 `.spec.` in the file name and 2 sat under a `test` directory.
 
+Planted run (`fp.mutate`, same six roots, n=100, seed=42):
+
+```
+functions=4354 planted=100 -> data/candidates_planted.jsonl, data/planted.jsonl
+real    1m33.501s
+data/candidates_planted.jsonl  102.6 MB  pairs=33718
+```
+
+98 of the 100 planted pairs came back as candidates at `floor=0.3`. Both misses are the
+`combined` mutation (rename plus literals plus insert applied together); `rename`,
+`insert` and `literals` recovered 25 of 25 each. The function count moved from 4327 to
+4354 between runs because the source repos are live and drift between runs.
+
 The rest of this section describes the pre-fix behaviour and is kept for the record.
 
 `data/candidates.jsonl` for that second run is 16 GB. The pair count is dominated by
