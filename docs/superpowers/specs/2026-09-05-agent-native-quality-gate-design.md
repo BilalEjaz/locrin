@@ -61,8 +61,8 @@ Per function or method, three signals:
 2. Token-shingle MinHash (shingle size and band count set by the spike) with locality-sensitive hashing for candidate retrieval. Catches near-copies with edits (Type-3), which is what agents produce.
 3. Signature vector: parameter count, parameter type tokens, return shape, set of external callees. Used to rank and to break ties, never alone.
 
-A candidate is reported when the structural hashes match, or the MinHash estimated similarity exceeds the spike-set threshold and the signature vector agrees. Thresholds carried from the spike (spike/fingerprint/REPORT.md, "Thresholds to carry into the engine"): SHINGLE_K = 5, NUM_PERM = 128, jaccard_threshold = 0.70, signature_gate = on, MIN_TOKENS = 40; they live in one config struct.
-Spike result (2026-09-05): precision 0.69 at recall 0.91 on 240 labelled pairs (116 predicted at t=0.70); see spike/fingerprint/REPORT.md (provisional pending founder spot-check).
+A candidate is reported when the structural hashes match, or the MinHash estimated similarity exceeds the spike-set threshold and the signature vector agrees. Provisional, from a spike that did not clear the bar; revisit before release two. Thresholds carried from the spike (spike/fingerprint/REPORT.md, "Thresholds to carry into the engine"): SHINGLE_K = 5, NUM_PERM = 128, jaccard_threshold = 0.70, signature_gate = untested (tie rule on), MIN_TOKENS = 40; they live in one config struct.
+Spike result (2026-09-05): precision 0.69 sample-pooled, 0.61 population-weighted, at recall 0.91 on 240 labelled pairs (116 predicted at t=0.70); see spike/fingerprint/REPORT.md (provisional pending founder spot-check).
 
 ### 3.4 Performance targets (benchmark tests, build fails on miss)
 | Measure | Target |
@@ -83,7 +83,7 @@ Every finding carries: rule id, category (erosion or security), OWASP 2021 categ
 ### 4.1 Version one (ship only if 85 percent precision on the corpus)
 
 Erosion pack, free:
-- `already-exists`: new or changed function near-duplicates an existing one. Moved to release two, see 4.2. Reports the existing symbol and suggests reuse.
+- `already-exists`: moved to release two, see 4.2
 - `dead-export`: exported symbol imported nowhere. Entry points from package.json (`main`, `exports`, `bin`), framework conventions (Next.js `app/` and `pages/`, Expo Router `app/`), and config.
 - `dead-file`: file imported nowhere and not an entry point.
 - `unreachable`: code after unconditional return, throw, break, continue.

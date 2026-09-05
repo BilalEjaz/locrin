@@ -6,6 +6,11 @@ TypeScript functions at >= 85% precision at 90% recall on the founder's repos.
 Run: `.venv/Scripts/python -m pytest` for tests. Pipeline commands are in
 `docs/superpowers/plans/2026-09-05-fingerprint-spike.md`. The result lives in `REPORT.md`.
 
+The headline in `REPORT.md` reproduces from the committed evidence in `labels-2026-09-05/`
+(`labels.jsonl` and `sample_keys.json`) plus a same-snapshot `data/candidates.jsonl`, by
+re-running `fp.evaluate` with `--status` and `--extra report-extra.md`; that snapshot cannot
+be regenerated, because the source repos drift and every rebuild draws a different corpus.
+
 Nothing in here ships. The production engine is Rust.
 
 ## Run log
