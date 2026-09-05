@@ -62,7 +62,7 @@ identical copies, 15 `literals` and 1 `insert`. `plant` now walks a seeded shuff
 the corpus and skips any base whose mutation does not change the source, so every
 planted pair is a genuine near-duplicate. Reaching 100 real plants took 19 skips.
 
-The rest of this section describes the pre-fix behaviour and is kept for the record.
+The rest of this section describes the pre-LSH-fix behaviour and is kept for the record.
 
 `data/candidates.jsonl` for that second run is 16 GB. The pair count is dominated by
 LSH recall, not by structural matches: the 14665 functions form 12642 structural hash

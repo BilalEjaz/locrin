@@ -4,7 +4,7 @@ from pathlib import Path
 from fp.extract import FunctionRecord
 from fp.index import Indexed, build, candidate_pairs
 from fp.minhash import minhash_of
-from fp.mutate import MUTATIONS, mutate, plant
+from fp.mutate import MUTATIONS, Planted, mutate, plant, read_planted, write_planted
 from fp.normalize import structural_hash, tokens
 from fp.signature import signature_of
 
@@ -95,3 +95,12 @@ def test_plant_never_plants_a_byte_identical_copy():
     # The inert base cannot be mutated at all, so it must be skipped rather than counted.
     assert len(planted) == 2
     assert all(pl.original_id != items[0].record.id for pl in planted)
+
+
+def test_planted_survives_a_write_read_round_trip(tmp_path):
+    # fp.evaluate reads this file back to compute recall, so the two halves must agree.
+    planted = [Planted("a.ts:1:one", "a.ts__planted_0.ts:1:onePlanted", "rename"),
+               Planted("b.ts:9:two", "b.ts__planted_1.ts:9:twoPlanted", "combined")]
+    path = str(tmp_path / "nested" / "planted.jsonl")
+    write_planted(planted, path)
+    assert read_planted(path) == planted
