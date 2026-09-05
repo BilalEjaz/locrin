@@ -1,4 +1,4 @@
-from fp.evaluate import choose, precision_at, predicted, recall_at, recall_by_kind, sweep
+from fp.evaluate import choose, precision_at, predicted, recall_at, recall_by_kind, sweep, write_report
 from fp.index import CandidatePair
 from fp.label import Label, pair_key
 from fp.mutate import Planted
@@ -47,3 +47,51 @@ def test_sweep_and_choose():
     assert rows[0]["t"] == 0.3 and rows[-1]["t"] == 0.95
     chosen = choose(rows, target_recall=0.9)
     assert chosen is not None and chosen["t"] == 0.5 and chosen["recall"] == 1.0
+
+
+def row(t, recall, precision, labelled):
+    return {"t": t, "recall": recall, "precision": precision, "labelled_predicted": labelled}
+
+
+COUNTS = {"functions": 6, "pairs": 3, "labelled": 2, "planted": 2}
+
+
+def test_write_report_renders_kinds_caveats_and_verdict(tmp_path):
+    rows = [row(0.30, 1.0, 0.60, 20), row(0.50, 1.0, 0.90, 12), row(0.95, 1.0, 0.0, 0)]
+    chosen = rows[1]
+    out = str(tmp_path / "REPORT.md")
+    write_report(out, rows, rows, chosen, chosen, COUNTS, kind_recall={"rename": 1.0, "insert": 0.5})
+    text = out and open(out, encoding="utf8").read()
+    assert "## Recall by mutation kind, gate on, t=0.50" in text
+    assert "| rename | 1.00 |" in text and "| insert | 0.50 |" in text
+    # A distinctive phrase from each of the two honest caveats.
+    assert "mechanical and far simpler than real-world divergence" in text
+    assert "Candidate retrieval is unaffected" in text
+    assert "compare it with the gate-off sweep" in text
+    assert "**Verdict: PASS: ship already-exists in version one**" in text
+    # The count is functions seen in pairs, not the corpus size, and must say so.
+    assert "functions_in_pairs=6" in text
+    # An empty labelled denominator is not a precision of zero.
+    assert "| 0.95 | 1.00 | n/a | 0 |" in text
+    assert "| 0.50 | 1.00 | 0.90 | 12 |" in text
+
+
+def test_write_report_survives_no_chosen_threshold(tmp_path):
+    rows = [row(0.30, 0.2, 0.5, 4)]
+    out = str(tmp_path / "REPORT.md")
+    write_report(out, rows, rows, None, None, COUNTS, kind_recall=None)
+    text = open(out, encoding="utf8").read()
+    assert text.count("recall target not reached at any threshold") == 2
+    assert "**Verdict: UNKNOWN**" in text
+    assert "jaccard_threshold = n/a" in text
+
+
+def test_write_report_verdict_is_unknown_when_no_labelled_pairs(tmp_path):
+    # precision 0.0 here means "nothing labelled was predicted", not "all false positives".
+    rows = [row(0.30, 1.0, 0.0, 0)]
+    chosen = rows[0]
+    out = str(tmp_path / "REPORT.md")
+    write_report(out, rows, rows, chosen, chosen, COUNTS, kind_recall={"rename": 1.0})
+    text = open(out, encoding="utf8").read()
+    assert "**Verdict: UNKNOWN: no labelled pairs predicted at the chosen threshold**" in text
+    assert "signature_gate = undetermined" in text

@@ -81,7 +81,9 @@ def choose(rows: list[dict], target_recall: float = 0.9) -> dict | None:
 def _table(rows: list[dict]) -> str:
     lines = ["| t | recall | precision | labelled predicted |", "|---|---|---|---|"]
     for r in rows:
-        lines.append(f"| {r['t']:.2f} | {r['recall']:.2f} | {r['precision']:.2f} | {r['labelled_predicted']} |")
+        # An empty denominator is not a precision of zero, so do not print one.
+        prec = "n/a" if r["labelled_predicted"] == 0 else f"{r['precision']:.2f}"
+        lines.append(f"| {r['t']:.2f} | {r['recall']:.2f} | {prec} | {r['labelled_predicted']} |")
     return "\n".join(lines)
 
 
@@ -101,10 +103,19 @@ def write_report(path: str, rows_gate: list[dict], rows_nogate: list[dict], chos
             return "recall target not reached at any threshold"
         return f"precision {c['precision']:.2f} at t={c['t']:.2f} (recall {c['recall']:.2f}, {c['labelled_predicted']} labelled pairs)"
 
+    # A precision of 0.0 on an empty denominator means nothing labelled was predicted at
+    # this threshold. That is absence of evidence, not evidence of bad precision, so it
+    # must not decide the verdict or the gate recommendation.
+    gate_undetermined = chosen_gate is not None and chosen_gate["labelled_predicted"] == 0
     verdict = "UNKNOWN"
-    if chosen_gate is not None:
+    if gate_undetermined:
+        verdict = "UNKNOWN: no labelled pairs predicted at the chosen threshold"
+    elif chosen_gate is not None:
         verdict = "PASS: ship already-exists in version one" if chosen_gate["precision"] >= 0.85 \
             else "FAIL: move already-exists to release two"
+    nogate_precision = chosen_nogate["precision"] if chosen_nogate else 0.0
+    gate_choice = "undetermined" if gate_undetermined else \
+        ("on" if chosen_gate and chosen_gate["precision"] >= nogate_precision else "off")
     chosen_t = f"{chosen_gate['t']:.2f}" if chosen_gate else "n/a"
     body = f"""# Fingerprinting spike report ({date.today().isoformat()})
 
@@ -123,10 +134,10 @@ Without signature gate: {headline(chosen_nogate)}
 - Headline: precision at the highest t with recall >= 0.90, gate on.
 - Signals: structural hash (always predicts), MinHash Jaccard over 5-token shingles with 128 permutations, signature gate (param count equal or callee Jaccard >= 0.5).
 - Caveat, planted recall is optimistic: recall is measured against planted mutations, which are mechanical and far simpler than real-world divergence, so treat these numbers as an upper bound. The literals slot is additionally biased toward functions that contain string literals, because a mutation that would not change the source is skipped rather than planted.
-- Caveat, signature statistics on planted pairs are conservative: the rename mutation is scope-blind and rewrites every word-boundary match, so it can rename a property name as well as a local and depress the measured signature similarity. Recall is unaffected, because the candidate filter that produces these pairs uses the structural hash and the Jaccard floor only, never the signature gate.
+- Caveat, signature statistics on planted pairs are conservative: the rename mutation is scope-blind and rewrites every word-boundary match, so it can rename a property name as well as a local and depress the measured signature similarity. Candidate retrieval is unaffected, because the filter that produces these pairs uses the structural hash and the Jaccard floor only; the gate-on recall column can still lose a planted pair whose signature similarity was depressed, so compare it with the gate-off sweep.
 
 ## Counts
-functions={counts['functions']} candidate_pairs={counts['pairs']} labelled={counts['labelled']} planted={counts['planted']}
+functions_in_pairs={counts['functions']} candidate_pairs={counts['pairs']} labelled={counts['labelled']} planted={counts['planted']}
 
 ## Sweep, gate on
 {_table(rows_gate)}
@@ -137,7 +148,7 @@ functions={counts['functions']} candidate_pairs={counts['pairs']} labelled={coun
 ## Thresholds to carry into the engine (spec section 3.3)
 - SHINGLE_K = 5, NUM_PERM = 128
 - jaccard_threshold = {chosen_t}
-- signature_gate = {'on' if chosen_gate and chosen_gate['precision'] >= (chosen_nogate['precision'] if chosen_nogate else 0) else 'off'}
+- signature_gate = {gate_choice}
 - MIN_TOKENS = 40
 """
     with open(path, "w", encoding="utf8") as f:
