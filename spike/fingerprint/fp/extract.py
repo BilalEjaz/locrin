@@ -30,7 +30,7 @@ def function_nodes(tree: Tree) -> list[Node]:
     stack = [tree.root_node]
     while stack:
         node = stack.pop()
-        if node.type in FUNCTION_TYPES:
+        if node.is_named and node.type in FUNCTION_TYPES:
             found.append(node)
         stack.extend(reversed(node.children))
     found.sort(key=lambda n: n.start_byte)

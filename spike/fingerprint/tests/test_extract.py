@@ -24,3 +24,10 @@ def test_records_have_lines_and_source():
 def test_tiny_arrow_is_still_extracted_here():
     # size filtering happens in normalize/index, not in extract
     assert any(r.name == "tiny" for r in records())
+
+
+def test_only_named_nodes_are_extracted():
+    rs = records()
+    assert len(rs) == 4
+    assert {r.name for r in rs} == {"add", "multiply", "divide", "tiny"}
+    assert all(r.source != "function" for r in rs)
