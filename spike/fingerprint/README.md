@@ -27,6 +27,22 @@ functions=14665 pairs=9714889
 real    6m14.600s
 ```
 
+After both plan defects were fixed (LSH pairs filtered by the jaccard floor, test code
+excluded from the corpus), all six roots again:
+
+```
+functions=4327 pairs=32524
+real    0m24.473s
+data/candidates.jsonl  96 MB
+```
+
+That is 517x fewer pairs, 26x faster and 300x smaller than the first six-root run, and
+comfortably inside the ten minute budget. The corpus shrank from 20453 functions to
+4327 because 960 of the 1904 source files were test code: 958 matched `.test.` or
+`.spec.` in the file name and 2 sat under a `test` directory.
+
+The rest of this section describes the pre-fix behaviour and is kept for the record.
+
 `data/candidates.jsonl` for that second run is 16 GB. The pair count is dominated by
 LSH recall, not by structural matches: the 14665 functions form 12642 structural hash
 groups (822 with more than one member), which contribute only 21030 pairs. The LSH

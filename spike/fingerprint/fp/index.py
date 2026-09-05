@@ -13,16 +13,23 @@ from fp.normalize import MIN_TOKENS, structural_hash, tokens
 from fp.signature import Signature, gate, signature_of, similarity
 
 EXCLUDE_DIRS = {"node_modules", "android", "ios", ".expo", "dist", "build", "coverage",
-                "__mocks__", ".git", ".venv"}
+                "__mocks__", ".git", ".venv", "__tests__", "e2e", "test", "tests"}
 SOURCE_SUFFIXES = {".ts", ".tsx"}
+TEST_FILE_MARKERS = (".test.", ".spec.")
 
 
 def iter_source_files(roots: list[str]) -> Iterator[str]:
     for root in roots:
-        for p in Path(root).rglob("*"):
+        root_path = Path(root)
+        for p in root_path.rglob("*"):
             if not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.name.endswith(".d.ts"):
                 continue
-            if any(part in EXCLUDE_DIRS for part in p.parts):
+            if any(marker in p.name for marker in TEST_FILE_MARKERS):
+                continue
+            # Match against the parts below the root only. Matching p.parts would let an
+            # ancestor of the root veto everything under it, which is how the fixture repo
+            # (itself under tests/) and any repo checked out under build/ or dist/ break.
+            if any(part in EXCLUDE_DIRS for part in p.relative_to(root_path).parts[:-1]):
                 continue
             yield str(p.resolve()).replace("\\", "/")
 
@@ -114,10 +121,15 @@ def candidate_pairs(items: list[Indexed], floor: float = 0.3) -> list[CandidateP
             key = frozenset((i.record.id, other_id))
             if key in seen:
                 continue
+            seen.add(key)
             other = by_id[other_id]
             if _nested(i, other):
                 continue
-            seen.add(key)
+            # LSH banding returns matches well below its nominal threshold, so the floor
+            # has to be enforced here too. Structural matches are kept whatever the
+            # estimate says, but those were already emitted by the loop above.
+            if i.shash != other.shash and estimated_jaccard(i.mh, other.mh) < floor:
+                continue
             pairs.append(_pair(i, other))
     pairs.sort(key=lambda p: (-int(p.structural_match), -p.jaccard))
     return pairs
