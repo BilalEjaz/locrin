@@ -34,9 +34,16 @@ def test_sample_is_stratified_a_third_from_each_bucket():
     assert counts == {"structural": 3, "high": 3, "mid": 3}
 
 
-def test_sample_returns_at_most_n():
-    picked = sample_for_labelling(build_pairs(), n=6, seed=7)
-    assert len(picked) <= 6
+def test_sample_returns_at_most_n_when_n_is_below_one_per_bucket():
+    # n smaller than the three buckets must not be rounded up to one pair per bucket.
+    picked = sample_for_labelling(build_pairs(), n=2, seed=7)
+    assert len(picked) <= 2
+
+
+def test_sample_returns_exactly_n_when_the_corpus_is_large_enough():
+    # n not divisible by 3 must still deliver n, spreading the remainder across buckets.
+    picked = sample_for_labelling(build_pairs(), n=5, seed=7)
+    assert len(picked) == 5
 
 
 def test_sample_is_deterministic_for_a_fixed_seed():
@@ -48,7 +55,7 @@ def test_sample_is_deterministic_for_a_fixed_seed():
 
 def test_sample_never_returns_duplicates():
     # n far larger than the corpus: every bucket is drained, and still no pair repeats.
-    picked = sample_for_labelling(build_pairs(), n=99, seed=3)
+    picked = sample_for_labelling(build_pairs(), n=100, seed=3)
     keys = [pair_key(p) for p in picked]
     assert len(keys) == len(set(keys)) == 15
 

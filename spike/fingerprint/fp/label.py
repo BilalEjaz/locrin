@@ -41,12 +41,17 @@ def sample_for_labelling(pairs: list[CandidatePair], n: int, seed: int) -> list[
     structural = [p for p in pairs if p.structural_match]
     high = [p for p in pairs if not p.structural_match and p.jaccard >= 0.6]
     mid = [p for p in pairs if not p.structural_match and 0.3 <= p.jaccard < 0.6]
-    per = max(1, n // 3)
+    # Distribute n across the three buckets, giving the remainder to the earlier ones, so
+    # the sample is bounded by n both ways: max(1, n // 3) returned 3 pairs for n=1 or 2
+    # and 3 * (n // 3) otherwise, so it over-delivered for tiny n and under-delivered for
+    # any n not divisible by 3. The final slice covers buckets that could not fill.
+    per, rem = divmod(n, 3)
     picked: list[CandidatePair] = []
-    for bucket in (structural, high, mid):
-        picked.extend(rng.sample(bucket, k=min(per, len(bucket))))
+    for i, bucket in enumerate((structural, high, mid)):
+        want = per + (1 if i < rem else 0)
+        picked.extend(rng.sample(bucket, k=min(want, len(bucket))))
     rng.shuffle(picked)
-    return picked
+    return picked[:n]
 
 
 def _show(p: CandidatePair) -> None:

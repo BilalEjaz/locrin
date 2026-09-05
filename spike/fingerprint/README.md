@@ -44,15 +44,23 @@ comfortably inside the ten minute budget. The corpus shrank from 20453 functions
 Planted run (`fp.mutate`, same six roots, n=100, seed=42):
 
 ```
-functions=4354 planted=100 -> data/candidates_planted.jsonl, data/planted.jsonl
-real    1m33.501s
-data/candidates_planted.jsonl  102.6 MB  pairs=33718
+functions=4373 planted=100 -> data/candidates_planted.jsonl, data/planted.jsonl
+real    1m44.681s
+data/candidates_planted.jsonl  105.4 MB  pairs=34046
 ```
 
-98 of the 100 planted pairs came back as candidates at `floor=0.3`. Both misses are the
-`combined` mutation (rename plus literals plus insert applied together); `rename`,
-`insert` and `literals` recovered 25 of 25 each. The function count moved from 4327 to
-4354 between runs because the source repos are live and drift between runs.
+99 of the 100 planted pairs came back as candidates at `floor=0.3`: `rename` 25 of 25,
+`literals` 25 of 25, `combined` 25 of 25, `insert` 24 of 25. The function count drifts
+between runs (4327, then 4354, now 4373) because the source repos are live.
+
+An earlier version of this run reported 98 of 100, but that number was inflated. A
+mutation can silently no-op: 42.5% of the corpus has no quoted string (so `literals`
+returns the input unchanged) and 6.9% has no line ending in `{` (so `insert` does).
+`plant` counted those byte-identical copies as planted duplicates, which the matcher
+then found for free. Replaying the old selection shows 16 of its 100 plants were
+identical copies, 15 `literals` and 1 `insert`. `plant` now walks a seeded shuffle of
+the corpus and skips any base whose mutation does not change the source, so every
+planted pair is a genuine near-duplicate. Reaching 100 real plants took 19 skips.
 
 The rest of this section describes the pre-fix behaviour and is kept for the record.
 

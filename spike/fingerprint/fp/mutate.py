@@ -76,14 +76,25 @@ class Planted:
 
 def plant(items: list[Indexed], n: int, seed: int) -> tuple[list[Indexed], list[Planted]]:
     rng = random.Random(seed)
-    chosen = rng.sample(items, k=min(n, len(items)))
+    bases = list(items)
+    rng.shuffle(bases)
     kinds = list(MUTATIONS)
     extended = list(items)
     planted: list[Planted] = []
-    for k, item in enumerate(chosen):
+    for base in bases:
+        if len(planted) >= n:
+            break
+        # k indexes the plants actually made, so a skipped base does not consume a kind
+        # and does not burn a planted file name.
+        k = len(planted)
         kind = kinds[k % len(kinds)]
-        new_src = mutate(item.record.source, kind, seed=seed + k)
-        rec = item.record
+        new_src = mutate(base.record.source, kind, seed=seed + k)
+        # A mutation can no-op: no quoted string for literals, no line ending in "{" for
+        # insert, no eligible identifier for rename. Planting a byte-identical copy would
+        # be a free hit for the matcher and would inflate measured recall, so skip it.
+        if new_src == base.record.source:
+            continue
+        rec = base.record
         planted_file = f"{rec.file}__planted_{k}.ts"
         new_rec = FunctionRecord(
             id=f"{planted_file}:{rec.start_line}:{rec.name}Planted",
