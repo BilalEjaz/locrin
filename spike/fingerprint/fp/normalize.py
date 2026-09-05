@@ -2,7 +2,7 @@ import hashlib
 
 from tree_sitter import Node
 
-from fp.parse import parse_source
+from fp.parse import parse_snippet
 
 MIN_TOKENS = 40
 
@@ -47,7 +47,7 @@ def _walk(node: Node, out: list[str]) -> None:
 
 
 def tokens(source: str) -> list[str]:
-    tree = parse_source(source)
+    tree = parse_snippet(source)
     out: list[str] = []
     _walk(tree.root_node, out)
     # drop the program wrapper so equal bodies compare equal regardless of file context

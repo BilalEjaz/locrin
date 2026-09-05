@@ -35,3 +35,28 @@ def test_changed_body_has_different_hash():
 
 def test_min_tokens_constant():
     assert MIN_TOKENS == 40
+
+
+# extract.FunctionRecord.source is the exact node text, so a method arrives as a bare
+# method body, which is not valid standalone TypeScript.
+METHOD = """async load(id: string) {
+  const r = await fetch(id);
+  const d = await r.json();
+  cache.set(id, d);
+  return d;
+}"""
+
+METHOD_RENAMED = """async fetchOne(key: string) {
+  const res = await fetch(key);
+  const body = await res.json();
+  store.set(key, body);
+  return body;
+}"""
+
+
+def test_bare_method_tokenises_without_error_nodes():
+    assert "ERROR" not in tokens(METHOD)
+
+
+def test_renamed_bare_method_has_same_structural_hash():
+    assert structural_hash(tokens(METHOD)) == structural_hash(tokens(METHOD_RENAMED))

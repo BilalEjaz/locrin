@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from tree_sitter import Node
 
-from fp.parse import parse_source
+from fp.parse import parse_snippet
 
 
 @dataclass(frozen=True)
@@ -24,23 +24,6 @@ def _first_function(root: Node) -> Node | None:
     return None
 
 
-def _root_for(source: str) -> Node:
-    """Root node to read a single function from.
-
-    extract.FunctionRecord.source is the exact node text, so a method arrives as a bare
-    method body ("async load(id) { ... }"). That is not valid standalone TypeScript: the
-    grammar only produces method_definition inside a class body, so parsing it alone gives
-    an ERROR tree in which the method name reads as a callee and the parameters are lost.
-    Reparse those inside a class wrapper.
-    """
-    root = parse_source(source).root_node
-    if _first_function(root) is None and root.has_error:
-        wrapped = parse_source("class __FpWrapper__ {\n" + source + "\n}").root_node
-        if _first_function(wrapped) is not None and not wrapped.has_error:
-            return wrapped
-    return root
-
-
 def _callee_name(call: Node) -> str | None:
     fn = call.child_by_field_name("function") or call.child_by_field_name("constructor")
     if fn is None:
@@ -54,7 +37,7 @@ def _callee_name(call: Node) -> str | None:
 
 
 def signature_of(source: str) -> Signature:
-    root = _root_for(source)
+    root = parse_snippet(source).root_node
     fn = _first_function(root) or root
     params = fn.child_by_field_name("parameters")
     param_count = 0
