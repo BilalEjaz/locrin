@@ -60,3 +60,11 @@ def test_bare_method_tokenises_without_error_nodes():
 
 def test_renamed_bare_method_has_same_structural_hash():
     assert structural_hash(tokens(METHOD)) == structural_hash(tokens(METHOD_RENAMED))
+
+
+def test_bare_method_tokens_exclude_class_wrapper():
+    t = tokens(METHOD)
+    assert t[0] == "method_definition"
+    assert "class_declaration" not in t
+    assert "class_body" not in t
+    assert "class" not in t

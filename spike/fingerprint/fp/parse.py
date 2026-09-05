@@ -18,15 +18,24 @@ def parse_file(path: str) -> Tree:
 
 
 def parse_snippet(source: str) -> Tree:
-    """Parse the source of a single function.
+    """Parse the source of a single function, whatever shape it arrives in.
 
-    extract.FunctionRecord.source is the exact node text, so a method arrives as a bare
-    method body ("async load(id) { ... }"). That is not valid standalone TypeScript: the
-    grammar only produces method_definition inside a class body, so parsing it alone gives
-    an ERROR tree in which the parameters are lost and the method name reads as a callee.
-    Reparse those inside a class wrapper.
+    extract.FunctionRecord.source is the exact node text, so two shapes do not parse as a
+    standalone TypeScript program:
+
+    * a method arrives as a bare method body ("async load(id) { ... }"), and the grammar
+      only produces method_definition inside a class body;
+    * a .tsx component returns JSX, which the TypeScript grammar cannot parse.
+
+    Try the plain source under both grammars first, and only then the class wrapper, so a
+    JSX component is never given a class it does not need. Return the first tree that
+    parses without an error, else the last one tried.
     """
-    tree = parse_source(source)
-    if tree.root_node.has_error:
-        return parse_source("class __W {\n" + source + "\n}")
+    wrapped = "class __W {\n" + source + "\n}"
+    attempts = ((source, False), (source, True), (wrapped, False), (wrapped, True))
+    tree = None
+    for text, tsx in attempts:
+        tree = parse_source(text, tsx=tsx)
+        if not tree.root_node.has_error:
+            return tree
     return tree

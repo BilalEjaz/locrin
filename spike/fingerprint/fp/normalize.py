@@ -46,10 +46,32 @@ def _walk(node: Node, out: list[str]) -> None:
         _walk(child, out)
 
 
+def _unwrap(root: Node) -> Node:
+    """Strip the class wrapper parse_snippet adds around a bare method body.
+
+    Without this the six wrapper tokens leak into every method's stream, giving it free
+    tokens toward MIN_TOKENS and shingles shared with every other method at both ends.
+    """
+    named = [c for c in root.children if c.is_named]
+    if not named or named[0].type != "class_declaration":
+        return root
+    cls = named[0]
+    name = cls.child_by_field_name("name")
+    if name is None or name.text.decode("utf8") != "__W":
+        return root
+    body = cls.child_by_field_name("body")
+    if body is None:
+        return root
+    for child in body.children:
+        if child.type == "method_definition":
+            return child
+    return root
+
+
 def tokens(source: str) -> list[str]:
     tree = parse_snippet(source)
     out: list[str] = []
-    _walk(tree.root_node, out)
+    _walk(_unwrap(tree.root_node), out)
     # drop the program wrapper so equal bodies compare equal regardless of file context
     return [t for t in out if t != "program"]
 
