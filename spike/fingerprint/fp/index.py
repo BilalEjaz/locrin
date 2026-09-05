@@ -75,13 +75,13 @@ class CandidatePair:
     b_source: str
 
 
-def _pair(a: Indexed, b: Indexed) -> CandidatePair:
+def _pair(a: Indexed, b: Indexed, jaccard: float | None = None) -> CandidatePair:
     return CandidatePair(
         a_id=a.record.id, b_id=b.record.id,
         a_file=a.record.file, b_file=b.record.file,
         a_name=a.record.name, b_name=b.record.name,
         structural_match=a.shash == b.shash,
-        jaccard=estimated_jaccard(a.mh, b.mh),
+        jaccard=estimated_jaccard(a.mh, b.mh) if jaccard is None else jaccard,
         sig_sim=similarity(a.sig, b.sig),
         sig_gate=gate(a.sig, b.sig),
         a_source=a.record.source, b_source=b.record.source,
@@ -128,9 +128,10 @@ def candidate_pairs(items: list[Indexed], floor: float = 0.3) -> list[CandidateP
             # LSH banding returns matches well below its nominal threshold, so the floor
             # has to be enforced here too. Structural matches are kept whatever the
             # estimate says, but those were already emitted by the loop above.
-            if i.shash != other.shash and estimated_jaccard(i.mh, other.mh) < floor:
+            jaccard = estimated_jaccard(i.mh, other.mh)
+            if i.shash != other.shash and jaccard < floor:
                 continue
-            pairs.append(_pair(i, other))
+            pairs.append(_pair(i, other, jaccard))
     pairs.sort(key=lambda p: (-int(p.structural_match), -p.jaccard))
     return pairs
 

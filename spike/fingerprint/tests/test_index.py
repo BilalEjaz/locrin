@@ -8,6 +8,7 @@ from fp.normalize import structural_hash
 from fp.signature import Signature
 
 ROOT = str(Path(__file__).parent / "fixtures" / "repo")
+VARIANT_COUNT = 3
 
 
 def _mutated_corpus(n: int = 120, seed: int = 11) -> list[Indexed]:
@@ -28,6 +29,20 @@ def _mutated_corpus(n: int = 120, seed: int = 11) -> list[Indexed]:
         for _ in range(28):
             toks[rng.randrange(len(toks))] = rng.choice(vocab)
         rec = FunctionRecord(id=f"f{i}", file=f"/x/f{i}.ts", name=f"fn{i}",
+                             start_line=1, end_line=9, source="x")
+        items.append(Indexed(rec, toks, structural_hash(toks), minhash_of(toks),
+                             Signature(1, frozenset(), True, False)))
+
+    # A cluster of genuine near-duplicates the filter must keep, so the invariant test
+    # cannot pass by emitting nothing. Three substitutions in ninety tokens leaves each
+    # pair well above the floor (measured 0.58 to 0.65) while the structural hashes
+    # still differ, which is exactly the case the LSH branch exists to catch.
+    variant_base = [rng.choice(vocab) for _ in range(90)]
+    for v in range(VARIANT_COUNT):
+        toks = list(variant_base)
+        for pos in (7 + v, 40 + v, 73 + v):
+            toks[pos] = f"variant_marker_{v}"
+        rec = FunctionRecord(id=f"v{v}", file=f"/x/variant{v}.ts", name=f"variant{v}",
                              start_line=1, end_line=9, source="x")
         items.append(Indexed(rec, toks, structural_hash(toks), minhash_of(toks),
                              Signature(1, frozenset(), True, False)))
@@ -78,3 +93,18 @@ def test_candidate_pairs_drop_sub_floor_pairs_in_a_larger_corpus():
     items = _mutated_corpus()
     pairs = candidate_pairs(items, floor=0.3)
     assert all(p.structural_match or p.jaccard >= 0.3 for p in pairs)
+
+
+def test_candidate_pairs_keep_above_floor_lsh_pairs():
+    items = _mutated_corpus()
+    pairs = candidate_pairs(items, floor=0.3)
+    assert pairs, "the filter dropped everything, so the invariant above proves nothing"
+    names = {frozenset((p.a_name, p.b_name)) for p in pairs}
+    assert frozenset(("variant0", "variant1")) in names
+    hit = next(p for p in pairs if {p.a_name, p.b_name} == {"variant0", "variant1"})
+    assert hit.structural_match is False  # kept by the LSH branch, not the hash branch
+    assert hit.jaccard >= 0.3
+    # every variant pairs with every other, so the LSH branch is not merely returning one
+    expected = {frozenset((f"variant{a}", f"variant{b}"))
+                for a in range(VARIANT_COUNT) for b in range(VARIANT_COUNT) if a < b}
+    assert expected <= names
