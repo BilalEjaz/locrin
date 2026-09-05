@@ -76,6 +76,10 @@ class CandidatePair:
 
 
 def _pair(a: Indexed, b: Indexed, jaccard: float | None = None) -> CandidatePair:
+    # Normalise orientation so a pair reads the same whichever side reached it first.
+    # Every field below is symmetric, so the swap only fixes which record lands in a/b.
+    if a.record.id > b.record.id:
+        a, b = b, a
     return CandidatePair(
         a_id=a.record.id, b_id=b.record.id,
         a_file=a.record.file, b_file=b.record.file,
@@ -115,7 +119,8 @@ def candidate_pairs(items: list[Indexed], floor: float = 0.3) -> list[CandidateP
     for i in items:
         lsh.add(i.record.id, i.mh)
     for i in items:
-        for other_id in lsh.query(i.mh):
+        # sorted() so neighbour order does not depend on set iteration order
+        for other_id in sorted(lsh.query(i.mh)):
             if other_id == i.record.id:
                 continue
             key = frozenset((i.record.id, other_id))
@@ -132,7 +137,8 @@ def candidate_pairs(items: list[Indexed], floor: float = 0.3) -> list[CandidateP
             if i.shash != other.shash and jaccard < floor:
                 continue
             pairs.append(_pair(i, other, jaccard))
-    pairs.sort(key=lambda p: (-int(p.structural_match), -p.jaccard))
+    # a_id/b_id break ties so the order is total and reproducible across processes
+    pairs.sort(key=lambda p: (-int(p.structural_match), -p.jaccard, p.a_id, p.b_id))
     return pairs
 
 

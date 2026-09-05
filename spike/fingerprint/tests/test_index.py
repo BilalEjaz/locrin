@@ -49,6 +49,31 @@ def _mutated_corpus(n: int = 120, seed: int = 11) -> list[Indexed]:
     return items
 
 
+def _dense_variant_corpus(n: int = 12) -> list[Indexed]:
+    """One tight cluster, sized so ordering defects actually show up.
+
+    Two properties matter here. MinHash estimates are quantised to multiples of 1/128,
+    so a cluster this size produces many pairs tied on jaccard, and ties are where an
+    unstable sort shows. And the ids are unpadded (`v9`, `v11`), so lexicographic order
+    disagrees with iteration order, which is the same trap real ids carry: they embed
+    line numbers as strings, so `f.ts:52:...` sorts after `f.ts:100:...`.
+    """
+    rng = random.Random(11)
+    vocab = ["ID", "LIT", "if_statement", "return_statement", "call_expression",
+             "member_expression", "await_expression", "{", "}"]
+    base = [rng.choice(vocab) for _ in range(90)]
+    items: list[Indexed] = []
+    for v in range(n):
+        toks = list(base)
+        for pos in (7 + v, 40 + v, 73 + v):
+            toks[pos] = f"variant_marker_{v}"
+        rec = FunctionRecord(id=f"v{v}", file=f"/x/variant{v}.ts", name=f"variant{v}",
+                             start_line=1, end_line=9, source="x")
+        items.append(Indexed(rec, toks, structural_hash(toks), minhash_of(toks),
+                             Signature(1, frozenset(), True, False)))
+    return items
+
+
 def test_iter_source_files_skips_node_modules():
     files = [Path(f).name for f in iter_source_files([ROOT])]
     assert set(files) == {"a.ts", "b.ts"}
@@ -108,3 +133,11 @@ def test_candidate_pairs_keep_above_floor_lsh_pairs():
     expected = {frozenset((f"variant{a}", f"variant{b}"))
                 for a in range(VARIANT_COUNT) for b in range(VARIANT_COUNT) if a < b}
     assert expected <= names
+
+
+def test_candidate_pairs_output_is_deterministically_ordered():
+    pairs = candidate_pairs(_dense_variant_corpus(), floor=0.3)
+    assert pairs
+    ordered = sorted(pairs, key=lambda p: (-int(p.structural_match), -p.jaccard, p.a_id, p.b_id))
+    assert pairs == ordered  # total order, so set iteration order cannot leak through
+    assert all(p.a_id < p.b_id for p in pairs)  # orientation normalised in _pair
