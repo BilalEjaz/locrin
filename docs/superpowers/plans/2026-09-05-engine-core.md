@@ -4,7 +4,7 @@
 
 **Goal:** A single Rust binary that walks a TypeScript repository, indexes it incrementally in SQLite, runs a first set of deterministic rules over changed files, and prints a verdict for a human or an agent in under 300 ms on a warm single-file check.
 
-**Architecture:** One Cargo workspace with four crates: `core` (walk, parse, index, symbols, finding contract), `rules` (a `Rule` trait, a registry, and three leftover rules), `reporters` (terminal and agent JSON), `cli` (the `gate` binary with `check`, `scan`, and `baseline`). Rules are pure functions over a `RuleContext`; the index is the only state and it lives in the user cache directory, never in the repo.
+**Architecture:** One Cargo workspace with four crates: `core` (walk, parse, index, symbols, finding contract), `rules` (a `Rule` trait, a registry, and three leftover rules), `reporters` (terminal and agent JSON), `cli` (the `locrin` binary with `check`, `scan`, and `baseline`). Rules are pure functions over a `RuleContext`; the index is the only state and it lives in the user cache directory, never in the repo.
 
 **Tech Stack:** Rust 2021 edition (stable, 1.80 or newer), tree-sitter 0.23 with tree-sitter-typescript 0.23, rusqlite 0.32 (bundled SQLite), blake3, serde and serde_json, clap 4, ignore and globset, toml. Tests are plain `#[test]` functions with fixture repositories under `crates/*/tests/fixtures`.
 
@@ -14,11 +14,11 @@
 
 ## Global Constraints
 
-- Binary and config names are placeholders until the product is named: binary `gate`, config file `gate.toml`, baseline file `gate-baseline.json`. They are defined once each (in `crates/cli/Cargo.toml` `[[bin]]`, `core::config::CONFIG_FILE`, `core::baseline::BASELINE_FILE`) so a rename is three edits.
+- Product name is Locrin (decided 2026-09-05): binary `locrin`, config file `locrin.toml`, baseline file `locrin-baseline.json`. They are defined once each (in `crates/cli/Cargo.toml` `[[bin]]`, `core::config::CONFIG_FILE`, `core::baseline::BASELINE_FILE`) so a rename is three edits.
 - No LLM anywhere. No network access anywhere in this plan.
 - Languages in scope: TypeScript (`.ts`), TSX (`.tsx`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`). `.d.ts` files are skipped.
 - Performance targets are tests, not aspirations: cold index of `<home>/fasting-app` (about 1,900 TypeScript files including tests) under 5 s in release mode; warm single-file `check` under 300 ms; binary start to first output under 50 ms. Benchmark tests are `#[ignore]` and run with `cargo test --release -- --ignored`.
-- Index lives at `<cache dir>/gate/<blake3 of canonical repo path, first 16 hex>/index.db`; cache dir from the `dirs` crate (`dirs::cache_dir()`), falling back to `<repo>/.gate-cache` if unavailable (and that folder is then gitignored by `init` in plan 4; here the fallback is only used in tests via an env var `GATE_CACHE_DIR`).
+- Index lives at `<cache dir>/locrin/<blake3 of canonical repo path, first 16 hex>/index.db`; cache dir from the `dirs` crate (`dirs::cache_dir()`), falling back to `<repo>/.locrin-cache` if unavailable (and that folder is then gitignored by `init` in plan 4; here the fallback is only used in tests via an env var `LOCRIN_CACHE_DIR`).
 - Every finding carries: `id`, `rule`, `category`, `severity`, `confidence`, `file`, `span` (start_line, start_col, end_line, end_col, 1-based lines, 0-based cols), `evidence` (one line), `fix` (one line), `related` (list of symbol refs, may be empty), and optional `owasp` and `cwe` (both `None` for every rule in this plan).
 - Finding id is stable across line shifts: `blake3(rule_id + "\x1f" + repo-relative file path + "\x1f" + anchor)` truncated to 16 hex chars, where `anchor` is the enclosing top-level symbol name when there is one, otherwise the trimmed text of the flagged line.
 - Exit codes: 0 pass or advisory, 1 block, 2 engine error. Only high-confidence findings block. `leftover-debug` is high confidence; `leftover-commented-code` and `leftover-agent-marker` are medium confidence and therefore advisory.
@@ -52,7 +52,7 @@ crates/reporters/Cargo.toml
 crates/reporters/src/lib.rs         pub mod terminal, agent
 crates/reporters/src/terminal.rs
 crates/reporters/src/agent.rs
-crates/cli/Cargo.toml               [[bin]] name = "gate"
+crates/cli/Cargo.toml               [[bin]] name = "locrin"
 crates/cli/src/main.rs              clap commands: check, scan, baseline
 crates/cli/src/run.rs               the pipeline: config -> walk -> index -> rules -> baseline filter -> verdict
 crates/cli/tests/cli.rs             end-to-end tests against fixture repos
@@ -141,7 +141,7 @@ version.workspace = true
 license.workspace = true
 
 [lib]
-name = "gate_core"
+name = "locrin_core"
 path = "src/lib.rs"
 
 [dependencies]
@@ -167,11 +167,11 @@ version.workspace = true
 license.workspace = true
 
 [lib]
-name = "gate_rules"
+name = "locrin_rules"
 path = "src/lib.rs"
 
 [dependencies]
-gate_core = { package = "core", path = "../core" }
+locrin_core = { package = "core", path = "../core" }
 tree-sitter.workspace = true
 globset.workspace = true
 ```
@@ -185,11 +185,11 @@ version.workspace = true
 license.workspace = true
 
 [lib]
-name = "gate_reporters"
+name = "locrin_reporters"
 path = "src/lib.rs"
 
 [dependencies]
-gate_core = { package = "core", path = "../core" }
+locrin_core = { package = "core", path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 ```
@@ -203,13 +203,13 @@ version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "gate"
+name = "locrin"
 path = "src/main.rs"
 
 [dependencies]
-gate_core = { package = "core", path = "../core" }
-gate_rules = { package = "rules", path = "../rules" }
-gate_reporters = { package = "reporters", path = "../reporters" }
+locrin_core = { package = "core", path = "../core" }
+locrin_rules = { package = "rules", path = "../rules" }
+locrin_reporters = { package = "reporters", path = "../reporters" }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -223,38 +223,38 @@ tempfile = "3"
 
 `crates/core/src/lib.rs`:
 ```rust
-pub const ENGINE_NAME: &str = "gate";
+pub const ENGINE_NAME: &str = "locrin";
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn engine_has_a_name() {
-        assert_eq!(super::ENGINE_NAME, "gate");
+        assert_eq!(super::ENGINE_NAME, "locrin");
     }
 }
 ```
 
 `crates/rules/src/lib.rs`:
 ```rust
-pub use gate_core;
+pub use locrin_core;
 ```
 
 `crates/reporters/src/lib.rs`:
 ```rust
-pub use gate_core;
+pub use locrin_core;
 ```
 
 `crates/cli/src/main.rs`:
 ```rust
 fn main() {
-    println!("{}", gate_core::ENGINE_NAME);
+    println!("{}", locrin_core::ENGINE_NAME);
 }
 ```
 
 Append to `.gitignore`:
 ```
 target/
-.gate-cache/
+.locrin-cache/
 ```
 
 - [ ] **Step 4: Build and run the smoke test**
@@ -452,13 +452,13 @@ pub fn parse_file(root: &Path, path: &Path) -> anyhow::Result<Option<ParsedFile>
 pub mod lang;
 pub mod parse;
 
-pub const ENGINE_NAME: &str = "gate";
+pub const ENGINE_NAME: &str = "locrin";
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn engine_has_a_name() {
-        assert_eq!(super::ENGINE_NAME, "gate");
+        assert_eq!(super::ENGINE_NAME, "locrin");
     }
 }
 ```
@@ -594,7 +594,7 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
     "**/android/**",
     "**/ios/**",
     "**/.git/**",
-    "**/.gate-cache/**",
+    "**/.locrin-cache/**",
 ];
 
 #[derive(Debug, Default, Clone)]
@@ -657,7 +657,7 @@ cd <repo> && git add crates/core/src/walk.rs crates/core/src/lib.rs crates/core/
 - Modify: `crates/core/src/lib.rs`
 
 **Interfaces:**
-- Produces: `index::Index` with `Index::open(repo_root: &Path) -> anyhow::Result<Index>` (location rule from Global Constraints, honours env `GATE_CACHE_DIR`), `Index::open_in_memory() -> anyhow::Result<Index>` for tests, `Index::upsert_file(&mut self, rel: &str, language: &str, content_hash: &str, parse_status: &str) -> anyhow::Result<()>`, `Index::file_hash(&self, rel: &str) -> anyhow::Result<Option<String>>`, `Index::changed(&self, rel: &str, content_hash: &str) -> anyhow::Result<bool>` (true when absent or hash differs), `Index::remove_missing(&mut self, present: &[String]) -> anyhow::Result<usize>` (drops files not in the list and their symbols), `index::content_hash(source: &str) -> String` (blake3 hex), `index::cache_path(repo_root: &Path) -> PathBuf`.
+- Produces: `index::Index` with `Index::open(repo_root: &Path) -> anyhow::Result<Index>` (location rule from Global Constraints, honours env `LOCRIN_CACHE_DIR`), `Index::open_in_memory() -> anyhow::Result<Index>` for tests, `Index::upsert_file(&mut self, rel: &str, language: &str, content_hash: &str, parse_status: &str) -> anyhow::Result<()>`, `Index::file_hash(&self, rel: &str) -> anyhow::Result<Option<String>>`, `Index::changed(&self, rel: &str, content_hash: &str) -> anyhow::Result<bool>` (true when absent or hash differs), `Index::remove_missing(&mut self, present: &[String]) -> anyhow::Result<usize>` (drops files not in the list and their symbols), `index::content_hash(source: &str) -> String` (blake3 hex), `index::cache_path(repo_root: &Path) -> PathBuf`.
 - Schema (executed on open, idempotent):
 
 ```sql
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn cache_path_is_outside_repo_and_keyed_by_root() {
-        std::env::remove_var("GATE_CACHE_DIR");
+        std::env::remove_var("LOCRIN_CACHE_DIR");
         let p = cache_path(std::path::Path::new("C:/repo/one"));
         let q = cache_path(std::path::Path::new("C:/repo/two"));
         assert_ne!(p, q);
@@ -785,10 +785,10 @@ pub fn content_hash(source: &str) -> String {
 pub fn cache_path(repo_root: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     let key = blake3::hash(canonical.to_string_lossy().as_bytes()).to_hex();
-    let base = std::env::var_os("GATE_CACHE_DIR")
+    let base = std::env::var_os("LOCRIN_CACHE_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::cache_dir().map(|d| d.join("gate")))
-        .unwrap_or_else(|| repo_root.join(".gate-cache"));
+        .or_else(|| dirs::cache_dir().map(|d| d.join("locrin")))
+        .unwrap_or_else(|| repo_root.join(".locrin-cache"));
     base.join(&key[..16]).join("index.db")
 }
 
@@ -1356,8 +1356,8 @@ cd <repo> && git add crates/core/src/finding.rs crates/core/src/lib.rs && git co
 - Modify: `crates/core/src/lib.rs`
 
 **Interfaces:**
-- Produces: `config::CONFIG_FILE = "gate.toml"`, `config::Config { pub excludes: Vec<String>, pub debug_allowed: Vec<String>, pub rules: BTreeMap<String, RuleOverride> }` with `RuleOverride { pub enabled: Option<bool>, pub severity: Option<Severity> }`, `Config::default()` (empty excludes, `debug_allowed = ["**/scripts/**", "**/*.config.*", "**/bin/**"]`, no overrides), `Config::load(repo_root: &Path) -> anyhow::Result<Config>` (defaults when the file is absent; error with path when present but invalid), `Config::rule_enabled(&self, id: &str) -> bool`, `Config::severity_for(&self, id: &str, default: Severity) -> Severity`.
-- Produces: `baseline::BASELINE_FILE = "gate-baseline.json"`, `baseline::Entry { pub id: String, pub rule: String, pub file: String, pub reason: String, pub author: String, pub date: String }`, `baseline::Baseline { pub entries: Vec<Entry> }`, `Baseline::load(repo_root) -> anyhow::Result<Baseline>` (empty when absent), `Baseline::save(&self, repo_root) -> anyhow::Result<()>` (pretty JSON, entries sorted by id), `Baseline::contains(&self, id: &str) -> bool`, `Baseline::accept(&mut self, f: &Finding, reason: &str, author: &str)` (date is today as `YYYY-MM-DD` from the system clock), `Baseline::filter(&self, findings: Vec<Finding>) -> Vec<Finding>` (drops baselined ids).
+- Produces: `config::CONFIG_FILE = "locrin.toml"`, `config::Config { pub excludes: Vec<String>, pub debug_allowed: Vec<String>, pub rules: BTreeMap<String, RuleOverride> }` with `RuleOverride { pub enabled: Option<bool>, pub severity: Option<Severity> }`, `Config::default()` (empty excludes, `debug_allowed = ["**/scripts/**", "**/*.config.*", "**/bin/**"]`, no overrides), `Config::load(repo_root: &Path) -> anyhow::Result<Config>` (defaults when the file is absent; error with path when present but invalid), `Config::rule_enabled(&self, id: &str) -> bool`, `Config::severity_for(&self, id: &str, default: Severity) -> Severity`.
+- Produces: `baseline::BASELINE_FILE = "locrin-baseline.json"`, `baseline::Entry { pub id: String, pub rule: String, pub file: String, pub reason: String, pub author: String, pub date: String }`, `baseline::Baseline { pub entries: Vec<Entry> }`, `Baseline::load(repo_root) -> anyhow::Result<Baseline>` (empty when absent), `Baseline::save(&self, repo_root) -> anyhow::Result<()>` (pretty JSON, entries sorted by id), `Baseline::contains(&self, id: &str) -> bool`, `Baseline::accept(&mut self, f: &Finding, reason: &str, author: &str)` (date is today as `YYYY-MM-DD` from the system clock), `Baseline::filter(&self, findings: Vec<Finding>) -> Vec<Finding>` (drops baselined ids).
 
 Config file format:
 ```toml
@@ -1481,7 +1481,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::finding::Severity;
 
-pub const CONFIG_FILE: &str = "gate.toml";
+pub const CONFIG_FILE: &str = "locrin.toml";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RuleOverride {
@@ -1539,7 +1539,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::finding::Finding;
 
-pub const BASELINE_FILE: &str = "gate-baseline.json";
+pub const BASELINE_FILE: &str = "locrin-baseline.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Entry {
@@ -1641,7 +1641,7 @@ cd <repo> && git add crates/core/src/config.rs crates/core/src/baseline.rs crate
 - Modify: `crates/rules/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `gate_core::parse::ParsedFile`, `gate_core::config::Config`, `gate_core::finding::*`.
+- Consumes: `locrin_core::parse::ParsedFile`, `locrin_core::config::Config`, `locrin_core::finding::*`.
 - Produces: `RuleContext<'a> { pub files: &'a [ParsedFile], pub config: &'a Config }`, `trait Rule { fn id(&self) -> &'static str; fn category(&self) -> Category; fn default_severity(&self) -> Severity; fn confidence(&self) -> Confidence; fn run(&self, ctx: &RuleContext) -> Vec<Finding>; }`, `all_rules() -> Vec<Box<dyn Rule>>` (empty until Task 9 registers the first rule), `run_all(ctx: &RuleContext) -> Vec<Finding>` (skips rules disabled in config, applies severity overrides), and helper `line_text(file: &ParsedFile, line: u32) -> &str` and `anchor_for(file: &ParsedFile, line: u32) -> String` (enclosing symbol name or trimmed line text).
 
 - [ ] **Step 1: Write the failing test**
@@ -1651,9 +1651,9 @@ Replace `crates/rules/src/lib.rs` with the tests first (implementation added in 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gate_core::config::Config;
-    use gate_core::finding::{Category, Confidence, Severity};
-    use gate_core::parse::parse_source;
+    use locrin_core::config::Config;
+    use locrin_core::finding::{Category, Confidence, Severity};
+    use locrin_core::parse::parse_source;
     use std::path::Path;
 
     struct Always;
@@ -1678,11 +1678,11 @@ mod tests {
         assert_eq!(out[0].severity, Severity::Medium);
         assert_eq!(out[0].id.len(), 16);
 
-        config.rules.insert("always".into(), gate_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) });
+        config.rules.insert("always".into(), locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) });
         let ctx = RuleContext { files: &files, config: &config };
         assert_eq!(run_rules(&[Box::new(Always)], &ctx)[0].severity, Severity::Low);
 
-        config.rules.insert("always".into(), gate_core::config::RuleOverride { enabled: Some(false), severity: None });
+        config.rules.insert("always".into(), locrin_core::config::RuleOverride { enabled: Some(false), severity: None });
         let ctx = RuleContext { files: &files, config: &config };
         assert!(run_rules(&[Box::new(Always)], &ctx).is_empty());
     }
@@ -1708,10 +1708,10 @@ Expected: compile error, `Rule` not found.
 
 Prepend to `crates/rules/src/lib.rs`:
 ```rust
-use gate_core::config::Config;
-use gate_core::finding::{make_id, Category, Confidence, Finding, Severity, Span};
-use gate_core::parse::ParsedFile;
-use gate_core::symbols::enclosing_symbol;
+use locrin_core::config::Config;
+use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity, Span};
+use locrin_core::parse::ParsedFile;
+use locrin_core::symbols::enclosing_symbol;
 
 pub struct RuleContext<'a> {
     pub files: &'a [ParsedFile],
@@ -1802,7 +1802,7 @@ cd <repo> && git add crates/rules/src/lib.rs && git commit -m "engine: rule trai
 - Create: `crates/rules/tests/leftover_debug.rs`
 - Modify: `crates/rules/src/lib.rs` (register)
 
-**Rule definition:** flag a `call_expression` whose function is a `member_expression` with object `console` and property in `log`, `debug`, `trace`, `dir`, `table`, and any `debugger_statement`. Not flagged: `console.error`, `console.warn`, `console.info`; any file whose `rel` matches a `config.debug_allowed` glob; a `console.log` inside a line that carries the marker comment `// gate:allow`. Severity High, confidence High (blocks). Evidence: the trimmed line. Fix: "Remove the debug statement or route it through the project logger".
+**Rule definition:** flag a `call_expression` whose function is a `member_expression` with object `console` and property in `log`, `debug`, `trace`, `dir`, `table`, and any `debugger_statement`. Not flagged: `console.error`, `console.warn`, `console.info`; any file whose `rel` matches a `config.debug_allowed` glob; a `console.log` inside a line that carries the marker comment `// locrin:allow`. Severity High, confidence High (blocks). Evidence: the trimmed line. Fix: "Remove the debug statement or route it through the project logger".
 
 - [ ] **Step 1: Write fixtures and the shared test helper**
 
@@ -1834,7 +1834,7 @@ console.log("building");
 `crates/rules/tests/fixtures/leftover_debug/edge/c.ts`:
 ```ts
 export function load(id: string) {
-  console.log("kept on purpose"); // gate:allow
+  console.log("kept on purpose"); // locrin:allow
   const console = { log: (x: string) => x };
   console.log("shadowed local console");
   return id;
@@ -1845,11 +1845,11 @@ export function load(id: string) {
 ```rust
 use std::path::{Path, PathBuf};
 
-use gate_core::config::Config;
-use gate_core::finding::Finding;
-use gate_core::parse::{parse_file, ParsedFile};
-use gate_core::walk::{source_files, WalkOptions};
-use gate_rules::{run_rules, Rule, RuleContext};
+use locrin_core::config::Config;
+use locrin_core::finding::Finding;
+use locrin_core::parse::{parse_file, ParsedFile};
+use locrin_core::walk::{source_files, WalkOptions};
+use locrin_rules::{run_rules, Rule, RuleContext};
 
 pub fn fixture(rule: &str, bucket: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(rule).join(bucket)
@@ -1877,9 +1877,9 @@ pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding>
 mod common;
 
 use common::{fixture, run_on};
-use gate_core::config::Config;
-use gate_core::finding::{Confidence, Severity};
-use gate_rules::leftover_debug::LeftoverDebug;
+use locrin_core::config::Config;
+use locrin_core::finding::{Confidence, Severity};
+use locrin_rules::leftover_debug::LeftoverDebug;
 
 #[test]
 fn flags_console_log_debug_and_debugger() {
@@ -1922,7 +1922,7 @@ Expected: compile error, module `leftover_debug` not found.
 //! calls and `debugger` statements. Purely syntactic: a locally shadowed `console`
 //! is still flagged, because a local variable called `console` is itself a leftover.
 
-use gate_core::finding::{Category, Confidence, Finding, Severity};
+use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use globset::{Glob, GlobSetBuilder};
 use tree_sitter::Node;
 
@@ -1931,7 +1931,7 @@ use crate::{finding, line_text, Rule, RuleContext};
 pub struct LeftoverDebug;
 
 const FLAGGED: &[&str] = &["log", "debug", "trace", "dir", "table"];
-const ALLOW_MARK: &str = "gate:allow";
+const ALLOW_MARK: &str = "locrin:allow";
 
 fn is_debug_call(node: Node, src: &str) -> bool {
     if node.kind() != "call_expression" {
@@ -2100,9 +2100,9 @@ export function f(): number {
 mod common;
 
 use common::{fixture, run_on};
-use gate_core::config::Config;
-use gate_core::finding::{Confidence, Severity};
-use gate_rules::leftover_commented::LeftoverCommented;
+use locrin_core::config::Config;
+use locrin_core::finding::{Confidence, Severity};
+use locrin_rules::leftover_commented::LeftoverCommented;
 
 #[test]
 fn flags_line_runs_and_block_comments_that_look_like_code() {
@@ -2130,9 +2130,9 @@ fn two_lines_is_not_a_run() {
 mod common;
 
 use common::{fixture, run_on};
-use gate_core::config::Config;
-use gate_core::finding::{Confidence, Severity};
-use gate_rules::leftover_marker::LeftoverMarker;
+use locrin_core::config::Config;
+use locrin_core::finding::{Confidence, Severity};
+use locrin_rules::leftover_marker::LeftoverMarker;
 
 #[test]
 fn flags_markers_without_issue_references() {
@@ -2162,8 +2162,8 @@ Expected: compile errors, modules not found.
 ```rust
 //! Flags runs of commented-out code. Heuristic and advisory by design.
 
-use gate_core::finding::{Category, Confidence, Finding, Severity};
-use gate_core::parse::ParsedFile;
+use locrin_core::finding::{Category, Confidence, Finding, Severity};
+use locrin_core::parse::ParsedFile;
 use tree_sitter::Node;
 
 use crate::{finding, Rule, RuleContext};
@@ -2273,7 +2273,7 @@ impl Rule for LeftoverCommented {
 ```rust
 //! Flags TODO / FIXME / HACK / XXX comments that carry no issue reference.
 
-use gate_core::finding::{Category, Confidence, Finding, Severity};
+use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
 use crate::{finding, Rule, RuleContext};
@@ -2389,7 +2389,7 @@ cd <repo> && git add crates/rules/src/leftover_commented.rs crates/rules/src/lef
 - Modify: `crates/reporters/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `gate_core::finding::{Verdict, Finding, Status}`.
+- Consumes: `locrin_core::finding::{Verdict, Finding, Status}`.
 - Produces: `terminal::render(v: &Verdict) -> String` (grouped by file, one line per finding: `  L{line}  {rule}  {severity}/{confidence}  {evidence}` then `        fix: {fix}`; header line `{STATUS}  {n} finding(s): {high} high, {medium} medium, {low} low  ({duration_ms} ms)`; footer `... and {truncated} more` when truncated; the word `PASS`, `ADVISORY`, or `BLOCK` in upper case), `agent::render(v: &Verdict) -> String` (compact JSON of `Verdict::capped(10)` with the full counts, no file contents).
 
 - [ ] **Step 1: Write the failing tests**
@@ -2399,7 +2399,7 @@ cd <repo> && git add crates/rules/src/leftover_commented.rs crates/rules/src/lef
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gate_core::finding::*;
+    use locrin_core::finding::*;
 
     fn f(file: &str, line: u32) -> Finding {
         Finding {
@@ -2445,7 +2445,7 @@ mod tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gate_core::finding::*;
+    use locrin_core::finding::*;
 
     fn f(line: u32) -> Finding {
         Finding {
@@ -2491,7 +2491,7 @@ Expected: compile error, `render` not found.
 ```rust
 use std::collections::BTreeMap;
 
-use gate_core::finding::{Finding, Status, Verdict};
+use locrin_core::finding::{Finding, Status, Verdict};
 
 fn status_word(s: Status) -> &'static str {
     match s {
@@ -2532,7 +2532,7 @@ pub fn render(v: &Verdict) -> String {
 
 `crates/reporters/src/agent.rs` (prepend):
 ```rust
-use gate_core::finding::Verdict;
+use locrin_core::finding::Verdict;
 
 pub const CAP: usize = 10;
 
@@ -2574,7 +2574,7 @@ cd <repo> && git add crates/reporters/src/terminal.rs crates/reporters/src/agent
 **Interfaces:**
 - Consumes: everything above.
 - Produces: `run::Options { pub root: PathBuf, pub paths: Vec<PathBuf>, pub changed_only: bool, pub json: bool }`, `run::check(opts: &Options) -> anyhow::Result<Verdict>`: load config, walk (or use `paths` when given, filtered to supported languages), open index, for each file compute hash, decide changed, parse only files that are changed or explicitly requested (unchanged files are still counted as present), upsert file row and symbols for changed files, run rules over the files in scope (all walked files when `changed_only` is false; only changed files when true), apply the baseline filter, build the verdict with elapsed time. Prints one stderr warning per file with parse errors. `run::scan(root) -> anyhow::Result<(usize, usize)>` indexes every file and returns (files, changed). `run::baseline_create(root) -> anyhow::Result<usize>` runs a full check ignoring the existing baseline and writes every finding into it, returning the count. `run::baseline_accept(root, id, reason) -> anyhow::Result<bool>` finds the finding by id in a full check and accepts it.
-- CLI (clap derive): `gate check [PATHS...] [--changed] [--json]`, `gate scan`, `gate baseline create`, `gate baseline accept <ID> --reason <TEXT>`. `--root` optional on every command, defaulting to the current directory. Exit codes from `Verdict::exit_code`; any `Err` prints `error: {message}` to stderr and exits 2.
+- CLI (clap derive): `locrin check [PATHS...] [--changed] [--json]`, `locrin scan`, `locrin baseline create`, `locrin baseline accept <ID> --reason <TEXT>`. `--root` optional on every command, defaulting to the current directory. Exit codes from `Verdict::exit_code`; any `Err` prints `error: {message}` to stderr and exits 2.
 
 - [ ] **Step 1: Write the fixture repo**
 
@@ -2636,16 +2636,16 @@ fn walkdir(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-fn gate(dir: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("gate").unwrap();
-    c.current_dir(dir).env("GATE_CACHE_DIR", dir.join(".cache"));
+fn locrin(dir: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("locrin").unwrap();
+    c.current_dir(dir).env("LOCRIN_CACHE_DIR", dir.join(".cache"));
     c
 }
 
 #[test]
 fn check_blocks_on_debug_and_reports_marker() {
     let dir = copy_fixture();
-    let out = gate(dir.path()).arg("check").output().unwrap();
+    let out = locrin(dir.path()).arg("check").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with("BLOCK  2 finding(s)"), "{text}");
@@ -2657,7 +2657,7 @@ fn check_blocks_on_debug_and_reports_marker() {
 #[test]
 fn json_output_is_compact_and_capped() {
     let dir = copy_fixture();
-    let out = gate(dir.path()).args(["check", "--json"]).output().unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["status"], "block");
     assert_eq!(v["blocking"], 1);
@@ -2668,17 +2668,17 @@ fn json_output_is_compact_and_capped() {
 #[test]
 fn baseline_create_then_check_passes_and_changed_only_sees_edits() {
     let dir = copy_fixture();
-    gate(dir.path()).args(["baseline", "create"]).assert().success();
-    assert!(dir.path().join("gate-baseline.json").exists());
-    gate(dir.path()).arg("check").assert().code(0);
+    locrin(dir.path()).args(["baseline", "create"]).assert().success();
+    assert!(dir.path().join("locrin-baseline.json").exists());
+    locrin(dir.path()).arg("check").assert().code(0);
 
     // no edits since the last index: --changed finds nothing to check
-    let out = gate(dir.path()).args(["check", "--changed"]).output().unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed"]).output().unwrap();
     assert!(String::from_utf8(out.stdout).unwrap().starts_with("PASS  0 finding(s)"));
 
     // introduce a new debug line in clean.ts; only that file is in scope and it blocks
     std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  console.log(\"new\");\n  return 1;\n}\n").unwrap();
-    let out = gate(dir.path()).args(["check", "--changed"]).output().unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("src/clean.ts"));
@@ -2688,17 +2688,17 @@ fn baseline_create_then_check_passes_and_changed_only_sees_edits() {
 #[test]
 fn explicit_path_limits_scope() {
     let dir = copy_fixture();
-    gate(dir.path()).args(["check", "src/clean.ts"]).assert().code(0);
+    locrin(dir.path()).args(["check", "src/clean.ts"]).assert().code(0);
 }
 
 #[test]
 fn baseline_accept_by_id() {
     let dir = copy_fixture();
-    let out = gate(dir.path()).args(["check", "--json"]).output().unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = v["findings"][0]["id"].as_str().unwrap().to_string();
-    gate(dir.path()).args(["baseline", "accept", &id, "--reason", "legacy"]).assert().success();
-    let out = gate(dir.path()).args(["check", "--json"]).output().unwrap();
+    locrin(dir.path()).args(["baseline", "accept", &id, "--reason", "legacy"]).assert().success();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["blocking"], 0);
     assert_eq!(v["status"], "advisory");
@@ -2707,8 +2707,8 @@ fn baseline_accept_by_id() {
 #[test]
 fn engine_error_exits_two() {
     let dir = copy_fixture();
-    std::fs::write(dir.path().join("gate.toml"), "excludes = [").unwrap();
-    let out = gate(dir.path()).arg("check").output().unwrap();
+    std::fs::write(dir.path().join("locrin.toml"), "excludes = [").unwrap();
+    let out = locrin(dir.path()).arg("check").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8(out.stderr).unwrap().starts_with("error:"));
 }
@@ -2729,15 +2729,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Context;
-use gate_core::baseline::Baseline;
-use gate_core::config::Config;
-use gate_core::finding::{Finding, Verdict};
-use gate_core::index::{content_hash, Index};
-use gate_core::lang::Language;
-use gate_core::parse::{parse_source, rel_path, ParsedFile};
-use gate_core::symbols;
-use gate_core::walk::{source_files, WalkOptions};
-use gate_rules::{run_all, RuleContext};
+use locrin_core::baseline::Baseline;
+use locrin_core::config::Config;
+use locrin_core::finding::{Finding, Verdict};
+use locrin_core::index::{content_hash, Index};
+use locrin_core::lang::Language;
+use locrin_core::parse::{parse_source, rel_path, ParsedFile};
+use locrin_core::symbols;
+use locrin_core::walk::{source_files, WalkOptions};
+use locrin_rules::{run_all, RuleContext};
 
 pub struct Options {
     pub root: PathBuf,
@@ -2846,7 +2846,7 @@ pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
     let (findings, _) = full_findings(root, &opts)?;
     let mut b = Baseline::default();
     for f in &findings {
-        b.accept(f, "baseline", "gate");
+        b.accept(f, "baseline", "locrin");
     }
     b.save(root)?;
     Ok(findings.len())
@@ -2876,7 +2876,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gate", about = "Deterministic quality gate for code written by people and agents")]
+#[command(name = "locrin", about = "Deterministic quality gate for code written by people and agents")]
 struct Cli {
     /// Repository root (defaults to the current directory)
     #[arg(long, global = true)]
@@ -2929,9 +2929,9 @@ fn real_main() -> anyhow::Result<i32> {
             let opts = run::Options { root, paths, changed_only: changed, json };
             let verdict = run::check(&opts)?;
             if json {
-                println!("{}", gate_reporters::agent::render(&verdict));
+                println!("{}", locrin_reporters::agent::render(&verdict));
             } else {
-                print!("{}", gate_reporters::terminal::render(&verdict));
+                print!("{}", locrin_reporters::terminal::render(&verdict));
             }
             Ok(verdict.exit_code())
         }
@@ -3004,7 +3004,7 @@ cd <repo> && git add crates/cli/src/run.rs crates/cli/src/main.rs crates/cli/tes
 - Modify: `crates/cli/Cargo.toml` (add `[profile.release] lto = "thin"` at the workspace root `Cargo.toml` instead)
 
 **Interfaces:**
-- Consumes: the `gate` binary.
+- Consumes: the `locrin` binary.
 - Produces: three `#[ignore]` tests that fail when a spec target is missed, run with `cargo test --release -p cli -- --ignored`.
 
 - [ ] **Step 1: Write the benchmark tests**
@@ -3012,7 +3012,7 @@ cd <repo> && git add crates/cli/src/run.rs crates/cli/src/main.rs crates/cli/tes
 `crates/cli/tests/bench.rs`:
 ```rust
 //! Spec section 3.4 targets. Run: cargo test --release -p cli -- --ignored --nocapture
-//! Requires the founder's FastLift checkout at <home>/fasting-app (override with GATE_BENCH_REPO).
+//! Requires the founder's FastLift checkout at <home>/fasting-app (override with LOCRIN_BENCH_REPO).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -3021,12 +3021,12 @@ use std::time::Instant;
 use assert_cmd::prelude::*;
 
 fn repo() -> PathBuf {
-    PathBuf::from(std::env::var("GATE_BENCH_REPO").unwrap_or_else(|_| "<home>/fasting-app".into()))
+    PathBuf::from(std::env::var("LOCRIN_BENCH_REPO").unwrap_or_else(|_| "<home>/fasting-app".into()))
 }
 
-fn gate(cache: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("gate").unwrap();
-    c.current_dir(repo()).env("GATE_CACHE_DIR", cache);
+fn locrin(cache: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("locrin").unwrap();
+    c.current_dir(repo()).env("LOCRIN_CACHE_DIR", cache);
     c
 }
 
@@ -3035,7 +3035,7 @@ fn gate(cache: &std::path::Path) -> Command {
 fn cold_index_under_five_seconds() {
     let cache = tempfile::tempdir().unwrap();
     let t = Instant::now();
-    gate(cache.path()).arg("scan").assert().success();
+    locrin(cache.path()).arg("scan").assert().success();
     let ms = t.elapsed().as_millis();
     println!("cold scan: {ms} ms");
     assert!(ms < 5_000, "cold index took {ms} ms");
@@ -3045,10 +3045,10 @@ fn cold_index_under_five_seconds() {
 #[ignore]
 fn warm_single_file_check_under_300ms() {
     let cache = tempfile::tempdir().unwrap();
-    gate(cache.path()).arg("scan").assert().success();
+    locrin(cache.path()).arg("scan").assert().success();
     let file = "app/_layout.tsx";
     let t = Instant::now();
-    let _ = gate(cache.path()).args(["check", file]).output().unwrap();
+    let _ = locrin(cache.path()).args(["check", file]).output().unwrap();
     let ms = t.elapsed().as_millis();
     println!("warm single-file check: {ms} ms");
     assert!(ms < 300, "warm check took {ms} ms");
@@ -3058,7 +3058,7 @@ fn warm_single_file_check_under_300ms() {
 #[ignore]
 fn startup_under_50ms() {
     let t = Instant::now();
-    let _ = Command::cargo_bin("gate").unwrap().arg("--help").output().unwrap();
+    let _ = Command::cargo_bin("locrin").unwrap().arg("--help").output().unwrap();
     let ms = t.elapsed().as_millis();
     println!("startup: {ms} ms");
     assert!(ms < 50, "startup took {ms} ms");
@@ -3093,6 +3093,6 @@ cd <repo> && git add crates/cli/tests/bench.rs Cargo.toml && git commit -m "engi
 
 **Placeholder scan.** No TBD or TODO outside the fixture files that deliberately contain the marker text under test. Every code step carries the code.
 
-**Type consistency.** `Finding`, `Span`, `Severity`, `Confidence`, `Category`, `Status`, `Verdict` are defined once in Task 6 and used with the same field names in Tasks 7, 8, 9, 10, 11, 12. `ParsedFile` fields (`path`, `rel`, `language`, `source`, `tree`, `has_error`) defined in Task 2 and used in Tasks 5, 8, 9, 10, 12. `Index` methods `open`, `open_in_memory`, `conn`, `upsert_file`, `file_hash`, `changed`, `remove_missing` defined in Task 4 and used in Tasks 5 and 12. `symbols::{extract, store, enclosing_symbol}` defined in Task 5, used in Tasks 8 and 12. `Config::{load, rule_enabled, severity_for}` and `debug_allowed` defined in Task 7, used in Tasks 8, 9, 12. `Baseline::{load, save, accept, filter, contains}` defined in Task 7, used in Task 12. `run_rules`, `run_all`, `finding`, `line_text`, `anchor_for` defined in Task 8, used in Tasks 9, 10, 12 and the test helper. `Language::as_str` defined in Task 2, used in Task 12. Reporter functions `terminal::render` and `agent::render` defined in Task 11, used in Task 12. Crate library names `gate_core`, `gate_rules`, `gate_reporters` are set in Task 1 and used as import roots throughout.
+**Type consistency.** `Finding`, `Span`, `Severity`, `Confidence`, `Category`, `Status`, `Verdict` are defined once in Task 6 and used with the same field names in Tasks 7, 8, 9, 10, 11, 12. `ParsedFile` fields (`path`, `rel`, `language`, `source`, `tree`, `has_error`) defined in Task 2 and used in Tasks 5, 8, 9, 10, 12. `Index` methods `open`, `open_in_memory`, `conn`, `upsert_file`, `file_hash`, `changed`, `remove_missing` defined in Task 4 and used in Tasks 5 and 12. `symbols::{extract, store, enclosing_symbol}` defined in Task 5, used in Tasks 8 and 12. `Config::{load, rule_enabled, severity_for}` and `debug_allowed` defined in Task 7, used in Tasks 8, 9, 12. `Baseline::{load, save, accept, filter, contains}` defined in Task 7, used in Task 12. `run_rules`, `run_all`, `finding`, `line_text`, `anchor_for` defined in Task 8, used in Tasks 9, 10, 12 and the test helper. `Language::as_str` defined in Task 2, used in Task 12. Reporter functions `terminal::render` and `agent::render` defined in Task 11, used in Task 12. Crate library names `locrin_core`, `locrin_rules`, `locrin_reporters` are set in Task 1 and used as import roots throughout.
 
 **Known judgment calls for the executor.** JavaScript is parsed with the TypeScript grammar (Task 2 note). `index_files` prunes missing files only on a full walk, never on an explicit-path check (Task 12 code). The commented-code rule is heuristic and advisory; its fixtures pin the intended behaviour, not a formal definition.
