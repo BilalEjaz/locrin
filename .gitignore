@@ -6,3 +6,7 @@ spike/fingerprint/.venv/
 spike/fingerprint/data/
 __pycache__/
 .pytest_cache/
+placeholders/pypi/dist/
+placeholders/pypi/build/
+placeholders/pypi/*.egg-info/
+placeholders/crates/target/
