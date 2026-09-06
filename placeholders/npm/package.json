@@ -4,7 +4,7 @@
   "description": "Locrin: the deterministic quality gate for code written by people and agents. Placeholder release; the engine ships here.",
   "license": "MIT",
   "homepage": "https://locrin.com",
-  "repository": { "type": "git", "url": "https://github.com/BilalEjaz/code-quality-platform" },
+  "repository": { "type": "git", "url": "https://github.com/BilalEjaz/locrin" },
   "main": "index.js",
   "files": ["index.js", "README.md"]
 }
