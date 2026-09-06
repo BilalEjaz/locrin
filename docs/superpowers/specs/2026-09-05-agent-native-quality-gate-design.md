@@ -3,7 +3,7 @@
 Date: 2026-09-05
 Status: APPROVED IN CONVERSATION, awaiting founder read of this file
 Research basis: docs/research/2026-09-05-SONARQUBE-MARKET-RESEARCH.md
-Product name: not chosen. "the engine" and "the gate" are placeholders throughout.
+Product name: Locrin (decided 2026-09-05; locrin.com and locrin.co.uk registered by the founder). "the engine" and "the gate" in the text below refer to Locrin.
 
 ## 1. Decisions locked
 

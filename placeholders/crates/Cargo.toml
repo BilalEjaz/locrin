@@ -1,0 +1,8 @@
+[package]
+name = "locrin"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Locrin: the deterministic quality gate for code written by people and agents. Placeholder release; the engine ships here."
+homepage = "https://locrin.com"
+repository = "https://github.com/BilalEjaz/locrin"
