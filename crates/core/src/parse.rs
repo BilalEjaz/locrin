@@ -44,6 +44,16 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// Removes the temp directory on the way out of the test, including when an
+    /// assertion panics part way through.
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
     #[test]
     fn parses_typescript_and_reports_no_error() {
         let src = "export function add(a: number, b: number): number { return a + b; }\n".to_string();
@@ -88,20 +98,21 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
 
-        let ts = dir.join("sum.ts");
+        // Nested one level down so `rel` carries a separator: on Windows the raw
+        // relative path is `sub\sum.ts`, and `rel_path` must normalise it to `/`.
+        let ts = dir.join("sub").join("sum.ts");
         std::fs::write(&ts, "export const sum = (a: number, b: number): number => a + b;\n").unwrap();
         let parsed = parse_file(&dir, &ts).unwrap().expect("supported file parses");
-        assert_eq!(parsed.rel, "sum.ts");
+        assert_eq!(parsed.rel, "sub/sum.ts");
         assert_eq!(parsed.language, Language::TypeScript);
         assert!(!parsed.has_error);
 
         // A path that was never written: unsupported extensions return Ok(None)
         // before the file is read, so a missing file is not an error here.
-        let py = dir.join("script.py");
+        let py = dir.join("sub").join("script.py");
         assert!(parse_file(&dir, &py).unwrap().is_none());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

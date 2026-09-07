@@ -61,6 +61,8 @@ mod tests {
     #[test]
     fn skips_declarations_and_unknown() {
         assert_eq!(Language::from_path(Path::new("a/b.d.ts")), None);
+        assert_eq!(Language::from_path(Path::new("a/b.d.mts")), None);
+        assert_eq!(Language::from_path(Path::new("a/b.d.cts")), None);
         assert_eq!(Language::from_path(Path::new("a/b.py")), None);
         assert_eq!(Language::from_path(Path::new("a/README.md")), None);
     }
