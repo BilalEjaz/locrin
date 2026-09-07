@@ -27,8 +27,14 @@ fn repo() -> PathBuf {
 }
 
 fn locrin(cache: &std::path::Path) -> Command {
+    let dir = repo();
+    assert!(
+        dir.is_dir(),
+        "bench repo {} is not a directory; set LOCRIN_BENCH_REPO to a checkout to benchmark against",
+        dir.display()
+    );
     let mut c = Command::cargo_bin("locrin").unwrap();
-    c.current_dir(repo()).env("LOCRIN_CACHE_DIR", cache);
+    c.current_dir(dir).env("LOCRIN_CACHE_DIR", cache);
     c
 }
 
@@ -52,9 +58,16 @@ fn warm_single_file_check_under_300ms() {
     locrin(cache.path()).arg("scan").assert().success();
     let file = "app/_layout.tsx";
     let t = Instant::now();
-    let _ = locrin(cache.path()).args(["check", file]).output().unwrap();
+    let out = locrin(cache.path()).args(["check", file]).output().unwrap();
     let ms = t.elapsed().as_millis();
     println!("warm single-file check: {ms} ms");
+    // Exit 0 (clean) and 1 (findings) are both real work; exit 2 is an engine
+    // error that would return in a few milliseconds and fake a fast benchmark.
+    assert!(
+        out.status.code() != Some(2),
+        "check failed with exit 2, so the {ms} ms is not a real measurement: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(ms < 300, "warm check took {ms} ms");
 }
 
@@ -63,12 +76,18 @@ fn warm_single_file_check_under_300ms() {
 fn startup_under_50ms() {
     let _serial = serial();
     let t = Instant::now();
-    let _ = Command::cargo_bin("locrin")
+    let out = Command::cargo_bin("locrin")
         .unwrap()
         .arg("--help")
         .output()
         .unwrap();
     let ms = t.elapsed().as_millis();
     println!("startup: {ms} ms");
+    assert!(
+        out.status.success(),
+        "--help failed with {}, so the {ms} ms is not a real measurement: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(ms < 50, "startup took {ms} ms");
 }
