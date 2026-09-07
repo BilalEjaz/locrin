@@ -67,11 +67,18 @@ fn candidate_files(root: &Path, paths: &[PathBuf], config: &Config) -> anyhow::R
 }
 
 /// Reads and hashes every candidate, parses the changed ones (or all when `parse_all`),
-/// updates the index, and returns the parsed files that are in scope.
+/// updates the index when `record` is set, and returns the parsed files that are
+/// in scope.
 ///
 /// A file that is not valid UTF-8 is not a source file this engine can reason
 /// about, so it is reported once and skipped rather than aborting the run: one
 /// stray binary blob with a `.ts` extension must not stop a repository check.
+///
+/// `record` is what separates a run that observes the repository from one that
+/// merely reads it. The baseline commands read every file to find the finding
+/// they were asked about; if they also stamped the hashes they saw, an edit made
+/// between two commands would look already-seen and the next `--changed` check
+/// would skip it. Only `check` and `scan` are entitled to move the watermark.
 ///
 /// Pruning rows for files that have gone away is deliberately not done here.
 /// Only a caller knows whether the candidate list is the whole repository or an
@@ -81,6 +88,7 @@ fn index_files(
     root: &Path,
     candidates: &[PathBuf],
     parse_all: bool,
+    record: bool,
     ix: &mut Index,
 ) -> anyhow::Result<Indexed> {
     let mut files = Vec::new();
@@ -107,31 +115,36 @@ fn index_files(
         }
         if is_changed {
             changed += 1;
-            ix.upsert_file(&rel, parsed.language.as_str(), &hash, status)?;
-            let syms = symbols::extract(&parsed);
-            symbols::store(ix, &parsed, &syms)?;
+            if record {
+                ix.upsert_file(&rel, parsed.language.as_str(), &hash, status)?;
+                let syms = symbols::extract(&parsed);
+                symbols::store(ix, &parsed, &syms)?;
+            }
         }
         files.push(parsed);
     }
     Ok(Indexed { files, changed })
 }
 
-fn full_findings(root: &Path, opts: &Options) -> anyhow::Result<(Vec<Finding>, Config)> {
+/// Every current finding for a run. `record` decides whether the pass is allowed
+/// to leave its mark on the index; see `index_files`.
+fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Vec<Finding>> {
     let config = Config::load(root)?;
     let candidates = candidate_files(root, &opts.paths, &config)?;
     let mut ix = Index::open(root)?;
     let parse_all = !opts.changed_only;
-    let indexed = index_files(root, &candidates, parse_all, &mut ix)?;
+    let indexed = index_files(root, &candidates, parse_all, record, &mut ix)?;
     // Only a whole-repository pass knows the full set of files that still
     // exist, so only a whole-repository pass may delete rows. `--changed`
     // narrows which files are parsed, not which files were walked, so its
-    // candidate list is still the whole repository and still prunes.
-    if opts.paths.is_empty() {
+    // candidate list is still the whole repository and still prunes. A pass
+    // that is not recording does not prune either: deleting rows is a write.
+    if record && opts.paths.is_empty() {
         let present: Vec<String> = candidates.iter().map(|p| rel_path(root, p)).collect();
         ix.remove_missing(&present)?;
     }
     let ctx = RuleContext { files: &indexed.files, config: &config };
-    Ok((run_all(&ctx), config))
+    Ok(run_all(&ctx))
 }
 
 pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
@@ -139,7 +152,7 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
     // The walker returns canonical absolute paths, so the root that `rel_path`
     // strips has to be canonical too or nothing would strip.
     let root = canonical_root(&opts.root);
-    let (findings, _) = full_findings(&root, opts)?;
+    let findings = full_findings(&root, opts, true)?;
     let baseline = Baseline::load(&root)?;
     let findings = baseline.filter(findings);
     Ok(Verdict::from_findings(findings, started.elapsed().as_millis()))
@@ -150,7 +163,7 @@ pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
     let config = Config::load(&root)?;
     let candidates = candidate_files(&root, &[], &config)?;
     let mut ix = Index::open(&root)?;
-    let indexed = index_files(&root, &candidates, false, &mut ix)?;
+    let indexed = index_files(&root, &candidates, false, true, &mut ix)?;
     let present: Vec<String> = candidates.iter().map(|p| rel_path(&root, p)).collect();
     ix.remove_missing(&present)?;
     Ok((candidates.len(), indexed.changed))
@@ -161,7 +174,7 @@ pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
 pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
     let root = canonical_root(root);
     let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false };
-    let (findings, _) = full_findings(&root, &opts)?;
+    let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::default();
     for f in &findings {
         b.accept(f, "baseline", "locrin");
@@ -176,7 +189,7 @@ pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
 pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bool> {
     let root = canonical_root(root);
     let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false };
-    let (findings, _) = full_findings(&root, &opts)?;
+    let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };
     let author = std::env::var("USERNAME")

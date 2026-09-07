@@ -6,7 +6,14 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "locrin", about = "Deterministic quality gate for code written by people and agents")]
+#[command(
+    name = "locrin",
+    about = "Deterministic quality gate for code written by people and agents",
+    long_about = "Deterministic quality gate for code written by people and agents.\n\n\
+                  The index lives outside the repository, in the platform cache directory. Set \
+                  LOCRIN_CACHE_DIR to put it somewhere else: give a CI job or a sandbox its own \
+                  cache so runs do not share incremental state."
+)]
 struct Cli {
     /// Repository root (defaults to the current directory)
     #[arg(long, global = true)]

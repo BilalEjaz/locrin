@@ -4,12 +4,17 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::finding::Finding;
+use crate::finding::{Finding, Severity};
 
 pub const BASELINE_FILE: &str = "locrin-baseline.json";
 
 /// One accepted finding. `reason` and `author` are recorded so a reviewer can
 /// see later why the debt was signed off and by whom.
+///
+/// `severity` is the severity the finding carried when it was signed off. Spec
+/// 3.5 reports a baselined finding again once its severity rises, and that
+/// comparison needs a recorded severity to compare against. It is optional and
+/// defaulted so a baseline file written before the field existed still loads.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Entry {
     pub id: String,
@@ -18,6 +23,8 @@ pub struct Entry {
     pub reason: String,
     pub author: String,
     pub date: String,
+    #[serde(default)]
+    pub severity: Option<Severity>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,12 +67,19 @@ impl Baseline {
 
     /// Writes pretty JSON with the entries sorted by id, so the file is a stable
     /// diff no matter what order findings were accepted in.
+    ///
+    /// The write goes to a sibling temporary file and is then renamed over the
+    /// target. The baseline is a committed file: a run interrupted mid-write
+    /// must leave the previous baseline intact rather than a truncated one that
+    /// suppresses nothing and no longer parses.
     pub fn save(&self, repo_root: &Path) -> anyhow::Result<()> {
         let mut copy = self.clone();
         copy.entries.sort_by(|a, b| a.id.cmp(&b.id));
         let path = repo_root.join(BASELINE_FILE);
-        std::fs::write(&path, serde_json::to_string_pretty(&copy)?)
-            .with_context(|| format!("writing {}", path.display()))
+        let tmp = repo_root.join(format!("{BASELINE_FILE}.tmp"));
+        std::fs::write(&tmp, serde_json::to_string_pretty(&copy)?)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
     }
 
     pub fn contains(&self, id: &str) -> bool {
@@ -90,6 +104,7 @@ impl Baseline {
             reason: reason.to_string(),
             author: author.to_string(),
             date: today(),
+            severity: Some(f.severity),
         });
     }
 
@@ -119,7 +134,7 @@ mod tests {
     /// A fresh directory: a leftover from an earlier failed run would otherwise
     /// leave a stale baseline file behind and decide the test for us.
     fn fresh(tag: &str) -> Cleanup {
-        let dir = std::env::temp_dir().join(format!("gate-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("locrin-baseline-{tag}-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         Cleanup(dir)
@@ -160,5 +175,33 @@ mod tests {
         assert_eq!(b2.entries[0].date.len(), 10);
         let kept = b2.filter(vec![f("a"), f("c")]);
         assert_eq!(kept.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["c"]);
+    }
+
+    /// Spec 3.5 reports a baselined finding again once its severity rises, which
+    /// is only decidable if the entry records the severity it was accepted at.
+    #[test]
+    fn accept_records_the_severity_it_was_signed_off_at() {
+        let dir = fresh("baseline-severity");
+        let mut b = Baseline::default();
+        b.accept(&f("a"), "legacy script", "tester");
+        b.save(path(&dir)).unwrap();
+        let b2 = Baseline::load(path(&dir)).unwrap();
+        assert_eq!(b2.entries[0].severity, Some(Severity::High));
+    }
+
+    /// A baseline written before the severity field existed must still load: the
+    /// file is committed, and an older entry is not a corrupt entry.
+    #[test]
+    fn an_entry_without_a_severity_still_loads() {
+        let dir = fresh("baseline-legacy");
+        std::fs::write(
+            path(&dir).join(BASELINE_FILE),
+            r#"{"entries":[{"id":"a","rule":"leftover-debug","file":"src/a.ts","reason":"legacy","author":"t","date":"2026-09-05"}]}"#,
+        )
+        .unwrap();
+        let b = Baseline::load(path(&dir)).unwrap();
+        assert_eq!(b.entries.len(), 1);
+        assert_eq!(b.entries[0].severity, None);
+        assert!(b.contains("a"));
     }
 }

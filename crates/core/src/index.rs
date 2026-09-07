@@ -39,6 +39,11 @@ pub fn content_hash(source: &str) -> String {
 /// The cache sits outside the repository so a scan never dirties the working
 /// tree, and it is keyed by a hash of the canonical root so two checkouts of the
 /// same project do not share one database.
+///
+/// `LOCRIN_CACHE_DIR` overrides the base directory. Set it to give a run its own
+/// cache: CI jobs that must not share state, a sandbox, or a test. Unset, the
+/// base is the platform cache directory (`locrin` inside it), falling back to
+/// `.locrin-cache` in the repository when the platform has no cache directory.
 pub fn cache_path(repo_root: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     let key = blake3::hash(canonical.to_string_lossy().as_bytes()).to_hex();
@@ -86,7 +91,17 @@ impl Index {
         }
         let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
         let mut ix = Index { conn };
-        if !ix.schema_matches()? {
+        // A file that is not a database at all fails the same way a stale schema
+        // does: it is a cache the engine cannot read, and spec 9 says rebuild it
+        // and log once rather than fail the run over a disposable file.
+        let rebuild = match ix.schema_matches() {
+            Ok(matches) => !matches,
+            Err(_) => {
+                eprintln!("warning: rebuilding corrupt index at {}", path.display());
+                true
+            }
+        };
+        if rebuild {
             drop(ix);
             remove_database_files(&path)?;
             let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
@@ -122,6 +137,10 @@ impl Index {
     }
 
     fn init(&mut self) -> anyhow::Result<()> {
+        // Two runs against one repository (an editor hook and a terminal, say)
+        // share a database. Waiting briefly for the other writer is the right
+        // answer; failing the check with "database is locked" is not.
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
         self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         self.conn.execute_batch(SCHEMA)?;
         self.conn.execute(
@@ -257,6 +276,28 @@ mod tests {
             ix.file_hash("marker.ts").unwrap().is_none(),
             "a schema mismatch must rebuild the database, not restamp the old one"
         );
+        drop(ix);
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_database_is_rebuilt() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_cache_dir("corrupt");
+        let repo = Path::new("C:/repo/corrupt");
+        std::env::set_var("LOCRIN_CACHE_DIR", &dir);
+        let path = cache_path(repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is not a database, it is a text file\n").unwrap();
+
+        let ix = Index::open(repo).expect("a corrupt index must be rebuilt, not reported as an error");
+        let version: String = ix
+            .conn()
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
         drop(ix);
 
         std::env::remove_var("LOCRIN_CACHE_DIR");

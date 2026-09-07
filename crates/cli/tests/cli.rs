@@ -139,6 +139,39 @@ fn baseline_accept_by_id() {
     assert_eq!(v["status"], "advisory");
 }
 
+/// A baseline command reads the repository, it does not observe it. If `accept`
+/// recorded the index state it saw, the edit it happened to walk past would look
+/// already-seen and the next `check --changed` would miss it entirely.
+#[test]
+fn baseline_accept_does_not_swallow_a_concurrent_edit() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["rule"] == "leftover-debug" && f["file"] == "src/dirty.ts")
+        .expect("the fixture's dirty.ts debug finding")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    std::fs::write(
+        dir.path().join("src/clean.ts"),
+        "export function ok(): number {\n  debugger;\n  return 1;\n}\n",
+    )
+    .unwrap();
+
+    locrin(dir.path()).args(["baseline", "accept", &id, "--reason", "legacy"]).assert().success();
+
+    let out = locrin(dir.path()).args(["check", "--changed"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("src/clean.ts"), "{text}");
+}
+
 #[test]
 fn engine_error_exits_two() {
     let dir = copy_fixture();

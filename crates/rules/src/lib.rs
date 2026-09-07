@@ -73,10 +73,17 @@ pub fn finding(rule: &dyn Rule, file: &ParsedFile, line: u32, evidence: &str, fi
 }
 
 /// Runs the given rules, skipping any the config disables, dropping any finding
-/// whose line carries the `locrin:allow` marker, and applying the configured
-/// severity to every finding that survives.
+/// that came from a file which failed to parse or whose line carries the
+/// `locrin:allow` marker, and applying the configured severity to every finding
+/// that survives.
+///
+/// The spec 9 gate is enforced here rather than left to the rules. `clean_files`
+/// stays the way a rule should iterate, because skipping an unparsable file is
+/// cheaper than walking it, but a rule that forgets to use it still cannot emit
+/// a finding against a file the engine could not parse.
 pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> Vec<Finding> {
     let by_rel: HashMap<&str, &ParsedFile> = ctx.files.iter().map(|f| (f.rel.as_str(), f)).collect();
+    let unparsable = |f: &Finding| by_rel.get(f.file.as_str()).is_some_and(|file| file.has_error);
     let allowed = |f: &Finding| {
         by_rel.get(f.file.as_str()).is_some_and(|file| line_text(file, f.span.start_line).contains(ALLOW_MARK))
     };
@@ -87,7 +94,7 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> Vec<Finding> {
         }
         let severity = ctx.config.severity_for(rule.id(), rule.default_severity());
         for mut f in rule.run(ctx) {
-            if allowed(&f) {
+            if unparsable(&f) || allowed(&f) {
                 continue;
             }
             f.severity = severity;
@@ -137,6 +144,28 @@ mod tests {
         }
     }
 
+    /// A rule that ignores `clean_files` and walks `ctx.files` directly, the way
+    /// a careless third-party rule would. `run_rules` has to hold the spec 9
+    /// gate on its own, not trust the rule to hold it.
+    struct Careless;
+    impl Rule for Careless {
+        fn id(&self) -> &'static str {
+            "careless"
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn run(&self, ctx: &RuleContext) -> Vec<Finding> {
+            ctx.files.iter().map(|f| finding(self, f, 1, "hit", "remove it")).collect()
+        }
+    }
+
     #[test]
     fn run_rules_applies_config_overrides() {
         let file = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
@@ -183,8 +212,8 @@ mod tests {
         let files = vec![clean, broken];
         let config = Config::default();
         let ctx = RuleContext { files: &files, config: &config };
-        let out = run_rules(&[Box::new(Always)], &ctx);
-        assert_eq!(out.len(), 1, "only the clean file should reach a rule, got {out:?}");
+        let out = run_rules(&[Box::new(Careless)], &ctx);
+        assert_eq!(out.len(), 1, "only the clean file should survive run_rules, got {out:?}");
         assert_eq!(out[0].file, "src/a.ts");
     }
 

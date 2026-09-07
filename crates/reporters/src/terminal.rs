@@ -22,6 +22,10 @@ fn sev(f: &Finding) -> String {
 /// The counts in the header come from the verdict, not from the findings it
 /// still carries, so a capped verdict reports the true totals and the footer
 /// says how many lines are not shown.
+///
+/// Each finding line ends with its id, because `locrin baseline accept` takes an
+/// id and the terminal is where an operator reads the finding they want to
+/// accept. Without it the only way to get the id is to re-run with `--json`.
 pub fn render(v: &Verdict) -> String {
     let total = v.high + v.medium + v.low;
     let mut out = format!(
@@ -42,11 +46,12 @@ pub fn render(v: &Verdict) -> String {
         out.push('\n');
         for f in fs {
             out.push_str(&format!(
-                "  L{}  {}  {}  {}\n",
+                "  L{}  {}  {}  {}  id={}\n",
                 f.span.start_line,
                 f.rule,
                 sev(f),
-                f.evidence
+                f.evidence,
+                f.id
             ));
             out.push_str(&format!("        fix: {}\n", f.fix));
         }
@@ -87,7 +92,7 @@ mod tests {
         let a = s.find("src/a.ts").unwrap();
         let b = s.find("src/b.ts").unwrap();
         assert!(a < b);
-        assert!(s.contains("  L9  leftover-debug  high/high  console.log(1)"));
+        assert!(s.contains("  L9  leftover-debug  high/high  console.log(1)  id=0123456789abcdef"), "{s}");
         assert!(s.contains("        fix: Remove it"));
     }
 
