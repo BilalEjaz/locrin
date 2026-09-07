@@ -90,25 +90,33 @@ pub fn enclosing_symbol(file: &ParsedFile, line: u32) -> Option<String> {
         .map(|s| s.name)
 }
 
+/// Replaces the stored symbols for `file.rel` atomically. The delete and every
+/// insert share one transaction, so a failure part way through the loop rolls
+/// the whole replacement back rather than leaving a partial symbol set that the
+/// content-hash check would consider up to date and never repair.
 pub fn store(index: &mut Index, file: &ParsedFile, syms: &[Symbol]) -> anyhow::Result<()> {
     let conn = index.conn();
-    conn.execute("DELETE FROM symbols WHERE rel = ?1", params![file.rel])?;
-    let mut stmt = conn.prepare(
-        "INSERT INTO symbols(rel, kind, name, start_line, start_col, end_line, end_col, exported)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-    )?;
-    for s in syms {
-        stmt.execute(params![
-            s.rel,
-            s.kind,
-            s.name,
-            s.start_line,
-            s.start_col,
-            s.end_line,
-            s.end_col,
-            s.exported as i64
-        ])?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM symbols WHERE rel = ?1", params![file.rel])?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO symbols(rel, kind, name, start_line, start_col, end_line, end_col, exported)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for s in syms {
+            stmt.execute(params![
+                s.rel,
+                s.kind,
+                s.name,
+                s.start_line,
+                s.start_col,
+                s.end_line,
+                s.end_col,
+                s.exported as i64
+            ])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -178,5 +186,31 @@ export enum Color { Red }
             .query_row("SELECT count(*) FROM symbols WHERE rel='src/a.ts'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 9);
+        assert_eq!(n as usize, syms.len());
+
+        // A shorter list must leave exactly the shorter count, so the delete and
+        // the inserts land as one replacement rather than accumulating.
+        store(&mut ix, &p, &syms[..2]).unwrap();
+        let n: i64 = ix
+            .conn()
+            .query_row("SELECT count(*) FROM symbols WHERE rel='src/a.ts'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn store_surfaces_failure_and_leaves_files_alone() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file("src/a.ts", "typescript", "h1", "ok").unwrap();
+        ix.conn().execute_batch("DROP TABLE symbols").unwrap();
+
+        let p = parsed();
+        let syms = extract(&p);
+        assert!(store(&mut ix, &p, &syms).is_err());
+
+        let files: i64 =
+            ix.conn().query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(files, 1);
+        assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"));
     }
 }
