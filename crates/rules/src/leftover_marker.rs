@@ -82,13 +82,7 @@ impl Rule for LeftoverMarker {
             comment_lines(file.tree.root_node(), &file.source, &mut lines);
             for (line, text) in lines {
                 if has_marker(&text) && !has_reference(&text) {
-                    out.push(finding(
-                        self,
-                        file,
-                        line,
-                        text.trim(),
-                        "Link the marker to an issue or resolve it now",
-                    ));
+                    out.push(finding(self, file, line, text.trim(), "Link the marker to an issue or resolve it now"));
                 }
             }
         }

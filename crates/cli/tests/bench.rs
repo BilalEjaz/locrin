@@ -21,9 +21,7 @@ fn serial() -> MutexGuard<'static, ()> {
 }
 
 fn repo() -> PathBuf {
-    PathBuf::from(
-        std::env::var("LOCRIN_BENCH_REPO").unwrap_or_else(|_| "<home>/fasting-app".into()),
-    )
+    PathBuf::from(std::env::var("LOCRIN_BENCH_REPO").unwrap_or_else(|_| "<home>/fasting-app".into()))
 }
 
 fn locrin(cache: &std::path::Path) -> Command {
@@ -76,11 +74,7 @@ fn warm_single_file_check_under_300ms() {
 fn startup_under_50ms() {
     let _serial = serial();
     let t = Instant::now();
-    let out = Command::cargo_bin("locrin")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
+    let out = Command::cargo_bin("locrin").unwrap().arg("--help").output().unwrap();
     let ms = t.elapsed().as_millis();
     println!("startup: {ms} ms");
     assert!(

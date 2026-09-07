@@ -177,9 +177,10 @@ mod tests {
         assert_eq!(out[0].severity, Severity::Medium);
         assert_eq!(out[0].id.len(), 16);
 
-        config
-            .rules
-            .insert("always".into(), locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) });
+        config.rules.insert(
+            "always".into(),
+            locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) },
+        );
         let ctx = RuleContext { files: &files, config: &config };
         assert_eq!(run_rules(&[Box::new(Always)], &ctx)[0].severity, Severity::Low);
 

@@ -45,14 +45,7 @@ pub fn render(v: &Verdict) -> String {
         out.push_str(file);
         out.push('\n');
         for f in fs {
-            out.push_str(&format!(
-                "  L{}  {}  {}  {}  id={}\n",
-                f.span.start_line,
-                f.rule,
-                sev(f),
-                f.evidence,
-                f.id
-            ));
+            out.push_str(&format!("  L{}  {}  {}  {}  id={}\n", f.span.start_line, f.rule, sev(f), f.evidence, f.id));
             out.push_str(&format!("        fix: {}\n", f.fix));
         }
     }

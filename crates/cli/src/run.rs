@@ -46,8 +46,7 @@ fn candidate_files(root: &Path, paths: &[PathBuf], config: &Config) -> anyhow::R
         // Canonicalise before anything else: `src/../src/dirty.ts` and
         // `src/dirty.ts` are one file, and only one of them may reach the index
         // or a finding id.
-        let canon = canonical_path(&abs)
-            .with_context(|| format!("no such path: {}", p.display()))?;
+        let canon = canonical_path(&abs).with_context(|| format!("no such path: {}", p.display()))?;
         if !canon.starts_with(root) {
             anyhow::bail!("path is outside the repository root: {}", p.display());
         }
@@ -192,9 +191,7 @@ pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bo
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };
-    let author = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "unknown".into());
+    let author = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "unknown".into());
     b.accept(f, reason, &author);
     b.save(&root)?;
     Ok(true)

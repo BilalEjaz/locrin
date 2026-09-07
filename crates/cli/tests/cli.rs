@@ -158,11 +158,8 @@ fn baseline_accept_does_not_swallow_a_concurrent_edit() {
         .unwrap()
         .to_string();
 
-    std::fs::write(
-        dir.path().join("src/clean.ts"),
-        "export function ok(): number {\n  debugger;\n  return 1;\n}\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  debugger;\n  return 1;\n}\n")
+        .unwrap();
 
     locrin(dir.path()).args(["baseline", "accept", &id, "--reason", "legacy"]).assert().success();
 

@@ -35,10 +35,7 @@ pub struct Baseline {
 /// Today as `YYYY-MM-DD` in UTC, via Howard Hinnant's civil-from-days, so the
 /// baseline file does not drag in a date library for one field.
 fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let days = (secs / 86_400) as i64;
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

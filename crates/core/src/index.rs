@@ -120,19 +120,15 @@ impl Index {
     fn schema_matches(&mut self) -> anyhow::Result<bool> {
         let has_meta: bool = self
             .conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='meta'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='meta'", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .map(|n| n > 0)?;
         if !has_meta {
             return Ok(true); // fresh database, init() will stamp it
         }
-        let v: Option<String> = self
-            .conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0))
-            .optional()?;
+        let v: Option<String> =
+            self.conn.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)).optional()?;
         Ok(v.as_deref() == Some(SCHEMA_VERSION))
     }
 
@@ -267,10 +263,8 @@ mod tests {
         drop(ix);
 
         let ix = Index::open(repo).unwrap();
-        let version: String = ix
-            .conn()
-            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
-            .unwrap();
+        let version: String =
+            ix.conn().query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert!(
             ix.file_hash("marker.ts").unwrap().is_none(),
@@ -293,10 +287,8 @@ mod tests {
         std::fs::write(&path, "this is not a database, it is a text file\n").unwrap();
 
         let ix = Index::open(repo).expect("a corrupt index must be rebuilt, not reported as an error");
-        let version: String = ix
-            .conn()
-            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
-            .unwrap();
+        let version: String =
+            ix.conn().query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         drop(ix);
 

@@ -189,12 +189,7 @@ mod tests {
     fn capped_keeps_highest_severity_and_counts_truncated() {
         let mut fs = Vec::new();
         for i in 0..12 {
-            fs.push(f(
-                "r",
-                if i % 3 == 0 { Severity::High } else { Severity::Low },
-                Confidence::Medium,
-                i,
-            ));
+            fs.push(f("r", if i % 3 == 0 { Severity::High } else { Severity::Low }, Confidence::Medium, i));
         }
         let v = Verdict::from_findings(fs, 1).capped(10);
         assert_eq!(v.findings.len(), 10);
@@ -240,10 +235,7 @@ mod tests {
         let mut narrow = f("r", Severity::High, Confidence::High, 4);
         narrow.span.start_col = 2;
         let v = Verdict::from_findings(vec![wide, narrow], 1);
-        assert_eq!(
-            v.findings.iter().map(|x| x.span.start_col).collect::<Vec<_>>(),
-            vec![2, 9]
-        );
+        assert_eq!(v.findings.iter().map(|x| x.span.start_col).collect::<Vec<_>>(), vec![2, 9]);
 
         let mut later = f("r", Severity::High, Confidence::High, 4);
         later.id = "ffffffffffffffff".into();

@@ -18,9 +18,7 @@ pub struct ParsedFile {
 pub fn parse_source(path: &Path, rel: &str, source: String) -> Option<ParsedFile> {
     let language = Language::from_path(path)?;
     let mut parser = Parser::new();
-    parser
-        .set_language(&language.grammar())
-        .expect("grammar version matches tree-sitter runtime");
+    parser.set_language(&language.grammar()).expect("grammar version matches tree-sitter runtime");
     let tree = parser.parse(source.as_bytes(), None)?;
     let has_error = tree.root_node().has_error();
     Some(ParsedFile { path: path.to_path_buf(), rel: rel.to_string(), language, source, tree, has_error })
@@ -65,7 +63,8 @@ mod tests {
 
     #[test]
     fn parses_tsx_with_jsx() {
-        let src = "export function Row({ item }: { item: string }) { return <div className=\"r\">{item}</div>; }\n".to_string();
+        let src = "export function Row({ item }: { item: string }) { return <div className=\"r\">{item}</div>; }\n"
+            .to_string();
         let p = parse_source(Path::new("x/Row.tsx"), "x/Row.tsx", src).unwrap();
         assert_eq!(p.language, Language::Tsx);
         assert!(!p.has_error);

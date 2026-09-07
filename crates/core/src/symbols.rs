@@ -84,10 +84,7 @@ pub fn extract(file: &ParsedFile) -> Vec<Symbol> {
 }
 
 pub fn enclosing_symbol(file: &ParsedFile, line: u32) -> Option<String> {
-    extract(file)
-        .into_iter()
-        .find(|s| s.start_line <= line && line <= s.end_line)
-        .map(|s| s.name)
+    extract(file).into_iter().find(|s| s.start_line <= line && line <= s.end_line).map(|s| s.name)
 }
 
 /// Replaces the stored symbols for `file.rel` atomically. The delete and every
@@ -181,20 +178,16 @@ export enum Color { Red }
         let syms = extract(&p);
         store(&mut ix, &p, &syms).unwrap();
         store(&mut ix, &p, &syms).unwrap();
-        let n: i64 = ix
-            .conn()
-            .query_row("SELECT count(*) FROM symbols WHERE rel='src/a.ts'", [], |r| r.get(0))
-            .unwrap();
+        let n: i64 =
+            ix.conn().query_row("SELECT count(*) FROM symbols WHERE rel='src/a.ts'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 9);
         assert_eq!(n as usize, syms.len());
 
         // A shorter list must leave exactly the shorter count, so the delete and
         // the inserts land as one replacement rather than accumulating.
         store(&mut ix, &p, &syms[..2]).unwrap();
-        let n: i64 = ix
-            .conn()
-            .query_row("SELECT count(*) FROM symbols WHERE rel='src/a.ts'", [], |r| r.get(0))
-            .unwrap();
+        let n: i64 =
+            ix.conn().query_row("SELECT count(*) FROM symbols WHERE rel='src/a.ts'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2);
     }
 
@@ -208,8 +201,7 @@ export enum Color { Red }
         let syms = extract(&p);
         assert!(store(&mut ix, &p, &syms).is_err());
 
-        let files: i64 =
-            ix.conn().query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
+        let files: i64 = ix.conn().query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(files, 1);
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"));
     }
