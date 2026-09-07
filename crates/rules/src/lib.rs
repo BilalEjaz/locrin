@@ -1,4 +1,6 @@
+pub mod leftover_commented;
 pub mod leftover_debug;
+pub mod leftover_marker;
 
 use locrin_core::config::Config;
 use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity, Span};
@@ -73,7 +75,11 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> Vec<Finding> {
 
 /// The registry: every rule the engine ships, in the order they are declared.
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
-    vec![Box::new(leftover_debug::LeftoverDebug)]
+    vec![
+        Box::new(leftover_debug::LeftoverDebug),
+        Box::new(leftover_commented::LeftoverCommented),
+        Box::new(leftover_marker::LeftoverMarker),
+    ]
 }
 
 pub fn run_all(ctx: &RuleContext) -> Vec<Finding> {
@@ -150,7 +156,7 @@ mod tests {
         let config = Config::default();
         let ctx = RuleContext { files: &files, config: &config };
         let ids: Vec<&str> = all_rules().iter().map(|r| r.id()).collect();
-        assert_eq!(ids, vec!["leftover-debug"]);
+        assert_eq!(ids, vec!["leftover-debug", "leftover-commented-code", "leftover-agent-marker"]);
         assert!(run_all(&ctx).is_empty(), "no files means no findings");
     }
 }
