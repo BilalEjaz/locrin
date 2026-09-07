@@ -1,0 +1,21 @@
+[package]
+name = "locrin-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "locrin"
+path = "src/main.rs"
+
+[dependencies]
+locrin-core = { path = "../core" }
+locrin-rules = { path = "../rules" }
+locrin-reporters = { path = "../reporters" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"

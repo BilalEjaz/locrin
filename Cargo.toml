@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/rules", "crates/reporters", "crates/cli"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+tree-sitter = "0.23"
+tree-sitter-typescript = "0.23"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ignore = "0.4"
+globset = "0.4"
+toml = "0.8"
+dirs = "5"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

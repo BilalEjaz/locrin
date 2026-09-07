@@ -22,7 +22,7 @@
 - Every finding carries: `id`, `rule`, `category`, `severity`, `confidence`, `file`, `span` (start_line, start_col, end_line, end_col, 1-based lines, 0-based cols), `evidence` (one line), `fix` (one line), `related` (list of symbol refs, may be empty), and optional `owasp` and `cwe` (both `None` for every rule in this plan).
 - Finding id is stable across line shifts: `blake3(rule_id + "\x1f" + repo-relative file path + "\x1f" + anchor)` truncated to 16 hex chars, where `anchor` is the enclosing top-level symbol name when there is one, otherwise the trimmed text of the flagged line.
 - Exit codes: 0 pass or advisory, 1 block, 2 engine error. Only high-confidence findings block. `leftover-debug` is high confidence; `leftover-commented-code` and `leftover-agent-marker` are medium confidence and therefore advisory.
-- Agent JSON output is capped at the ten highest-severity findings, verdict first, never includes file contents, and reports the truncated count.
+- Agent JSON output is capped at the ten highest-priority findings (blocking first, then severity), verdict first, never includes file contents, and reports the truncated count.
 - Parse failure in a file: file recorded as unparsed, one warning on stderr, no findings from that file, exit code unaffected. Engine panic: exit 2 with a one-line message. Never exit 1 on an engine bug.
 - Git: branch `engine/core` off `main` once the spike branch has merged; until then off `spike/fingerprint`. One commit per task, plain messages, no attribution trailers, never `git add -A`. No em dashes in any text.
 - Rust toolchain: not installed on the founder's machine as of 2026-09-05. Task 1 verifies `cargo --version` and stops with NEEDS_CONTEXT if absent; the founder installs rustup (https://rustup.rs, stable toolchain, MSVC target on Windows).
@@ -1127,7 +1127,7 @@ cd <repo> && git add crates/core/src/symbols.rs crates/core/src/lib.rs && git co
 - Modify: `crates/core/src/lib.rs`
 
 **Interfaces:**
-- Produces: the enums and structs listed under "Shared types" (all `Serialize`, `Deserialize`, `Clone`, `Debug`, `PartialEq`; enums serialise as lowercase strings), `finding::make_id(rule: &str, rel: &str, anchor: &str) -> String` (16 hex chars), `finding::Verdict::from_findings(findings: Vec<Finding>, duration_ms: u128) -> Verdict` (status Block if any finding has `confidence == High`, Advisory if any finding at all, else Pass; counts by severity; `blocking` = count of high-confidence findings; `truncated` 0), `Verdict::capped(self, n: usize) -> Verdict` (keeps the `n` highest by severity then rule then file then line, sets `truncated`), `Verdict::exit_code(&self) -> i32`.
+- Produces: the enums and structs listed under "Shared types" (all `Serialize`, `Deserialize`, `Clone`, `Debug`, `PartialEq`; enums serialise as lowercase strings), `finding::make_id(rule: &str, rel: &str, anchor: &str) -> String` (16 hex chars), `finding::Verdict::from_findings(findings: Vec<Finding>, duration_ms: u128) -> Verdict` (status Block if any finding has `confidence == High`, Advisory if any finding at all, else Pass; counts by severity; `blocking` = count of high-confidence findings; `truncated` 0), `Verdict::capped(self, n: usize) -> Verdict` (keeps the `n` highest by confidence, then severity, rule, file, line, column, id, sets `truncated`), `Verdict::exit_code(&self) -> i32`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1330,6 +1330,8 @@ impl Verdict {
     }
 }
 ```
+
+Note: the shipped sort key is confidence first, then severity, rule, file, line, column, id, per the controller ruling that a capped verdict must keep the blocking findings.
 
 Add `pub mod finding;` to `crates/core/src/lib.rs`.
 
