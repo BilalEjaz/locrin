@@ -62,6 +62,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_jsx_in_a_javascript_file() {
+        let src = "export function Row({ item }) { return <div className=\"r\">{item}</div>; }\n".to_string();
+        let p = parse_source(Path::new("x/Row.jsx"), "x/Row.jsx", src).unwrap();
+        assert_eq!(p.language, Language::JavaScript);
+        assert!(!p.has_error);
+    }
+
+    #[test]
     fn flags_syntax_errors_without_panicking() {
         let src = "export function broken( { return 1;\n".to_string();
         let p = parse_source(Path::new("x/broken.ts"), "x/broken.ts", src).unwrap();
@@ -71,5 +79,29 @@ mod tests {
     #[test]
     fn unsupported_language_is_none() {
         assert!(parse_source(Path::new("x/a.py"), "x/a.py", "print(1)".to_string()).is_none());
+    }
+
+    #[test]
+    fn parse_file_reads_from_disk_and_skips_unsupported() {
+        let dir = std::env::temp_dir().join(format!(
+            "locrin-parse-file-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ts = dir.join("sum.ts");
+        std::fs::write(&ts, "export const sum = (a: number, b: number): number => a + b;\n").unwrap();
+        let parsed = parse_file(&dir, &ts).unwrap().expect("supported file parses");
+        assert_eq!(parsed.rel, "sum.ts");
+        assert_eq!(parsed.language, Language::TypeScript);
+        assert!(!parsed.has_error);
+
+        // A path that was never written: unsupported extensions return Ok(None)
+        // before the file is read, so a missing file is not an error here.
+        let py = dir.join("script.py");
+        assert!(parse_file(&dir, &py).unwrap().is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

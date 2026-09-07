@@ -21,10 +21,16 @@ impl Language {
         }
     }
 
+    /// JavaScript is parsed with the TSX grammar, not the TypeScript grammar.
+    /// React projects routinely put JSX in plain `.js` and `.jsx` files, and the
+    /// TypeScript grammar rejects JSX, so those files would come back with
+    /// `has_error = true` and be silently skipped by every rule. The TSX grammar
+    /// accepts the same JavaScript constructs plus JSX, and it avoids pulling in a
+    /// third grammar crate.
     pub fn grammar(&self) -> tree_sitter::Language {
         match self {
-            Language::TypeScript | Language::JavaScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Language::Tsx | Language::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
 
