@@ -1,3 +1,6 @@
+pub mod lang;
+pub mod parse;
+
 pub const ENGINE_NAME: &str = "locrin";
 
 #[cfg(test)]
