@@ -10,3 +10,4 @@ placeholders/pypi/dist/
 placeholders/pypi/build/
 placeholders/pypi/*.egg-info/
 placeholders/crates/target/
+.locrin-cache/

@@ -1,0 +1,14 @@
+[package]
+name = "locrin-rules"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "locrin_rules"
+path = "src/lib.rs"
+
+[dependencies]
+locrin-core = { path = "../core" }
+tree-sitter.workspace = true
+globset.workspace = true
