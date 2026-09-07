@@ -2,10 +2,17 @@ pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
 
+use std::collections::HashMap;
+
 use locrin_core::config::Config;
 use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity, Span};
 use locrin_core::parse::ParsedFile;
 use locrin_core::symbols::enclosing_symbol;
+
+/// The in-source suppression marker. Honoured for every rule: a finding whose
+/// line carries this text is dropped in `run_rules`, so rules never have to
+/// implement suppression themselves.
+pub const ALLOW_MARK: &str = "locrin:allow";
 
 /// Everything a rule is allowed to see: the parsed files of this run and the
 /// repository config. Rules never touch the filesystem themselves.
@@ -20,6 +27,15 @@ pub trait Rule {
     fn default_severity(&self) -> Severity;
     fn confidence(&self) -> Confidence;
     fn run(&self, ctx: &RuleContext) -> Vec<Finding>;
+}
+
+/// The files a rule is allowed to look at: every parsed file whose tree came
+/// back without a syntax error. This is the single spec 9 gate. Rules iterate
+/// this instead of `ctx.files`, so a file that failed to parse is exempt from
+/// every rule rather than from whichever rules happened to check `has_error`.
+pub fn clean_files<'a>(ctx: &'a RuleContext) -> impl Iterator<Item = &'a ParsedFile> {
+    let files: &'a [ParsedFile] = ctx.files;
+    files.iter().filter(|f| !f.has_error)
 }
 
 /// The trimmed text of a 1-based line, or `""` when the line is out of range.
@@ -56,9 +72,14 @@ pub fn finding(rule: &dyn Rule, file: &ParsedFile, line: u32, evidence: &str, fi
     }
 }
 
-/// Runs the given rules, skipping any the config disables and applying the
-/// configured severity to every finding a rule produces.
+/// Runs the given rules, skipping any the config disables, dropping any finding
+/// whose line carries the `locrin:allow` marker, and applying the configured
+/// severity to every finding that survives.
 pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> Vec<Finding> {
+    let by_rel: HashMap<&str, &ParsedFile> = ctx.files.iter().map(|f| (f.rel.as_str(), f)).collect();
+    let allowed = |f: &Finding| {
+        by_rel.get(f.file.as_str()).is_some_and(|file| line_text(file, f.span.start_line).contains(ALLOW_MARK))
+    };
     let mut out = Vec::new();
     for rule in rules {
         if !ctx.config.rule_enabled(rule.id()) {
@@ -66,6 +87,9 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> Vec<Finding> {
         }
         let severity = ctx.config.severity_for(rule.id(), rule.default_severity());
         for mut f in rule.run(ctx) {
+            if allowed(&f) {
+                continue;
+            }
             f.severity = severity;
             out.push(f);
         }
@@ -109,7 +133,7 @@ mod tests {
             Confidence::Medium
         }
         fn run(&self, ctx: &RuleContext) -> Vec<Finding> {
-            ctx.files.iter().map(|f| finding(self, f, 1, "hit", "remove it")).collect()
+            clean_files(ctx).map(|f| finding(self, f, 1, "hit", "remove it")).collect()
         }
     }
 
@@ -148,6 +172,30 @@ mod tests {
         assert_eq!(anchor_for(&file, 2), "f");
         assert_eq!(anchor_for(&file, 4), "console.log(2);");
         assert_eq!(line_text(&file, 4), "console.log(2);");
+    }
+
+    #[test]
+    fn a_file_with_a_parse_error_is_exempt_from_every_rule() {
+        let clean = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
+        let broken =
+            parse_source(Path::new("src/b.ts"), "src/b.ts", "export function broken( { return 1;\n".into()).unwrap();
+        assert!(broken.has_error, "the fixture source must not parse cleanly");
+        let files = vec![clean, broken];
+        let config = Config::default();
+        let ctx = RuleContext { files: &files, config: &config };
+        let out = run_rules(&[Box::new(Always)], &ctx);
+        assert_eq!(out.len(), 1, "only the clean file should reach a rule, got {out:?}");
+        assert_eq!(out[0].file, "src/a.ts");
+    }
+
+    #[test]
+    fn allow_marker_suppresses_a_finding_from_any_rule() {
+        let file =
+            parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1; // locrin:allow\n".into()).unwrap();
+        let files = vec![file];
+        let config = Config::default();
+        let ctx = RuleContext { files: &files, config: &config };
+        assert!(run_rules(&[Box::new(Always)], &ctx).is_empty());
     }
 
     #[test]

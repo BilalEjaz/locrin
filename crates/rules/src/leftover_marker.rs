@@ -3,7 +3,7 @@
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
-use crate::{finding, Rule, RuleContext};
+use crate::{clean_files, finding, Rule, RuleContext};
 
 pub struct LeftoverMarker;
 
@@ -77,7 +77,7 @@ impl Rule for LeftoverMarker {
 
     fn run(&self, ctx: &RuleContext) -> Vec<Finding> {
         let mut out = Vec::new();
-        for file in ctx.files {
+        for file in clean_files(ctx) {
             let mut lines = Vec::new();
             comment_lines(file.tree.root_node(), &file.source, &mut lines);
             for (line, text) in lines {

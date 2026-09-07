@@ -4,3 +4,4 @@ export function f(): number {
 }
 // see https://example.com/todo for context, TODO tracked there
 // todo in lowercase is prose, not a marker
+// TODO drop the shim once the flag ships // locrin:allow

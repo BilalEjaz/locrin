@@ -1,17 +1,19 @@
 //! Flags console.log / console.debug / console.trace / console.dir / console.table
 //! calls and `debugger` statements. Purely syntactic: a locally shadowed `console`
 //! is still flagged, because a local variable called `console` is itself a leftover.
+//! Indirect forms are out of scope by design: `console['log'](...)`,
+//! `window.console.log(...)` and `globalThis.console.log(...)` are not flagged,
+//! because matching them would cost more false positives than the miss is worth.
 
 use globset::{Glob, GlobSetBuilder};
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
-use crate::{finding, line_text, Rule, RuleContext};
+use crate::{clean_files, finding, line_text, Rule, RuleContext};
 
 pub struct LeftoverDebug;
 
 const FLAGGED: &[&str] = &["log", "debug", "trace", "dir", "table"];
-const ALLOW_MARK: &str = "locrin:allow";
 
 fn is_debug_call(node: Node, src: &str) -> bool {
     if node.kind() != "call_expression" {
@@ -60,8 +62,8 @@ impl Rule for LeftoverDebug {
         }
         let allowed = b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap());
         let mut out = Vec::new();
-        for file in ctx.files {
-            if file.has_error || allowed.is_match(&file.rel) {
+        for file in clean_files(ctx) {
+            if allowed.is_match(&file.rel) {
                 continue;
             }
             let mut hits = Vec::new();
@@ -70,9 +72,6 @@ impl Rule for LeftoverDebug {
             hits.dedup();
             for line in hits {
                 let text = line_text(file, line);
-                if text.contains(ALLOW_MARK) {
-                    continue;
-                }
                 out.push(finding(
                     self,
                     file,
