@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Ordering matters: `Verdict::from_findings` sorts ascending, so the most
-/// severe variant must come first.
+/// Ordering matters: `Verdict::from_findings` sorts ascending on this as its
+/// second key, so the most severe variant must come first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -10,9 +10,9 @@ pub enum Severity {
     Low,
 }
 
-/// Ordering matters, same as `Severity`: `Verdict::from_findings` sorts
-/// ascending and confidence is the gate, so `High` must come first and survive
-/// any later cap.
+/// Ordering matters, same as `Severity`, and this is the *primary* sort key:
+/// `Verdict::from_findings` sorts ascending and confidence is the gate, so
+/// `High` must come first and survive any later cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
@@ -89,15 +89,20 @@ pub fn make_id(rule: &str, rel: &str, anchor: &str) -> String {
 }
 
 impl Verdict {
+    /// Sorts by confidence (High first), then severity (High first), then rule,
+    /// file, start line, start column, id.
+    ///
+    /// Confidence ranks *above* severity because confidence alone decides
+    /// `blocking` and therefore the status: a `Low`/High-confidence finding
+    /// blocks the build, so it must not fall off a later `capped(n)` behind
+    /// higher-severity advisories that block nothing. Severity then orders
+    /// within a confidence band, and the rest of the chain is pure tie-breaking,
+    /// so the order is total and reproducible run to run.
     pub fn from_findings(mut findings: Vec<Finding>, duration_ms: u128) -> Verdict {
-        // Confidence ranks second because `blocking` (and therefore the status)
-        // is derived from it: any later `capped(n)` must keep the findings the
-        // verdict is blocking on. The rest of the chain is pure tie-breaking, so
-        // the order is total and reproducible run to run.
         findings.sort_by(|a, b| {
-            a.severity
-                .cmp(&b.severity)
-                .then_with(|| a.confidence.cmp(&b.confidence))
+            a.confidence
+                .cmp(&b.confidence)
+                .then_with(|| a.severity.cmp(&b.severity))
                 .then_with(|| a.rule.cmp(&b.rule))
                 .then_with(|| a.file.cmp(&b.file))
                 .then_with(|| a.span.start_line.cmp(&b.span.start_line))
@@ -204,12 +209,15 @@ mod tests {
         for i in 0..10 {
             fs.push(f("a", Severity::High, Confidence::Medium, i));
         }
+        // Low severity, but High confidence: confidence alone decides blocking,
+        // so these two must outrank ten High-severity advisories under the cap.
         for i in 0..2 {
-            fs.push(f("z", Severity::High, Confidence::High, i));
+            fs.push(f("z", Severity::Low, Confidence::High, i));
         }
         let v = Verdict::from_findings(fs, 1).capped(10);
         assert_eq!(v.findings.len(), 10);
         assert_eq!(v.status, Status::Block);
+        assert_eq!(v.blocking, 2);
         assert_eq!(v.findings[0].confidence, Confidence::High);
         assert_eq!(v.findings[1].confidence, Confidence::High);
         assert_eq!(
