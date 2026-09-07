@@ -49,6 +49,31 @@ pub fn cache_path(repo_root: &Path) -> PathBuf {
     base.join(&key[..16]).join("index.db")
 }
 
+/// A sibling of the database file, such as the write-ahead log.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Delete a stale database and its write-ahead log siblings.
+///
+/// A failure here must surface: silently keeping a mismatched database and
+/// stamping it with the current schema version would hide the mismatch forever.
+fn remove_database_files(path: &Path) -> anyhow::Result<()> {
+    for target in [path.to_path_buf(), sibling(path, "-wal"), sibling(path, "-shm")] {
+        match std::fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("removing stale index file {}", target.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct Index {
     conn: Connection,
 }
@@ -63,7 +88,7 @@ impl Index {
         let mut ix = Index { conn };
         if !ix.schema_matches()? {
             drop(ix);
-            let _ = std::fs::remove_file(&path);
+            remove_database_files(&path)?;
             let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
             ix = Index { conn };
         }
@@ -192,10 +217,79 @@ mod tests {
 
     #[test]
     fn cache_path_is_outside_repo_and_keyed_by_root() {
-        std::env::remove_var("LOCRIN_CACHE_DIR");
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = cache_path(std::path::Path::new("C:/repo/one"));
         let q = cache_path(std::path::Path::new("C:/repo/two"));
         assert_ne!(p, q);
         assert!(p.ends_with("index.db"));
+        assert!(!p.starts_with("C:/repo/one"), "the cache must not live inside the repository: {p:?}");
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn unique_cache_dir(tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        std::env::temp_dir().join(format!("locrin-test-{tag}-{}-{nanos}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn schema_mismatch_rebuilds_the_database() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_cache_dir("mismatch");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("LOCRIN_CACHE_DIR", &dir);
+        let repo = Path::new("C:/repo/mismatch");
+
+        let mut ix = Index::open(repo).unwrap();
+        ix.upsert_file("marker.ts", "typescript", "h1", "ok").unwrap();
+        ix.conn().execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'", []).unwrap();
+        drop(ix);
+
+        let ix = Index::open(repo).unwrap();
+        let version: String = ix
+            .conn()
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(
+            ix.file_hash("marker.ts").unwrap().is_none(),
+            "a schema mismatch must rebuild the database, not restamp the old one"
+        );
+        drop(ix);
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_mismatch_reports_a_rebuild_that_cannot_delete() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_cache_dir("locked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("LOCRIN_CACHE_DIR", &dir);
+        let repo = Path::new("C:/repo/locked");
+        let path = cache_path(repo);
+
+        let mut ix = Index::open(repo).unwrap();
+        ix.upsert_file("marker.ts", "typescript", "h1", "ok").unwrap();
+        ix.conn().execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'", []).unwrap();
+        drop(ix);
+
+        // Stand in for a second process holding the database: Windows refuses the
+        // delete while SQLite has the file open.
+        let holder = Connection::open(&path).unwrap();
+        let err = match Index::open(repo) {
+            Ok(_) => panic!("open must fail while the stale database cannot be removed"),
+            Err(e) => e,
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("index.db"), "the error must name the file it could not remove: {text}");
+        drop(holder);
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
