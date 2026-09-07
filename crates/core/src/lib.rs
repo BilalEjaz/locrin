@@ -1,3 +1,4 @@
+pub mod index;
 pub mod lang;
 pub mod parse;
 pub mod walk;
