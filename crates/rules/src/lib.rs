@@ -1,3 +1,5 @@
+pub mod leftover_debug;
+
 use locrin_core::config::Config;
 use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity, Span};
 use locrin_core::parse::ParsedFile;
@@ -69,9 +71,9 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> Vec<Finding> {
     out
 }
 
-/// The registry. Empty until the first rule is registered.
+/// The registry: every rule the engine ships, in the order they are declared.
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
-    vec![]
+    vec![Box::new(leftover_debug::LeftoverDebug)]
 }
 
 pub fn run_all(ctx: &RuleContext) -> Vec<Finding> {
@@ -143,11 +145,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_empty_until_a_rule_is_added() {
+    fn registry_lists_every_shipped_rule() {
         let files: Vec<locrin_core::parse::ParsedFile> = vec![];
         let config = Config::default();
         let ctx = RuleContext { files: &files, config: &config };
-        assert!(all_rules().is_empty());
-        assert!(run_all(&ctx).is_empty());
+        let ids: Vec<&str> = all_rules().iter().map(|r| r.id()).collect();
+        assert_eq!(ids, vec!["leftover-debug"]);
+        assert!(run_all(&ctx).is_empty(), "no files means no findings");
     }
 }
