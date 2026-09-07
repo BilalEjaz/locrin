@@ -60,7 +60,7 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 /// The absolute form of `root`, falling back to the caller's path if it cannot be resolved.
-fn canonical_root(root: &Path) -> PathBuf {
+pub fn canonical_root(root: &Path) -> PathBuf {
     match std::fs::canonicalize(root) {
         Ok(p) => strip_verbatim_prefix(p),
         Err(_) => root.to_path_buf(),
