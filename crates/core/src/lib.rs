@@ -1,5 +1,6 @@
 pub mod lang;
 pub mod parse;
+pub mod walk;
 
 pub const ENGINE_NAME: &str = "locrin";
 
