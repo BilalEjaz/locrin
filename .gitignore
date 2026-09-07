@@ -11,3 +11,4 @@ placeholders/pypi/build/
 placeholders/pypi/*.egg-info/
 placeholders/crates/target/
 .locrin-cache/
+locrin-baseline.json.tmp

@@ -6,6 +6,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub const SCHEMA_VERSION: &str = "1";
 
+/// How long a statement waits for another process holding the same index before
+/// it gives up.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
   rel TEXT PRIMARY KEY,
@@ -79,6 +83,32 @@ fn remove_database_files(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether a failure to read the schema means the database is unusable and has
+/// to be thrown away.
+///
+/// Only the two codes that say the bytes on disk are not a readable database
+/// qualify. A busy or locked database is another process holding the same cache,
+/// and an I/O error is the disk; deleting a shared index over either would turn a
+/// transient failure into data loss for every run that shares it.
+fn should_rebuild(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if matches!(e.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+    )
+}
+
+/// Open the index database with the busy timeout already in place.
+///
+/// The timeout has to be set before the first read, not in `init`: the schema
+/// check is itself a read, and without a timeout a concurrent writer turns it
+/// into an immediate `SQLITE_BUSY`.
+fn open_with_timeout(path: &Path) -> anyhow::Result<Connection> {
+    let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+    conn.busy_timeout(BUSY_TIMEOUT).with_context(|| format!("setting the busy timeout on {}", path.display()))?;
+    Ok(conn)
+}
+
 pub struct Index {
     conn: Connection,
 }
@@ -89,23 +119,33 @@ impl Index {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        let conn = open_with_timeout(&path)?;
         let mut ix = Index { conn };
         // A file that is not a database at all fails the same way a stale schema
         // does: it is a cache the engine cannot read, and spec 9 says rebuild it
-        // and log once rather than fail the run over a disposable file.
+        // and log once rather than fail the run over a disposable file. Anything
+        // else the read can fail with is a live problem, not a broken cache, and
+        // must propagate: the database is only ever deleted for the two codes
+        // `should_rebuild` names.
         let rebuild = match ix.schema_matches() {
-            Ok(matches) => !matches,
-            Err(_) => {
+            Ok(true) => false,
+            Ok(false) => {
+                eprintln!("warning: rebuilding index at {} (schema changed)", path.display());
+                true
+            }
+            Err(e) if should_rebuild(&e) => {
                 eprintln!("warning: rebuilding corrupt index at {}", path.display());
                 true
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("reading the index schema at {}", path.display()));
             }
         };
         if rebuild {
             drop(ix);
             remove_database_files(&path)?;
-            let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
-            ix = Index { conn };
+            ix = Index { conn: open_with_timeout(&path)? };
         }
         ix.init()?;
         Ok(ix)
@@ -117,7 +157,7 @@ impl Index {
         Ok(ix)
     }
 
-    fn schema_matches(&mut self) -> anyhow::Result<bool> {
+    fn schema_matches(&mut self) -> rusqlite::Result<bool> {
         let has_meta: bool = self
             .conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='meta'", [], |r| {
@@ -135,8 +175,10 @@ impl Index {
     fn init(&mut self) -> anyhow::Result<()> {
         // Two runs against one repository (an editor hook and a terminal, say)
         // share a database. Waiting briefly for the other writer is the right
-        // answer; failing the check with "database is locked" is not.
-        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // answer; failing the check with "database is locked" is not. `open` has
+        // already set this on the connection it hands over; the call is repeated
+        // here for the in-memory connection, which never goes through `open`.
+        self.conn.busy_timeout(BUSY_TIMEOUT)?;
         self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         self.conn.execute_batch(SCHEMA)?;
         self.conn.execute(
@@ -198,6 +240,20 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sqlite_failure(code: rusqlite::ErrorCode, extended_code: i32) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error { code, extended_code }, None)
+    }
+
+    #[test]
+    fn only_corruption_rebuilds_the_database() {
+        assert!(
+            !should_rebuild(&sqlite_failure(rusqlite::ErrorCode::DatabaseBusy, 5)),
+            "a busy database is another process, not corruption: rebuilding would destroy a shared index"
+        );
+        assert!(should_rebuild(&sqlite_failure(rusqlite::ErrorCode::NotADatabase, 26)));
+        assert!(should_rebuild(&sqlite_failure(rusqlite::ErrorCode::DatabaseCorrupt, 11)));
+    }
 
     #[test]
     fn hash_is_stable_and_hex() {
