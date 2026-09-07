@@ -1,1 +1,2 @@
-pub use locrin_core;
+pub mod agent;
+pub mod terminal;
