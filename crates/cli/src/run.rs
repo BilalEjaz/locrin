@@ -9,7 +9,7 @@ use locrin_core::index::{content_hash, Index};
 use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
 use locrin_core::symbols;
-use locrin_core::walk::{canonical_root, source_files, WalkOptions};
+use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
 use locrin_rules::{run_all, RuleContext};
 
 pub struct Options {
@@ -24,20 +24,42 @@ struct Indexed {
     changed: usize,
 }
 
+/// Resolves the files a run should consider.
+///
+/// With no explicit paths this is the whole repository. With explicit paths it
+/// is still the whole repository, narrowed afterwards: the config's excludes are
+/// repo-relative globs, so the walk has to start at the repository root or
+/// `src/dirty.ts` would never match a walk rooted at `src`. Named directories
+/// are therefore a filter over the repository walk, not a root of their own.
+///
+/// Explicitly named files bypass the excludes. Naming a file is an instruction,
+/// not a suggestion, and silently checking nothing would be the worse answer.
 fn candidate_files(root: &Path, paths: &[PathBuf], config: &Config) -> anyhow::Result<Vec<PathBuf>> {
+    let opts = WalkOptions { excludes: config.excludes.clone() };
     if paths.is_empty() {
-        let opts = WalkOptions { excludes: config.excludes.clone() };
         return source_files(root, &opts);
     }
+    let mut dirs = Vec::new();
     let mut out = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() { p.clone() } else { root.join(p) };
-        if abs.is_dir() {
-            let opts = WalkOptions { excludes: config.excludes.clone() };
-            out.extend(source_files(&abs, &opts)?);
-        } else if Language::from_path(&abs).is_some() {
-            out.push(abs);
+        // Canonicalise before anything else: `src/../src/dirty.ts` and
+        // `src/dirty.ts` are one file, and only one of them may reach the index
+        // or a finding id.
+        let canon = canonical_path(&abs)
+            .with_context(|| format!("no such path: {}", p.display()))?;
+        if !canon.starts_with(root) {
+            anyhow::bail!("path is outside the repository root: {}", p.display());
         }
+        if canon.is_dir() {
+            dirs.push(canon);
+        } else if Language::from_path(&canon).is_some() {
+            out.push(canon);
+        }
+    }
+    if !dirs.is_empty() {
+        let walked = source_files(root, &opts)?;
+        out.extend(walked.into_iter().filter(|f| dirs.iter().any(|d| f.starts_with(d))));
     }
     out.sort();
     out.dedup();
@@ -81,7 +103,7 @@ fn index_files(
         let Some(parsed) = parse_source(path, &rel, source) else { continue };
         let status = if parsed.has_error { "error" } else { "ok" };
         if parsed.has_error {
-            eprintln!("warning: parse errors in {rel}; skipped");
+            eprintln!("warning: parse errors in {rel}; excluded from rules");
         }
         if is_changed {
             changed += 1;
@@ -101,8 +123,10 @@ fn full_findings(root: &Path, opts: &Options) -> anyhow::Result<(Vec<Finding>, C
     let parse_all = !opts.changed_only;
     let indexed = index_files(root, &candidates, parse_all, &mut ix)?;
     // Only a whole-repository pass knows the full set of files that still
-    // exist, so only a whole-repository pass may delete rows.
-    if opts.paths.is_empty() && !opts.changed_only {
+    // exist, so only a whole-repository pass may delete rows. `--changed`
+    // narrows which files are parsed, not which files were walked, so its
+    // candidate list is still the whole repository and still prunes.
+    if opts.paths.is_empty() {
         let present: Vec<String> = candidates.iter().map(|p| rel_path(root, p)).collect();
         ix.remove_missing(&present)?;
     }

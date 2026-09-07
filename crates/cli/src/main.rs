@@ -20,7 +20,8 @@ enum Cmd {
     /// Check files (all by default) and print a verdict
     Check {
         paths: Vec<PathBuf>,
-        /// Only files whose content changed since the last index
+        /// Only files whose content changed since the last index. Files indexed
+        /// by `scan` but never checked are not re-evaluated; run a full check first.
         #[arg(long)]
         changed: bool,
         /// Compact JSON for agents (capped at ten findings)
@@ -88,6 +89,10 @@ fn real_main() -> anyhow::Result<i32> {
 }
 
 fn main() -> ExitCode {
+    // The default hook prints its own multi-line panic report before the
+    // unwind reaches us, so a caught panic would speak twice. Silence it and
+    // let the arm below be the single line an operator reads.
+    std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(real_main);
     match result {
         Ok(Ok(code)) => ExitCode::from(code as u8),

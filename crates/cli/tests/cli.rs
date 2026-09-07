@@ -90,6 +90,42 @@ fn explicit_path_limits_scope() {
     locrin(dir.path()).args(["check", "src/clean.ts"]).assert().code(0);
 }
 
+/// A directory target is a scope filter, not a new root: the config's
+/// repo-relative excludes still decide which files inside it are eligible.
+#[test]
+fn config_excludes_apply_to_directory_targets() {
+    let dir = copy_fixture();
+    std::fs::write(dir.path().join("locrin.toml"), "excludes = [\"src/dirty.ts\"]\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "src"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("PASS  0 finding(s)"), "{text}");
+}
+
+/// The same file named two ways is one file: an unnormalised spelling must not
+/// mint a second identity for the finding or a second row in the index.
+#[test]
+fn explicit_path_is_canonicalised() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let full: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    let out = locrin(dir.path()).args(["check", "src/../src/dirty.ts", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["findings"][0]["file"], "src/dirty.ts");
+    assert_eq!(v["findings"][0]["id"], full["findings"][0]["id"]);
+}
+
+#[test]
+fn unknown_explicit_path_exits_two() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "src/typo.ts"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.starts_with("error:"), "{err}");
+    assert!(err.contains("typo.ts"), "{err}");
+}
+
 #[test]
 fn baseline_accept_by_id() {
     let dir = copy_fixture();

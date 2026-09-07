@@ -59,12 +59,21 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
 }
 
+/// The absolute, symlink-resolved form of `path`, spelled the way the walker
+/// spells the paths it yields.
+///
+/// Errors when the path cannot be resolved, which on every supported platform
+/// means it does not exist. Callers that must compare a caller-supplied path
+/// against walked paths need this rather than [`canonical_root`]'s silent
+/// fallback: an unresolved path that is quietly kept as typed would compare
+/// unequal to the same file's walked spelling.
+pub fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(strip_verbatim_prefix)
+}
+
 /// The absolute form of `root`, falling back to the caller's path if it cannot be resolved.
 pub fn canonical_root(root: &Path) -> PathBuf {
-    match std::fs::canonicalize(root) {
-        Ok(p) => strip_verbatim_prefix(p),
-        Err(_) => root.to_path_buf(),
-    }
+    canonical_path(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// Walk `root` and return every supported source file, sorted, as absolute paths.
