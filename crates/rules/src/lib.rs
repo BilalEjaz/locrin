@@ -1,3 +1,4 @@
+pub mod dead_export;
 pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
@@ -139,6 +140,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(leftover_marker::LeftoverMarker),
         Box::new(unused_import::UnusedImport),
         Box::new(unreachable::Unreachable),
+        Box::new(dead_export::DeadExport),
     ]
 }
 
@@ -342,10 +344,17 @@ mod tests {
         let ids: Vec<&str> = all_rules().iter().map(|r| r.id()).collect();
         assert_eq!(
             ids,
-            vec!["leftover-debug", "leftover-commented-code", "leftover-agent-marker", "unused-import", "unreachable"]
+            vec![
+                "leftover-debug",
+                "leftover-commented-code",
+                "leftover-agent-marker",
+                "unused-import",
+                "unreachable",
+                "dead-export"
+            ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 5, "every rule shipped so far is a file rule");
-        assert!(graph_rules().is_empty(), "no graph rule ships yet");
+        assert_eq!(file_rules().len(), 5, "the five rules shipped before the graph rules");
+        assert_eq!(graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(), vec!["dead-export"]);
     }
 }
