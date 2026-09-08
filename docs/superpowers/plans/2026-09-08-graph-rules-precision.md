@@ -423,3 +423,27 @@ was changed there, because all three targets pass without it and the plan's
 instruction was not to parallelise the walk unless the warm target needed it.
 It is worth revisiting: the warm check clears its target by about 45 ms, which
 is a real but not generous margin.
+
+### After the Task 15c review fixes
+
+The review of Task 15c found four Important issues (the stat taken on the wrong
+side of the read, a deferred `BEGIN` that turns a concurrent run into a failure,
+a touched-but-identical file never getting its stat refreshed, and a
+second-granularity modification time). All four are fixed, so the numbers above
+no longer describe the code that ships. Same command, same FastLift checkout,
+same machine, three runs back to back:
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 2500 ms | 2474 ms | 2549 ms | PASS |
+| warm single-file check | under 300 ms | 281 ms | 268 ms | 272 ms | PASS |
+| startup (`--help`) | under 50 ms | 31 ms | 31 ms | 30 ms | PASS |
+
+The warm check is the one to watch. Two earlier attempts at these runs measured
+335 ms and 302 ms, both failures, so the same benchmark was measured four times
+at this commit and four times at the commit before the fixes, interleaved to
+cancel drift: 270 / 254 / 261 / 258 ms with the fixes against 285 / 289 / 292 /
+263 ms without them. The fixes are not what makes this benchmark flake; a busy
+machine is. The margin is about 30 ms and the walk is still 106 ms of the total,
+so `WalkBuilder::build_parallel` remains the lever if the margin is judged too
+thin.
