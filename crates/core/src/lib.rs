@@ -1,5 +1,6 @@
 pub mod baseline;
 pub mod config;
+pub mod edges;
 pub mod finding;
 pub mod imports;
 pub mod index;
