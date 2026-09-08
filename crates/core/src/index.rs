@@ -302,6 +302,9 @@ impl Index {
             for (table, column) in PER_FILE_TABLES {
                 tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), params![rel])?;
             }
+            // Edges from files that stayed still point here. The target is gone, so
+            // the edge is no longer resolved: it keeps its specifier and says so.
+            tx.execute("UPDATE edges SET to_rel = NULL, resolution = 'unresolved' WHERE to_rel = ?1", params![rel])?;
             removed += 1;
         }
         tx.commit()?;
@@ -410,6 +413,32 @@ mod tests {
             let n: i64 = ix.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
             assert_eq!(n, 0, "{table} still has rows for a removed file");
         }
+    }
+
+    /// The other half of the cascade: an edge from a file that stayed into a file
+    /// that left must stop claiming it resolved, or a graph rule would follow it
+    /// to a node that is no longer in the index.
+    #[test]
+    fn remove_missing_unresolves_edges_into_a_departed_file() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file("a.ts", "typescript", "1", "ok").unwrap();
+        ix.upsert_file("b.ts", "typescript", "1", "ok").unwrap();
+        ix.conn()
+            .execute(
+                "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
+                 VALUES ('a.ts','b.ts','./b','x','import','resolved',1)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(ix.remove_missing(&["a.ts".to_string()]).unwrap(), 1);
+        let (to_rel, resolution): (Option<String>, String) = ix
+            .conn()
+            .query_row("SELECT to_rel, resolution FROM edges WHERE from_rel = 'a.ts'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(to_rel, None, "the edge must stop pointing at a file that left the repository");
+        assert_eq!(resolution, "unresolved");
     }
 
     #[test]
