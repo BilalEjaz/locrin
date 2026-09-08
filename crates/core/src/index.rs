@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 /// How long a statement waits for another process holding the same index before
 /// it gives up.
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS symbols (
   rel TEXT NOT NULL,
   kind TEXT NOT NULL,
   name TEXT NOT NULL,
+  export_name TEXT,
   start_line INTEGER NOT NULL,
   start_col INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
@@ -31,8 +32,39 @@ CREATE TABLE IF NOT EXISTS symbols (
 );
 CREATE INDEX IF NOT EXISTS symbols_rel ON symbols(rel);
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
+CREATE INDEX IF NOT EXISTS symbols_export ON symbols(export_name);
+CREATE TABLE IF NOT EXISTS edges (
+  id INTEGER PRIMARY KEY,
+  from_rel TEXT NOT NULL,
+  to_rel TEXT,
+  specifier TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  resolution TEXT NOT NULL,
+  line INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS edges_from ON edges(from_rel);
+CREATE INDEX IF NOT EXISTS edges_to ON edges(to_rel);
+CREATE TABLE IF NOT EXISTS allow_lines (
+  rel TEXT NOT NULL,
+  line INTEGER NOT NULL,
+  PRIMARY KEY (rel, line)
+);
+CREATE TABLE IF NOT EXISTS findings_cache (
+  rel TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  findings TEXT NOT NULL,
+  PRIMARY KEY (rel, rule)
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
+
+/// Every table that holds rows keyed by a file's repo-relative path. `remove_missing`
+/// walks this list so a file that leaves the repository leaves every table.
+const PER_FILE_TABLES: &[(&str, &str)] =
+    &[("symbols", "rel"), ("edges", "from_rel"), ("allow_lines", "rel"), ("findings_cache", "rel"), ("files", "rel")];
 
 pub fn content_hash(source: &str) -> String {
     blake3::hash(source.as_bytes()).to_hex().to_string()
@@ -220,6 +252,45 @@ impl Index {
         Ok(self.file_hash(rel)?.as_deref() != Some(content_hash))
     }
 
+    pub fn parse_status(&self, rel: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT parse_status FROM files WHERE rel = ?1", params![rel], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Every indexed file, sorted, so callers iterate in a reproducible order.
+    pub fn all_files(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT rel FROM files ORDER BY rel")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records which lines of `rel` carry the allow marker, replacing whatever was
+    /// stored before. The rule runner consults this for findings on files it did not
+    /// parse this run, so suppression works for graph rules too.
+    pub fn replace_allow_lines(&mut self, rel: &str, lines: &[u32]) -> anyhow::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM allow_lines WHERE rel = ?1", params![rel])?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO allow_lines(rel, line) VALUES (?1, ?2)")?;
+            for line in lines {
+                stmt.execute(params![rel, line])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn is_allowed(&self, rel: &str, line: u32) -> anyhow::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM allow_lines WHERE rel = ?1 AND line = ?2",
+            params![rel, line],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn remove_missing(&mut self, present: &[String]) -> anyhow::Result<usize> {
         let mut stmt = self.conn.prepare("SELECT rel FROM files")?;
         let existing: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
@@ -228,8 +299,9 @@ impl Index {
         let mut removed = 0;
         let tx = self.conn.transaction()?;
         for rel in existing.iter().filter(|r| !keep.contains(r.as_str())) {
-            tx.execute("DELETE FROM symbols WHERE rel = ?1", params![rel])?;
-            tx.execute("DELETE FROM files WHERE rel = ?1", params![rel])?;
+            for (table, column) in PER_FILE_TABLES {
+                tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), params![rel])?;
+            }
             removed += 1;
         }
         tx.commit()?;
@@ -284,6 +356,60 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(ix.file_hash("b.ts").unwrap().is_none());
         assert!(ix.file_hash("a.ts").unwrap().is_some());
+    }
+
+    #[test]
+    fn allow_lines_round_trip_and_replace() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.replace_allow_lines("src/a.ts", &[3, 9]).unwrap();
+        assert!(ix.is_allowed("src/a.ts", 3).unwrap());
+        assert!(!ix.is_allowed("src/a.ts", 4).unwrap());
+        assert!(!ix.is_allowed("src/b.ts", 3).unwrap());
+        ix.replace_allow_lines("src/a.ts", &[4]).unwrap();
+        assert!(!ix.is_allowed("src/a.ts", 3).unwrap(), "replace must drop the old lines");
+        assert!(ix.is_allowed("src/a.ts", 4).unwrap());
+    }
+
+    #[test]
+    fn parse_status_and_file_list() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert_eq!(ix.parse_status("src/a.ts").unwrap(), None);
+        ix.upsert_file("src/b.ts", "typescript", "h", "ok").unwrap();
+        ix.upsert_file("src/a.ts", "typescript", "h", "error").unwrap();
+        assert_eq!(ix.parse_status("src/a.ts").unwrap().as_deref(), Some("error"));
+        assert_eq!(ix.all_files().unwrap(), vec!["src/a.ts".to_string(), "src/b.ts".to_string()]);
+    }
+
+    /// A file that left the repository must leave every table, or a graph rule
+    /// would keep seeing edges from a file that no longer exists.
+    #[test]
+    fn remove_missing_cascades_to_every_table() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file("a.ts", "typescript", "1", "ok").unwrap();
+        ix.replace_allow_lines("a.ts", &[1]).unwrap();
+        let c = ix.conn();
+        c.execute(
+            "INSERT INTO symbols(rel, kind, name, start_line, start_col, end_line, end_col, exported)
+             VALUES ('a.ts','function','f',1,0,1,1,0)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
+             VALUES ('a.ts','b.ts','./b','x','import','resolved',1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO findings_cache(rel, rule, content_hash, config_hash, findings) VALUES ('a.ts','r','1','c','[]')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(ix.remove_missing(&[]).unwrap(), 1);
+        for table in ["files", "symbols", "edges", "allow_lines", "findings_cache"] {
+            let n: i64 = ix.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "{table} still has rows for a removed file");
+        }
     }
 
     #[test]
