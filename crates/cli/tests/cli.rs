@@ -302,3 +302,32 @@ fn a_new_orphan_file_is_advisory_not_blocking() {
     assert_eq!(v["findings"][0]["rule"], "dead-file");
     assert_eq!(v["findings"][0]["file"], "src/orphan.ts");
 }
+
+/// The stored content hash for one file, read straight from the index.
+fn stored_hash(dir: &std::path::Path, rel: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    let conn = rusqlite::Connection::open(index_db(dir)).unwrap();
+    conn.query_row("SELECT content_hash FROM files WHERE rel = ?1", [rel], |r| r.get(0)).optional().unwrap()
+}
+
+/// A narrowed run skips a file whose size and modification time still match the
+/// ones it recorded, but the stat is only a shortcut: when it disagrees the run
+/// still reads and hashes the file. So a file that was touched without being
+/// edited is reported as unchanged, exactly as it was before the shortcut
+/// existed, and its stored hash is left alone.
+#[test]
+fn a_touched_but_unedited_file_is_still_unchanged() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("scan").assert().success();
+    let before = stored_hash(dir.path(), "src/clean.ts").expect("scan indexes clean.ts");
+
+    let path = dir.path().join("src/clean.ts");
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)).unwrap();
+    drop(file);
+
+    let out = locrin(dir.path()).arg("scan").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("0 changed"), "the hash has to overrule the stat, but the run said: {text}");
+    assert_eq!(stored_hash(dir.path(), "src/clean.ts").as_deref(), Some(before.as_str()));
+}

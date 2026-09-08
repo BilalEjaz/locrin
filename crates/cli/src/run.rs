@@ -7,7 +7,7 @@ use locrin_core::baseline::Baseline;
 use locrin_core::config::Config;
 use locrin_core::entry::EntryPoints;
 use locrin_core::finding::{Finding, Verdict};
-use locrin_core::index::{content_hash, Index};
+use locrin_core::index::{content_hash, file_stat, Index};
 use locrin_core::indexer;
 use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
@@ -107,6 +107,18 @@ fn index_files(
     for path in candidates {
         let rel = rel_path(root, path);
         present.push(rel.clone());
+        let in_scope = scope.is_some_and(|s| s.contains(&rel));
+        // A narrowed run reads a file only to find out whether it changed, and
+        // for almost every file the answer is no. Size and modification time
+        // answer that without opening the file, which is what keeps a
+        // single-file check from reading the whole repository. The stat may only
+        // say "certainly unchanged": anything else falls through to the read and
+        // the content hash below, so a file touched without being edited is
+        // still recognised as unchanged.
+        let (size, mtime) = file_stat(path);
+        if !parse_all && !in_scope && ix.unchanged_by_stat(&rel, size, mtime)? {
+            continue;
+        }
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let source = match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -117,7 +129,6 @@ fn index_files(
         };
         let hash = content_hash(&source);
         let is_changed = ix.changed(&rel, &hash)?;
-        let in_scope = scope.is_some_and(|s| s.contains(&rel));
         if !is_changed && !parse_all && !in_scope {
             continue;
         }

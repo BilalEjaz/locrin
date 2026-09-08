@@ -28,6 +28,11 @@ fn file_imports(file: &ParsedFile) -> Vec<imports::Import> {
 /// Records `file` under `hash`. The `files` row is written last on purpose: it
 /// carries the content hash that later runs compare against, so anything that
 /// fails before it leaves the file looking stale and it is redone next run.
+///
+/// That row also carries the file's size and modification time, which is what
+/// lets a later run skip reading the file at all. A path that cannot be stat'ed
+/// records zeroes, and a zero never matches, so such a file is simply always
+/// read and hashed.
 pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver) -> anyhow::Result<()> {
     let syms = symbols::extract(file);
     symbols::store(ix, file, &syms)?;
@@ -37,7 +42,8 @@ pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver
         file.source.lines().enumerate().filter(|(_, l)| l.contains(ALLOW_MARK)).map(|(i, _)| i as u32 + 1).collect();
     ix.replace_allow_lines(&file.rel, &allow)?;
     let status = if file.has_error { "error" } else { "ok" };
-    ix.upsert_file(&file.rel, file.language.as_str(), hash, status)
+    let (size, mtime) = crate::index::file_stat(&file.path);
+    ix.upsert_file_stat(&file.rel, file.language.as_str(), hash, status, size, mtime)
 }
 
 #[cfg(test)]

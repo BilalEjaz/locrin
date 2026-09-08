@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 /// How long a statement waits for another process holding the same index before
 /// it gives up.
@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS files (
   language TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   parse_status TEXT NOT NULL,
-  indexed_at INTEGER NOT NULL
+  indexed_at INTEGER NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  mtime INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS symbols (
   id INTEGER PRIMARY KEY,
@@ -68,6 +70,18 @@ const PER_FILE_TABLES: &[(&str, &str)] =
 
 pub fn content_hash(source: &str) -> String {
     blake3::hash(source.as_bytes()).to_hex().to_string()
+}
+
+/// The size and modification time a stat-based change check compares against.
+///
+/// Zero for either value means the filesystem did not answer, which
+/// [`Index::unchanged_by_stat`] treats as "no answer" rather than as a match, so
+/// a platform that cannot supply one simply never takes the shortcut.
+pub fn file_stat(path: &Path) -> (i64, i64) {
+    let Ok(meta) = std::fs::metadata(path) else { return (0, 0) };
+    let mtime =
+        meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+    (meta.len() as i64, mtime)
 }
 
 /// Where the index database for `repo_root` lives.
@@ -284,6 +298,11 @@ impl Index {
         Ok(())
     }
 
+    /// Records the file row, without any stat for a later run to compare against.
+    ///
+    /// A row written this way is never matched by [`Index::unchanged_by_stat`],
+    /// so a run that reads it falls back to the content hash. Callers that hold
+    /// the file's size and modification time use [`Index::upsert_file_stat`].
     pub fn upsert_file(
         &mut self,
         rel: &str,
@@ -291,20 +310,59 @@ impl Index {
         content_hash: &str,
         parse_status: &str,
     ) -> anyhow::Result<()> {
+        self.upsert_file_stat(rel, language, content_hash, parse_status, 0, 0)
+    }
+
+    /// Records the file row together with the size and modification time that
+    /// [`Index::unchanged_by_stat`] compares against on a later run. Pass zero
+    /// for either when the filesystem could not answer; a zero is "no answer",
+    /// not a value that can match.
+    pub fn upsert_file_stat(
+        &mut self,
+        rel: &str,
+        language: &str,
+        content_hash: &str,
+        parse_status: &str,
+        size: i64,
+        mtime: i64,
+    ) -> anyhow::Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         self.conn.execute(
-            "INSERT INTO files(rel, language, content_hash, parse_status, indexed_at) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files(rel, language, content_hash, parse_status, indexed_at, size, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(rel) DO UPDATE SET language=excluded.language, content_hash=excluded.content_hash,
-             parse_status=excluded.parse_status, indexed_at=excluded.indexed_at",
-            params![rel, language, content_hash, parse_status, now],
+             parse_status=excluded.parse_status, indexed_at=excluded.indexed_at, size=excluded.size,
+             mtime=excluded.mtime",
+            params![rel, language, content_hash, parse_status, now, size, mtime],
         )?;
         Ok(())
+    }
+
+    /// Whether `rel` is certainly the file this index already recorded, judged
+    /// by size and modification time alone.
+    ///
+    /// This is a shortcut past reading and hashing a file, so it may only ever
+    /// be wrong in the direction of more work: false means "read it and decide
+    /// properly". It answers true only when a row exists and both values match
+    /// and neither is zero, because zero is what an unavailable stat records and
+    /// two unavailable stats must not compare equal.
+    pub fn unchanged_by_stat(&self, rel: &str, size: i64, mtime: i64) -> anyhow::Result<bool> {
+        if size == 0 || mtime == 0 {
+            return Ok(false);
+        }
+        let stored: Option<(i64, i64)> = self
+            .conn
+            .prepare_cached("SELECT size, mtime FROM files WHERE rel = ?1")?
+            .query_row(params![rel], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(stored == Some((size, mtime)))
     }
 
     pub fn file_hash(&self, rel: &str) -> anyhow::Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT content_hash FROM files WHERE rel = ?1", params![rel], |r| r.get(0))
+            .prepare_cached("SELECT content_hash FROM files WHERE rel = ?1")?
+            .query_row(params![rel], |r| r.get(0))
             .optional()?)
     }
 
@@ -423,6 +481,37 @@ mod tests {
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"));
         ix.upsert_file("src/a.ts", "typescript", "h2", "ok").unwrap();
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h2"));
+    }
+
+    /// The stat check is only ever allowed to say "definitely unchanged". A
+    /// missing row, a value that differs, or a stat that could not answer all
+    /// have to send the caller down the read-and-hash path.
+    #[test]
+    fn unchanged_by_stat_needs_a_row_and_two_real_values() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert!(!ix.unchanged_by_stat("src/a.ts", 10, 100).unwrap(), "a file with no row was never indexed");
+        ix.upsert_file_stat("src/a.ts", "typescript", "h1", "ok", 10, 100).unwrap();
+        assert!(ix.unchanged_by_stat("src/a.ts", 10, 100).unwrap());
+        assert!(!ix.unchanged_by_stat("src/a.ts", 11, 100).unwrap(), "a different size is a change");
+        assert!(!ix.unchanged_by_stat("src/a.ts", 10, 101).unwrap(), "a different mtime is a change");
+
+        ix.upsert_file_stat("src/b.ts", "typescript", "h1", "ok", 0, 100).unwrap();
+        assert!(!ix.unchanged_by_stat("src/b.ts", 0, 100).unwrap(), "an unknown size is not a match");
+        ix.upsert_file_stat("src/c.ts", "typescript", "h1", "ok", 10, 0).unwrap();
+        assert!(!ix.unchanged_by_stat("src/c.ts", 10, 0).unwrap(), "an unknown mtime is not a match");
+    }
+
+    #[test]
+    fn file_stat_reads_a_real_file_and_gives_up_quietly() {
+        let dir = unique_cache_dir("stat");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.ts");
+        std::fs::write(&path, "export const a = 1;\n").unwrap();
+        let (size, mtime) = file_stat(&path);
+        assert_eq!(size, 20);
+        assert!(mtime > 0, "a file on disk has a modification time");
+        assert_eq!(file_stat(&dir.join("nothing.ts")), (0, 0), "a path that is not there answers nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
