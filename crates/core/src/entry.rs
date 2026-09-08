@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Context;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use crate::project::{app_json_plugins, workspace_packages, PackageJson};
+use crate::project::{app_json_plugins, workspace_packages, wrangler_main, PackageJson};
 
 pub const DEFAULT_ENTRY_GLOBS: &[&str] = &[
     // Next.js and Expo Router load routes from these folders.
@@ -69,6 +69,7 @@ impl EntryPoints {
         }
         let mut files = HashSet::new();
         files.extend(app_json_plugins(root).iter().map(|f| strip_ext(f)));
+        files.extend(wrangler_main(root).iter().map(|f| strip_ext(f)));
         if let Some(pkg) = PackageJson::load(root) {
             files.extend(pkg.entry_files("").iter().map(|f| strip_ext(f)));
             for (_, dir) in workspace_packages(root, &pkg.workspaces) {
@@ -172,6 +173,15 @@ mod tests {
         assert!(e.is_entry("jest-setup.js"), "jest.setupFiles, with <rootDir> stripped");
         assert!(e.is_entry("test/global.ts"), "jest.globalSetup");
         assert!(!e.is_entry("tools/other.js"), "a file no config names is not an entry");
+    }
+
+    #[test]
+    fn the_deployed_worker_module_is_an_entry() {
+        let dir = fresh("wrangler");
+        write(&dir, "wrangler.toml", "name = \"media\"\nmain = \"./src/worker.ts\"\n");
+        let e = EntryPoints::detect(&dir.0, &[]).unwrap();
+        assert!(e.is_entry("src/worker.ts"), "wrangler.toml main");
+        assert!(!e.is_entry("src/helper.ts"), "only the module wrangler names");
     }
 
     #[test]

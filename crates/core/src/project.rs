@@ -1,7 +1,8 @@
 //! The project files resolution and entry-point detection read: `tsconfig.json`
-//! (aliases), `package.json` (entry points, jest setup files, workspaces) and
-//! `app.json` (Expo config plugins). All are read leniently: a file that is
-//! missing or unparsable simply contributes nothing.
+//! (aliases), `package.json` (entry points, jest setup files, workspaces),
+//! `app.json` (Expo config plugins) and `wrangler.toml` (the deployed Worker
+//! module). All are read leniently: a file that is missing or unparsable simply
+//! contributes nothing.
 
 use std::path::Path;
 
@@ -300,6 +301,20 @@ pub fn app_json_plugins(root: &Path) -> Vec<String> {
     out
 }
 
+/// The module a Cloudflare Worker deploys, from `wrangler.toml` or the `.jsonc`
+/// spelling of the same file. Nothing in the repository imports it: the platform
+/// loads it by name, and the rest of the code reaches it over HTTP.
+pub fn wrangler_main(root: &Path) -> Option<String> {
+    let main = match std::fs::read_to_string(root.join("wrangler.toml")) {
+        Ok(text) => toml::from_str::<toml::Value>(&text).ok()?.get("main")?.as_str()?.to_string(),
+        Err(_) => {
+            let text = std::fs::read_to_string(root.join("wrangler.jsonc")).ok()?;
+            serde_json::from_str::<Value>(&strip_jsonc(&text)).ok()?.get("main")?.as_str()?.to_string()
+        }
+    };
+    normalize(&main)
+}
+
 /// Workspace packages as (name, repo-relative dir). Globs of the form `dir/*` are
 /// expanded one level and plain directories are taken as they are; anything
 /// fancier is ignored, which covers `packages/*` and `apps/*` in practice.
@@ -480,5 +495,21 @@ mod tests {
 
         let empty = fresh("configs-empty");
         assert!(app_json_plugins(&empty.0).is_empty(), "no app.json means no plugins");
+    }
+
+    #[test]
+    fn wrangler_main_is_read_from_either_spelling() {
+        let toml_dir = fresh("wrangler-toml");
+        write(&toml_dir, "wrangler.toml", "name = \"media\"\nmain = \"./src/worker.ts\"\n");
+        assert_eq!(wrangler_main(&toml_dir.0).as_deref(), Some("src/worker.ts"), "leading ./ is stripped");
+
+        let jsonc_dir = fresh("wrangler-jsonc");
+        write(&jsonc_dir, "wrangler.jsonc", "{\n  // the deployed module\n  \"main\": \"src/index.ts\",\n}\n");
+        assert_eq!(wrangler_main(&jsonc_dir.0).as_deref(), Some("src/index.ts"));
+
+        let empty = fresh("wrangler-none");
+        assert_eq!(wrangler_main(&empty.0), None, "no wrangler config means no entry");
+        write(&empty, "wrangler.toml", "name = \"no-main\"\n");
+        assert_eq!(wrangler_main(&empty.0), None, "a config without main names no file");
     }
 }
