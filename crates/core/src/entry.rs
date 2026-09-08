@@ -35,11 +35,13 @@ pub const DEFAULT_ENTRY_GLOBS: &[&str] = &[
     "**/scripts/**",
     "**/bin/**",
     // Serverless functions: deployed by directory name and called over HTTP, so
-    // nothing in the repository ever imports them.
-    "supabase/functions/**",
+    // nothing in the repository ever imports them. Only the deployed module
+    // itself, never the whole tree: a `_shared` directory beside it is ordinary
+    // code, and exempting it costs real `dead-export` findings.
     "**/functions/*/index.*",
-    // Expo config plugins, named as strings in app.json.
-    "plugins/**",
+    // Expo config plugins, named as strings in app.json. A plugin named by path
+    // is picked up from app.json instead, so no blanket `plugins/**` here: a
+    // repository whose `plugins/` holds application code keeps its findings.
     "**/*.plugin.*",
 ];
 
@@ -138,10 +140,16 @@ mod tests {
     fn deployed_functions_and_config_plugins_are_entries_by_glob() {
         let e = EntryPoints::detect(&mini(), &[]).unwrap();
         assert!(e.is_entry("supabase/functions/challenge-create/index.ts"), "deployed by directory name");
-        assert!(e.is_entry("supabase/functions/_shared/cors.ts"), "shared code of a deployed function");
+        assert!(
+            !e.is_entry("supabase/functions/_shared/cors.ts"),
+            "shared code beside a deployed function is ordinary code, and exempting it hides dead exports"
+        );
         assert!(e.is_entry("server/functions/notify/index.js"), "the same convention outside supabase/");
-        assert!(e.is_entry("plugins/withHealthConnectManifest.js"));
         assert!(e.is_entry("src/build/withFoo.plugin.ts"));
+        assert!(
+            !e.is_entry("plugins/withHealthConnectManifest.js"),
+            "a config plugin is an entry because app.json names it, not because of where it sits"
+        );
         assert!(!e.is_entry("src/functions/helper.ts"), "only functions/<name>/index.* is a deployed entry");
     }
 
