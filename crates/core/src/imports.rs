@@ -432,6 +432,20 @@ import "";
         assert!(found.iter().all(|i| i.kind == ImportKind::Import && i.bindings.is_empty()));
     }
 
+    /// The `//` of a URL sits inside a string literal, and so does one written in
+    /// a single-quoted string. Reading either as the start of a comment would eat
+    /// the rest of the line and, on a file that runs its imports past column one,
+    /// silently lose every specifier after it.
+    #[test]
+    fn a_slash_pair_inside_a_string_does_not_start_a_comment() {
+        let src = concat!(
+            "const u = \"http://x\"; import z from \"./after-url\";\n",
+            "const p = 'a // b'; import q from \"./after-quote\";\n",
+        );
+        let found: Vec<String> = extract_text_fallback(src).into_iter().map(|i| i.specifier).collect();
+        assert_eq!(found, vec!["./after-url", "./after-quote"], "{found:?}");
+    }
+
     #[test]
     fn the_text_scan_covers_every_form_skips_comments_and_dedups() {
         let src = concat!(

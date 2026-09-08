@@ -15,9 +15,14 @@ use crate::ALLOW_MARK;
 /// drops whole statements and the leftover edge set would otherwise let a broken
 /// file make the modules it really imports look dead. Syntactic entries win where
 /// both found the same specifier: they carry the names and bindings.
+///
+/// Every import of such a file also takes the whole module. A clause recovery did
+/// keep may still be a truncated one, and a name missing from it would make a
+/// live export look dead; more edges is the safe direction (spec 3.2).
 fn file_imports(file: &ParsedFile) -> Vec<imports::Import> {
     let mut found = imports::extract(file);
     if file.has_error {
+        found.iter_mut().filter(|i| !i.names.iter().any(|n| n == "*")).for_each(|i| i.names.push("*".into()));
         let known: HashSet<String> = found.iter().map(|i| i.specifier.clone()).collect();
         found
             .extend(imports::extract_text_fallback(&file.source).into_iter().filter(|i| !known.contains(&i.specifier)));
@@ -62,6 +67,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("locrin-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("index.db")
+    }
+
+    /// A file the parser could not read is an unknown importer of every module it
+    /// names, not only of the ones recovery dropped. A clause tree-sitter did
+    /// recover may be a truncated one, so the names on it cannot be trusted to be
+    /// all of them, and a missing name would make a live export look dead.
+    #[test]
+    fn every_import_of_a_parse_failed_file_takes_the_whole_module() {
+        use crate::parse::parse_source;
+        use std::path::Path;
+
+        let clean =
+            parse_source(Path::new("src/ok.tsx"), "src/ok.tsx", "import { a } from \"./a\";\n".to_string()).unwrap();
+        assert!(!clean.has_error);
+        assert_eq!(file_imports(&clean)[0].names, vec!["a".to_string()], "a clean file keeps the names it read");
+
+        let source = "import { a } from \"./a\";\nconst shell = <View>;\nimport { b } from \"./b\";\n";
+        let broken = parse_source(Path::new("src/broken.tsx"), "src/broken.tsx", source.to_string()).unwrap();
+        assert!(broken.has_error, "the fixture must be a file that failed to parse");
+        let found = file_imports(&broken);
+        let mut specifiers: Vec<&str> = found.iter().map(|i| i.specifier.as_str()).collect();
+        specifiers.sort();
+        assert_eq!(specifiers, vec!["./a", "./b"], "both the recovered and the dropped import are edges");
+        assert!(found.iter().all(|i| i.names.iter().any(|n| n == "*")), "{found:?}");
     }
 
     #[test]
