@@ -32,6 +32,20 @@
 - Rust on the founder's machine: `export PATH="$HOME/.cargo/bin:$PATH"` in Git Bash before any `cargo` command.
 - Expected line numbers in fixture tests were counted by hand. If a test fails only on a line number, recount against the fixture file before touching the rule; if the fixture and the rule agree and the plan is wrong, fix the assertion and say so in the commit body.
 
+## Deviations recorded during execution
+
+Part A shipped with these departures from the plan above. Each one is recorded here so the plan and the code agree.
+
+- The index schema version is `"3"`, not the `"2"` the Global Constraints name. Task 15c added `size` and `mtime` columns to `files` for the stat shortcut, which is a schema change and so a second bump. Spec 9 still applies: a version mismatch rebuilds the index and logs once.
+- `dead-file` ships disabled by default. It came in below the spec 10.2 precision gate on the corpus substitute, 6/9 after the fixes, so a repository opts in with `[rules.dead-file]` and `enabled = true`.
+- Tasks 15b and 15c were added after the plan's Task 15 gates tripped, on precision and on the benchmarks respectively. Their briefs are in the SDD workspace and their results are in the precision report.
+- The blanket entry globs `supabase/functions/**` and `plugins/**` were dropped after review. They cost `dead-export` recall: every file under them counted as an entry point, so exports nothing imports were never reported.
+- `Index::upsert_file_stat` sits beside `upsert_file` rather than where the plan placed it.
+- `remove_missing` moved inside `index_files` so that a run's recording and its pruning share one transaction scope, and a run that fails part way commits nothing.
+- Non-recording runs, which is to say the baseline commands, index the repository into an in-memory database. The graph rules answer by querying an index, and on a fresh cache the repository's index is empty, so a baseline built from a read-only run would hold no graph findings at all.
+
+Spec 4.1 still lists dead-file without a default; the founder decides whether the spec records the ships-off default.
+
 ## File structure
 
 Part A creates or modifies:
