@@ -242,3 +242,116 @@ transaction per run for the cold index, and a cheaper change check (file size an
 mtime before content hash) plus avoiding the full walk for the warm check. Both are
 real work on `crates/core`, not a local fix inside this task's files, and neither
 target was raised.
+
+## dead-file re-measure after Task 15b
+
+Task 15b made a file that failed to parse an unknown importer rather than an empty
+one, and widened the entry-point set (serverless functions, Expo config plugins,
+`package.json` `jest` setup fields, `app.json` plugins).
+
+FastLift is a live repository and the founder worked in it the same day, so the
+run at the top of this document is not a like-for-like baseline for the numbers
+below. To keep the comparison honest, both binaries were run against the tree as
+it stands now, each with a fresh `LOCRIN_CACHE_DIR`: the Task 15b binary, and one
+built from `baac531`, the commit the first measurement used. Corpus drift is the
+whole explanation for `unused-import` reading 48 above and 57 in both runs here.
+
+| Rule | baac531 | after Task 15b | Change |
+| --- | --- | --- | --- |
+| dead-file | 68 | 9 | -59 |
+| dead-export | 598 | 516 | -82 |
+| unused-import | 57 | 57 | none |
+| leftover-commented-code | 98 | 98 | none |
+| leftover-debug | 6 | 6 | none |
+| leftover-agent-marker | 4 | 4 | none |
+| Total | 831 | 690 | -141 |
+
+Verdict is BLOCK either way: 6 high, 166 medium, 659 low becomes 6 high, 107
+medium, 577 low. Wall clock is unchanged, measured by alternating warm runs:
+9626 and 9717 ms for the new binary against 9643 and 9709 ms for `baac531`. The
+very first run of the new binary reported 40678 ms, which was a cold filesystem
+cache and not the change.
+
+### The nine remaining dead-file findings
+
+There are nine, not twenty, so every one of them is listed rather than sampled.
+
+| File | Verdict | Reason |
+| --- | --- | --- |
+| .planning/releases/1.7.0-voice/voice-ai-probe.mjs | false | Hand-run probe; its own header documents `node .planning/releases/1.7.0-voice/voice-ai-probe.mjs` |
+| assets/brand/gen.js | false | Hand-run brand asset generator; `src/components/Logo.tsx` cites it three times as the geometry source of truth |
+| components/external-link.tsx | true | Expo template leftover; neither the path nor `ExternalLink` appears anywhere else in the repository |
+| components/haptic-tab.tsx | true | Expo template leftover; `HapticTab` appears nowhere else |
+| components/hello-wave.tsx | true | Expo template leftover; `HelloWave` appears nowhere else |
+| components/ui/icon-symbol.ios.tsx | true | Expo template leftover; `IconSymbol` appears nowhere else |
+| components/ui/icon-symbol.tsx | true | Expo template leftover; `IconSymbol` appears nowhere else |
+| src/features/history/LogbookTrace.tsx | true | Superseded by `DurationTrend`; no importer and no JSX usage. Two theme guard tests name the path as a string, but they read the file off disk rather than load the module |
+| workers/media/src/worker.ts | false | Deployed Cloudflare Worker: `workers/media/wrangler.toml` sets `main = "src/worker.ts"`, and `src/features/coach/exerciseMedia.ts` calls it over HTTP at its workers.dev hostname |
+
+Summary: 6/9 true positives, 67 per cent against a gate of 85 per cent (17/20).
+The gate is not cleared, so per the task brief no rule confidence, severity or
+enablement has been changed.
+
+The count of false positives fell from an estimated 48 of 68 to 3 of 9, but the
+rate did not, because the fix removed whole families of false positives and left
+the long tail behind. A rate gate on a shrinking population is a harder gate.
+
+### What the remaining three have in common
+
+All three are the same modelling gap as before, an entry point named somewhere the
+import graph does not read, and none is a graph defect.
+
+1. A config format the engine does not parse. `wrangler.toml` names the Worker's
+   main file, relative to the directory the config sits in. `EntryPoints::detect`
+   reads JSON only.
+2. Hand-run scripts, again. `voice-ai-probe.mjs` and `assets/brand/gen.js` are run
+   by a person with `node <path>` and live under neither `scripts/` nor `bin/`.
+
+Both are answerable by more defaults (`**/wrangler.toml` `main`, or a wider script
+convention) and both are already answerable today by `entry_points` in
+`locrin.toml`, which is exactly what the rule's fix text tells the user.
+
+### The parse-failure fix cannot be re-confirmed on this corpus
+
+The first measurement pinned `src/services/quarantineRetry.ts` on `app/settings.tsx`
+failing to parse and losing two consecutive import statements. That file has since
+been edited: the import the report cites at L169 now sits at L171. On the tree as
+it stands, tree-sitter recovers every specifier in it. The `edges` table holds 92
+distinct specifiers from `app/settings.tsx` and the file's text contains exactly
+92, and both binaries record the same 167 edges from it. Of the other four files
+with `parse_status = 'error'`, two have no imports at all
+(`collapseFoodDuplicates.ts`, `quarantineNotice.ts`) and two lose none.
+
+So the text fallback runs on this repository and adds nothing to it, and none of
+the 59 removed `dead-file` findings is attributable to it: all 59 are entry
+points, 56 under `supabase/functions`, the two `plugins/` files, and
+`jest-setup-masked-view.js`. The defect is real and is covered by tests
+(`crates/core/src/imports.rs` and the `dead_file/parse_error` fixture, which
+reproduces the exact failure), but this corpus at this commit can neither confirm
+nor refute it.
+
+### dead-export moved as expected
+
+598 to 516, a drop of 82, and every one of the 82 sits under
+`supabase/functions/_shared` (78 directly, 4 in `_shared/wearableProviders`). That
+is the entry-point widening doing what it should for the deployed handlers
+themselves, but it is wider than the evidence asks for, and that is worth saying
+plainly.
+
+All 56 `supabase` `dead-file` findings that the fix removed were
+`supabase/functions/<name>/index.ts`, every single one, and the other new glob
+`**/functions/*/index.*` already matches all of them. `supabase/functions/**` adds
+nothing to the `dead-file` result and only exempts `_shared`, which no
+`dead-file` finding ever named because the handlers do import it. What it does
+cost is `dead-export` recall: three of the ten supplementary samples above that
+were read and verified as true positives (`MileReport`, `GroupLeaveGate`,
+`addDaysIso`) are among the 82 now silenced.
+
+On this corpus, dropping `supabase/functions/**` and keeping only
+`**/functions/*/index.*` would give the same nine `dead-file` findings and keep 82
+`dead-export` findings that a hand check found correct. The task brief specified
+the wide glob, so it is what shipped; this note is the measurement a founder would
+want before deciding whether to narrow it. No `dead-export` finding was added.
+
+`unused-import` is untouched at 57, which is correct: it is a file-scope rule that
+reads neither edges nor entry points.
