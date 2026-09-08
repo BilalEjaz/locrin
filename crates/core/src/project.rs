@@ -1,6 +1,7 @@
-//! The two project files resolution reads: `tsconfig.json` (aliases) and
-//! `package.json` (entry points, workspaces). Both are read leniently: a file
-//! that is missing or unparsable simply contributes nothing.
+//! The project files resolution and entry-point detection read: `tsconfig.json`
+//! (aliases), `package.json` (entry points, jest setup files, workspaces) and
+//! `app.json` (Expo config plugins). All are read leniently: a file that is
+//! missing or unparsable simply contributes nothing.
 
 use std::path::Path;
 
@@ -195,7 +196,19 @@ pub struct PackageJson {
     pub bin: Vec<String>,
     /// Every string leaf under `exports`, whatever the nesting of conditions and subpaths.
     pub exports: Vec<String>,
+    /// Files Jest loads by name from the `jest` block: `setupFiles`,
+    /// `setupFilesAfterEnv`, `globalSetup` and `globalTeardown`, with a leading
+    /// `<rootDir>/` removed. Bare package names are kept as they are and simply
+    /// match no file in the repository.
+    pub setup_files: Vec<String>,
     pub workspaces: Vec<String>,
+}
+
+/// The keys of the `jest` block whose values name a file the runner loads.
+const JEST_SETUP_KEYS: &[&str] = &["setupFiles", "setupFilesAfterEnv", "globalSetup", "globalTeardown"];
+
+fn strip_root_dir(p: &str) -> String {
+    p.strip_prefix("<rootDir>/").unwrap_or(p).to_string()
 }
 
 fn collect_strings(v: &Value, out: &mut Vec<String>) {
@@ -230,6 +243,17 @@ impl PackageJson {
         if let Some(e) = v.get("exports") {
             collect_strings(e, &mut p.exports);
         }
+        if let Some(jest) = v.get("jest") {
+            for key in JEST_SETUP_KEYS {
+                match jest.get(key) {
+                    Some(Value::String(s)) => p.setup_files.push(strip_root_dir(s)),
+                    Some(Value::Array(a)) => {
+                        p.setup_files.extend(a.iter().filter_map(Value::as_str).map(strip_root_dir))
+                    }
+                    _ => {}
+                }
+            }
+        }
         p.workspaces = match v.get("workspaces") {
             Some(Value::Object(o)) => string_list(o.get("packages")),
             other => string_list(other),
@@ -244,9 +268,36 @@ impl PackageJson {
             .iter()
             .chain(self.bin.iter())
             .chain(self.exports.iter().filter(|e| e.starts_with("./")))
+            .chain(self.setup_files.iter())
             .filter_map(|p| normalize(&join(dir_rel, p)))
             .collect()
     }
+}
+
+/// Expo config plugins that live in this repository, from `app.json` (or
+/// `app.config.json`, the other plain-JSON spelling; `app.config.js` is code and
+/// is not read). A plugin entry is either the path or `[path, options]`, and only
+/// the `./` forms are files here: everything else is an installed package.
+pub fn app_json_plugins(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in ["app.json", "app.config.json"] {
+        let Ok(text) = std::fs::read_to_string(root.join(name)) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let plugins = v.get("expo").and_then(|e| e.get("plugins")).or_else(|| v.get("plugins"));
+        let Some(entries) = plugins.and_then(Value::as_array) else { continue };
+        for entry in entries {
+            let path = match entry {
+                Value::String(s) => Some(s.as_str()),
+                Value::Array(a) => a.first().and_then(Value::as_str),
+                _ => None,
+            };
+            match path.filter(|p| p.starts_with("./")).and_then(normalize) {
+                Some(p) => out.push(p),
+                None => continue,
+            }
+        }
+    }
+    out
 }
 
 /// Workspace packages as (name, repo-relative dir). Globs of the form `dir/*` are
@@ -385,5 +436,49 @@ mod tests {
             ]
         );
         assert!(PackageJson::load(&dir.0.join("nowhere")).is_none());
+    }
+
+    #[test]
+    fn jest_setup_files_and_app_json_plugins_are_read() {
+        let dir = fresh("configs");
+        write(
+            &dir,
+            "package.json",
+            r#"{ "name": "root", "main": "src/index.ts",
+                "jest": { "setupFiles": ["<rootDir>/jest-setup.js", "react-native-gesture-handler/jestSetup"],
+                          "setupFilesAfterEnv": ["<rootDir>/jest-after.ts"],
+                          "globalSetup": "./test/global.ts",
+                          "globalTeardown": "<rootDir>/test/teardown.ts" } }"#,
+        );
+        let p = PackageJson::load(&dir.0).unwrap();
+        assert_eq!(
+            p.setup_files,
+            vec![
+                "jest-setup.js",
+                "react-native-gesture-handler/jestSetup",
+                "jest-after.ts",
+                "./test/global.ts",
+                "test/teardown.ts"
+            ]
+        );
+        assert!(p.entry_files("").contains(&"test/global.ts".to_string()), "setup files are entry files");
+
+        write(
+            &dir,
+            "app.json",
+            r#"{ "expo": { "plugins": ["expo-font", "./plugins/withA", ["./plugins/withB.js", {}], 7] } }"#,
+        );
+        assert_eq!(
+            app_json_plugins(&dir.0),
+            vec!["plugins/withA", "plugins/withB.js"],
+            "bare package names are not files"
+        );
+
+        let alt = fresh("configs-alt");
+        write(&alt, "app.config.json", r#"{ "plugins": ["./plugins/withC"] }"#);
+        assert_eq!(app_json_plugins(&alt.0), vec!["plugins/withC"]);
+
+        let empty = fresh("configs-empty");
+        assert!(app_json_plugins(&empty.0).is_empty(), "no app.json means no plugins");
     }
 }
