@@ -8,11 +8,19 @@ use serde_json::Value;
 
 /// Removes `//` and `/* */` comments and trailing commas outside strings, so a
 /// tsconfig.json (which allows both) parses as JSON.
+///
+/// A comma is held back rather than emitted at once, because whether it is
+/// trailing is only known at the next significant character: comments and the
+/// whitespace around them may sit between the comma and a closing `}` or `]`.
 pub fn strip_jsonc(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let mut in_string = false;
+    // A comma awaiting its verdict, and the whitespace seen since, replayed after
+    // it so the stripped text keeps the original layout.
+    let mut pending_comma = false;
+    let mut pending_ws = String::new();
     while i < chars.len() {
         let c = chars[i];
         if in_string {
@@ -28,39 +36,53 @@ pub fn strip_jsonc(text: &str) -> String {
             i += 1;
             continue;
         }
-        match c {
-            '"' => {
-                in_string = true;
-                out.push(c);
+        // Comments emit nothing, so they leave a pending comma pending.
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
-            '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '/' if chars.get(i + 1) == Some(&'*') => {
-                i += 2;
-                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                    i += 1;
-                }
-                i += 2;
-            }
-            ',' => {
-                let mut j = i + 1;
-                while j < chars.len() && chars[j].is_whitespace() {
-                    j += 1;
-                }
-                if !matches!(chars.get(j), Some('}') | Some(']')) {
-                    out.push(c);
-                }
-                i += 1;
-            }
-            _ => {
-                out.push(c);
-                i += 1;
-            }
+            continue;
         }
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        if c.is_whitespace() {
+            if pending_comma {
+                pending_ws.push(c);
+            } else {
+                out.push(c);
+            }
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            if pending_comma {
+                out.push(',');
+                out.push_str(&pending_ws);
+                pending_ws.clear();
+            }
+            pending_comma = true;
+            i += 1;
+            continue;
+        }
+        if pending_comma {
+            if !matches!(c, '}' | ']') {
+                out.push(',');
+            }
+            out.push_str(&pending_ws);
+            pending_ws.clear();
+            pending_comma = false;
+        }
+        if c == '"' {
+            in_string = true;
+        }
+        out.push(c);
+        i += 1;
     }
     out
 }
@@ -110,7 +132,9 @@ pub struct TsConfig {
     pub base_url: Option<String>,
     /// Directory of the file that declared `paths`, repo-relative.
     pub paths_dir: String,
-    /// `compilerOptions.paths` in declaration order: pattern with at most one `*`, and its targets.
+    /// `compilerOptions.paths`: pattern with at most one `*`, and its targets. Entries
+    /// are sorted by key, not in declaration order, so the resolver must not depend on
+    /// order and should match by longest prefix instead.
     pub paths: Vec<(String, Vec<String>)>,
 }
 
@@ -286,6 +310,15 @@ mod tests {
         let v: Value = serde_json::from_str(&strip_jsonc(src)).unwrap();
         assert_eq!(v["a"], "http://x/*y*/");
         assert_eq!(v["b"], serde_json::json!([1, 2]));
+
+        // A trailing comma is still trailing when a comment sits between it and the
+        // closing brace or bracket.
+        let src = "{\n  \"paths\": {\n    \"@/*\": [\"src/*\"], // alias\n  },\n}\n";
+        let v: Value = serde_json::from_str(&strip_jsonc(src)).unwrap();
+        assert_eq!(v["paths"]["@/*"], serde_json::json!(["src/*"]));
+
+        let v: Value = serde_json::from_str(&strip_jsonc("{ \"a\": 1, /* last */ }")).unwrap();
+        assert_eq!(v["a"], 1);
     }
 
     #[test]
