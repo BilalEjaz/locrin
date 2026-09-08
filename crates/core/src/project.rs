@@ -1,12 +1,24 @@
 //! The project files resolution and entry-point detection read: `tsconfig.json`
 //! (aliases), `package.json` (entry points, jest setup files, workspaces),
 //! `app.json` (Expo config plugins) and `wrangler.toml` (the deployed Worker
-//! module). All are read leniently: a file that is missing or unparsable simply
-//! contributes nothing.
+//! module). All are read leniently: a file that is missing contributes nothing,
+//! and one that exists but does not parse warns once and contributes nothing
+//! rather than failing the run.
 
 use std::path::Path;
 
 use serde_json::Value;
+
+/// Reads a project file, dropping a leading byte order mark.
+///
+/// Editors on Windows write the mark into JSON, and no JSON or TOML parser
+/// accepts it. Since every reader here is lenient about a file it cannot parse,
+/// a marked tsconfig would quietly contribute no aliases at all and the engine
+/// would report findings on live code.
+fn read_project_file(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(text.strip_prefix('\u{feff}').map(String::from).unwrap_or(text))
+}
 
 /// Removes `//` and `/* */` comments and trailing commas outside strings, so a
 /// tsconfig.json (which allows both) parses as JSON.
@@ -154,8 +166,15 @@ impl TsConfig {
         if depth > 5 {
             return None;
         }
-        let text = std::fs::read_to_string(root.join(rel)).ok()?;
-        let value: Value = serde_json::from_str(&strip_jsonc(&text)).ok()?;
+        let path = root.join(rel);
+        let text = read_project_file(&path)?;
+        let Ok(value) = serde_json::from_str::<Value>(&strip_jsonc(&text)) else {
+            eprintln!(
+                "warning: {} could not be parsed; path aliases and entry points from it are ignored",
+                path.display()
+            );
+            return None;
+        };
         let dir = parent_dir(rel);
         let mut cfg = value
             .get("extends")
@@ -229,8 +248,15 @@ fn string_list(v: Option<&Value>) -> Vec<String> {
 
 impl PackageJson {
     pub fn load(dir: &Path) -> Option<PackageJson> {
-        let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
-        let v: Value = serde_json::from_str(&text).ok()?;
+        let path = dir.join("package.json");
+        let text = read_project_file(&path)?;
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            eprintln!(
+                "warning: {} could not be parsed; path aliases and entry points from it are ignored",
+                path.display()
+            );
+            return None;
+        };
         let mut p = PackageJson {
             name: v.get("name").and_then(Value::as_str).map(String::from),
             main: v.get("main").and_then(Value::as_str).map(String::from),
@@ -282,8 +308,15 @@ impl PackageJson {
 pub fn app_json_plugins(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     for name in ["app.json", "app.config.json"] {
-        let Ok(text) = std::fs::read_to_string(root.join(name)) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let path = root.join(name);
+        let Some(text) = read_project_file(&path) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            eprintln!(
+                "warning: {} could not be parsed; path aliases and entry points from it are ignored",
+                path.display()
+            );
+            continue;
+        };
         let plugins = v.get("expo").and_then(|e| e.get("plugins")).or_else(|| v.get("plugins"));
         let Some(entries) = plugins.and_then(Value::as_array) else { continue };
         for entry in entries {
@@ -305,11 +338,31 @@ pub fn app_json_plugins(root: &Path) -> Vec<String> {
 /// spelling of the same file. Nothing in the repository imports it: the platform
 /// loads it by name, and the rest of the code reaches it over HTTP.
 pub fn wrangler_main(root: &Path) -> Option<String> {
-    let main = match std::fs::read_to_string(root.join("wrangler.toml")) {
-        Ok(text) => toml::from_str::<toml::Value>(&text).ok()?.get("main")?.as_str()?.to_string(),
-        Err(_) => {
-            let text = std::fs::read_to_string(root.join("wrangler.jsonc")).ok()?;
-            serde_json::from_str::<Value>(&strip_jsonc(&text)).ok()?.get("main")?.as_str()?.to_string()
+    let toml_path = root.join("wrangler.toml");
+    let main = match read_project_file(&toml_path) {
+        Some(text) => match toml::from_str::<toml::Value>(&text) {
+            Ok(v) => v.get("main")?.as_str()?.to_string(),
+            Err(_) => {
+                eprintln!(
+                    "warning: {} could not be parsed; path aliases and entry points from it are ignored",
+                    toml_path.display()
+                );
+                return None;
+            }
+        },
+        None => {
+            let jsonc_path = root.join("wrangler.jsonc");
+            let text = read_project_file(&jsonc_path)?;
+            match serde_json::from_str::<Value>(&strip_jsonc(&text)) {
+                Ok(v) => v.get("main")?.as_str()?.to_string(),
+                Err(_) => {
+                    eprintln!(
+                        "warning: {} could not be parsed; path aliases and entry points from it are ignored",
+                        jsonc_path.display()
+                    );
+                    return None;
+                }
+            }
         }
     };
     normalize(&main)
@@ -422,6 +475,29 @@ mod tests {
 
         let dir = fresh("tsconfig3");
         assert_eq!(TsConfig::load(&dir.0), TsConfig::default(), "no file means no aliases");
+    }
+
+    /// Editors write a byte order mark into JSON often enough that one cannot be
+    /// allowed to quietly disable a repository's aliases and entry points: serde
+    /// refuses the mark, and every reader here is lenient about a file it cannot
+    /// parse, so the failure would show up only as findings on live code.
+    #[test]
+    fn a_byte_order_mark_does_not_hide_a_project_file() {
+        let dir = fresh("bom");
+        write(&dir, "tsconfig.json", "\u{feff}{ \"compilerOptions\": { \"paths\": { \"@/*\": [\"src/*\"] } } }");
+        assert_eq!(TsConfig::load(&dir.0).paths, vec![("@/*".to_string(), vec!["src/*".to_string()])]);
+
+        write(&dir, "package.json", "\u{feff}{ \"name\": \"root\", \"main\": \"src/index.ts\" }");
+        assert_eq!(PackageJson::load(&dir.0).and_then(|p| p.main).as_deref(), Some("src/index.ts"));
+    }
+
+    /// A file that exists but does not parse contributes nothing, as before. The
+    /// warning it now prints goes to stderr and is not what this asserts.
+    #[test]
+    fn an_unparsable_tsconfig_contributes_nothing() {
+        let dir = fresh("bad-tsconfig");
+        write(&dir, "tsconfig.json", "{ \"compilerOptions\": { \"paths\": ");
+        assert_eq!(TsConfig::load(&dir.0), TsConfig::default());
     }
 
     #[test]
