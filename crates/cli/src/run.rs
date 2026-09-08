@@ -115,9 +115,11 @@ fn index_files(
         // say "certainly unchanged": anything else falls through to the read and
         // the content hash below, so a file touched without being edited is
         // still recognised as unchanged.
-        let (size, mtime) = file_stat(path);
-        if !parse_all && !in_scope && ix.unchanged_by_stat(&rel, size, mtime)? {
-            continue;
+        if !parse_all && !in_scope {
+            let (size, mtime) = file_stat(path);
+            if ix.unchanged_by_stat(&rel, size, mtime)? {
+                continue;
+            }
         }
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let source = match String::from_utf8(bytes) {
