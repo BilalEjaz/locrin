@@ -1,6 +1,6 @@
 mod common;
 
-use common::{fixture, run_on};
+use common::{fixture, rule_on, run_on};
 use locrin_core::config::Config;
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::dead_export::DeadExport;
@@ -33,7 +33,7 @@ fn entries_aliases_output_extensions_and_default_imports_are_live() {
     assert!(out.is_empty(), "{out:?}");
     // dead-export skips a file no one imports, so this fixture would pass vacuously
     // if the resolver ever orphaned one; dead-file being empty pins every file as reached.
-    let reached = run_on(Box::new(DeadFile), &fixture("dead_export", "clean"), &Config::default());
+    let reached = run_on(Box::new(DeadFile), &fixture("dead_export", "clean"), &rule_on("dead-file"));
     assert!(reached.is_empty(), "{reached:?}");
 }
 

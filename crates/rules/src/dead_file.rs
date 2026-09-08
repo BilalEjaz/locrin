@@ -29,6 +29,24 @@ impl Rule for DeadFile {
         Confidence::Medium
     }
 
+    /// Off until a repository says otherwise. On the corpus substitute the rule
+    /// measured 6 of 9 true after Task 15b, below the spec 10.2 precision gate
+    /// (see docs/superpowers/plans/2026-09-08-graph-rules-precision.md). Every
+    /// remaining miss is the same shape: an entry point named somewhere the
+    /// engine does not read, a hand-run script or a deployment config in a format
+    /// it does not parse. That is answerable per repository and not in general,
+    /// so the rule is opt-in through
+    ///
+    /// ```toml
+    /// [rules.dead-file]
+    /// enabled = true
+    /// ```
+    ///
+    /// once that repository's `entry_points` are curated.
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let imported = imported_names(ctx)?;
         let mut out = Vec::new();

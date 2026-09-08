@@ -291,9 +291,12 @@ fn boundaries_from_config_block() {
     assert_eq!(v["status"], "block");
 }
 
+/// `dead-file` ships off, so the repository turns it on first. What the test is
+/// about is the verdict once it is on: an orphan is advisory and does not block.
 #[test]
 fn a_new_orphan_file_is_advisory_not_blocking() {
     let dir = copy_fixture();
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.dead-file]\nenabled = true\n").unwrap();
     locrin(dir.path()).args(["baseline", "create"]).assert().success();
     std::fs::write(dir.path().join("src/orphan.ts"), "export const orphan = 1;\n").unwrap();
     let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();

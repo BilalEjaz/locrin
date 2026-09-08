@@ -107,7 +107,14 @@ impl Config {
 
     /// Rules are on unless the config turns them off.
     pub fn rule_enabled(&self, id: &str) -> bool {
-        self.rules.get(id).and_then(|r| r.enabled).unwrap_or(true)
+        self.rule_enabled_or(id, true)
+    }
+
+    /// Whether a rule runs: the config's explicit `enabled` when it sets one,
+    /// otherwise `default`, which is the rule's own answer. A rule that ships off
+    /// is turned on by the same key that turns any other rule off.
+    pub fn rule_enabled_or(&self, id: &str, default: bool) -> bool {
+        self.rules.get(id).and_then(|r| r.enabled).unwrap_or(default)
     }
 
     /// The configured severity for a rule, or the rule's own default.
@@ -168,6 +175,8 @@ mod tests {
         assert_eq!(c.severity_for("leftover-debug", Severity::High), Severity::Low);
         assert!(!c.rule_enabled("leftover-agent-marker"));
         assert!(c.rule_enabled("leftover-commented-code"));
+        assert!(!c.rule_enabled_or("leftover-agent-marker", true), "an explicit enabled beats the rule's default");
+        assert!(!c.rule_enabled_or("leftover-commented-code", false), "silence leaves the rule's default alone");
     }
 
     #[test]

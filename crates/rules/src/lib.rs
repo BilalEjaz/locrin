@@ -45,6 +45,12 @@ pub trait Rule {
     fn category(&self) -> Category;
     fn default_severity(&self) -> Severity;
     fn confidence(&self) -> Confidence;
+    /// Whether the rule runs when the config says nothing about it. Almost every
+    /// rule ships on; one that cannot yet meet the spec 10.2 precision gate on a
+    /// repository it knows nothing about ships off and says so in its own doc.
+    fn enabled_by_default(&self) -> bool {
+        true
+    }
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>>;
 }
 
@@ -99,10 +105,13 @@ pub fn finding(rule: &dyn Rule, file: &ParsedFile, line: u32, evidence: &str, fi
     finding_at(rule, &file.rel, line_span(file, line), &anchor_for(file, line), evidence, fix)
 }
 
-/// Runs the given rules, skipping any the config disables, dropping any finding
-/// that came from a file which failed to parse or whose line carries the
-/// `locrin:allow` marker, and applying the configured severity to every finding
-/// that survives.
+/// Runs the given rules, dropping any finding that came from a file which failed
+/// to parse or whose line carries the `locrin:allow` marker, and applying the
+/// configured severity to every finding that survives.
+///
+/// A rule runs when the config's explicit `enabled` says so, and when the config
+/// is silent, when the rule's own `enabled_by_default` says so. That is the only
+/// place enablement is decided.
 ///
 /// The spec 9 gate is enforced here rather than left to the rules. For a file
 /// parsed this run the parse status and the line text are at hand; for any
@@ -119,7 +128,7 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
     };
     let mut out = Vec::new();
     for rule in rules {
-        if !ctx.config.rule_enabled(rule.id()) {
+        if !ctx.config.rule_enabled_or(rule.id(), rule.enabled_by_default()) {
             continue;
         }
         let severity = ctx.config.severity_for(rule.id(), rule.default_severity());
@@ -280,6 +289,53 @@ mod tests {
             .insert("always".into(), locrin_core::config::RuleOverride { enabled: Some(false), severity: None });
         let ctx = RuleContext { files: &files, config: &config, index: &ix, entries: &entries };
         assert!(run_rules(&[Box::new(Always)], &ctx).unwrap().is_empty());
+    }
+
+    /// A rule that ships off. Nothing but `enabled_by_default` separates it from
+    /// `Always`, so the test measures the enablement decision and nothing else.
+    struct OffByDefault;
+    impl Rule for OffByDefault {
+        fn id(&self) -> &'static str {
+            "off-by-default"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::File
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn enabled_by_default(&self) -> bool {
+            false
+        }
+        fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            Ok(clean_files(ctx).map(|f| finding(self, f, 1, "hit", "remove it")).collect())
+        }
+    }
+
+    #[test]
+    fn a_rule_that_ships_off_runs_only_when_the_config_turns_it_on() {
+        let file = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
+        let files = vec![file];
+        let mut config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = RuleContext { files: &files, config: &config, index: &ix, entries: &entries };
+        assert!(run_rules(&[Box::new(OffByDefault)], &ctx).unwrap().is_empty(), "no config, no findings");
+
+        config
+            .rules
+            .insert("off-by-default".into(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+        let ctx = RuleContext { files: &files, config: &config, index: &ix, entries: &entries };
+        assert_eq!(run_rules(&[Box::new(OffByDefault)], &ctx).unwrap().len(), 1, "enabled = true turns it on");
     }
 
     #[test]

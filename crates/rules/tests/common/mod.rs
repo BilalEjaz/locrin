@@ -13,6 +13,15 @@ use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_root, source_files, WalkOptions};
 use locrin_rules::{run_rules, Rule, RuleContext};
 
+/// A config that turns one rule on, for the rules that ship off. `run_on` goes
+/// through `run_rules`, so a rule whose `enabled_by_default` is false produces
+/// nothing under `Config::default()`.
+pub fn rule_on(id: &str) -> Config {
+    let mut rules = std::collections::BTreeMap::new();
+    rules.insert(id.to_string(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+    Config { rules, ..Config::default() }
+}
+
 pub fn fixture(rule: &str, bucket: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(rule).join(bucket)
 }
