@@ -1,1 +1,1 @@
-{ "name": "repo" }
+{ "name": "repo", "main": "src/index.ts" }

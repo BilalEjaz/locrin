@@ -223,3 +223,82 @@ fn engine_error_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8(out.stderr).unwrap().starts_with("error:"));
 }
+
+/// Removing one import of an export makes that export dead in a file the edit
+/// never touched. A named-path check reports on the named file only, so the dead
+/// export shows up on a full check; part B widens narrowed checks to the
+/// neighbours of what changed. The importer keeps a second name from the same
+/// file, because a file that loses its last incoming edge is `dead-file`'s to
+/// report and `dead-export` stays quiet about it.
+#[test]
+fn removing_an_import_surfaces_a_dead_export_on_a_full_check() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    let index_with_both = "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { kept, dropped } from \"./lib\";\nexport const total = ok() + bad() + kept() + dropped();\n";
+    std::fs::write(dir.path().join("src/index.ts"), index_with_both).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    let index_without_dropped = "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { kept } from \"./lib\";\nexport const total = ok() + bad() + kept();\n";
+    std::fs::write(dir.path().join("src/index.ts"), index_without_dropped).unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(dead, vec!["src/lib.ts"], "{v}");
+    let evidence = v["findings"].as_array().unwrap().iter().find(|f| f["rule"] == "dead-export").unwrap()["evidence"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(evidence.contains("`dropped`"), "{evidence}");
+}
+
+#[test]
+fn unused_import_blocks_and_names_the_binding() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nexport const total = ok();\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "src/index.ts"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("unused-import"), "{text}");
+    assert!(text.contains("`bad` is imported from \"./dirty\" but never used"), "{text}");
+}
+
+#[test]
+fn boundaries_from_config_block() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("locrin.toml"),
+        "[[boundaries]]\nname = \"index stays off dirty\"\nfrom = \"src/index.ts\"\nforbid = [\"src/dirty.ts\"]\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rules: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["rule"].as_str().unwrap()).collect();
+    assert!(rules.contains(&"boundary-violation"), "{v}");
+    assert_eq!(v["status"], "block");
+}
+
+#[test]
+fn a_new_orphan_file_is_advisory_not_blocking() {
+    let dir = copy_fixture();
+    locrin(dir.path()).args(["baseline", "create"]).assert().success();
+    std::fs::write(dir.path().join("src/orphan.ts"), "export const orphan = 1;\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["status"], "advisory", "{v}");
+    assert_eq!(v["findings"][0]["rule"], "dead-file");
+    assert_eq!(v["findings"][0]["file"], "src/orphan.ts");
+}
