@@ -1,6 +1,7 @@
 pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
+pub mod unused_import;
 
 use std::collections::HashMap;
 
@@ -135,6 +136,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(leftover_debug::LeftoverDebug),
         Box::new(leftover_commented::LeftoverCommented),
         Box::new(leftover_marker::LeftoverMarker),
+        Box::new(unused_import::UnusedImport),
     ]
 }
 
@@ -336,9 +338,9 @@ mod tests {
         let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
         let ctx = RuleContext { files: &files, config: &config, index: &ix, entries: &entries };
         let ids: Vec<&str> = all_rules().iter().map(|r| r.id()).collect();
-        assert_eq!(ids, vec!["leftover-debug", "leftover-commented-code", "leftover-agent-marker"]);
+        assert_eq!(ids, vec!["leftover-debug", "leftover-commented-code", "leftover-agent-marker", "unused-import"]);
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 3, "every plan 1 rule is a file rule");
+        assert_eq!(file_rules().len(), 4, "every rule shipped so far is a file rule");
         assert!(graph_rules().is_empty(), "no graph rule ships yet");
     }
 }
