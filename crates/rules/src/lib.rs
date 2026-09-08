@@ -1,3 +1,4 @@
+pub mod boundary;
 pub mod dead_export;
 pub mod dead_file;
 pub mod leftover_commented;
@@ -143,6 +144,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(unreachable::Unreachable),
         Box::new(dead_export::DeadExport),
         Box::new(dead_file::DeadFile),
+        Box::new(boundary::BoundaryViolation),
     ]
 }
 
@@ -353,11 +355,15 @@ mod tests {
                 "unused-import",
                 "unreachable",
                 "dead-export",
-                "dead-file"
+                "dead-file",
+                "boundary-violation"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
         assert_eq!(file_rules().len(), 5, "the five rules shipped before the graph rules");
-        assert_eq!(graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(), vec!["dead-export", "dead-file"]);
+        assert_eq!(
+            graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
+            vec!["dead-export", "dead-file", "boundary-violation"]
+        );
     }
 }
