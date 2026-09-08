@@ -151,8 +151,11 @@ fn index_files(
         if !is_changed {
             // The file was touched but not edited: the stat disagreed and the
             // hash overruled it. Nothing is recorded for such a file, so the
-            // stale stat has to be replaced here or this run's read and hash
-            // are repeated by every run after it.
+            // stale stat has to be replaced here or this run's read and hash are
+            // repeated by every run after it. A full run refreshes it too: the
+            // stat may have moved without the bytes moving (a checkout, a
+            // formatter, a stash pop), so store the current one and the next
+            // narrowed run can skip the read.
             ix.refresh_stat(&rel, stat.0, stat.1)?;
             if !parse_all && !in_scope {
                 continue;

@@ -367,10 +367,12 @@ impl Index {
         if size == 0 || mtime == 0 {
             return Ok(());
         }
-        self.conn.execute(
-            "UPDATE files SET size = ?1, mtime = ?2 WHERE rel = ?3 AND (size <> ?1 OR mtime <> ?2)",
-            params![size, mtime, rel],
-        )?;
+        // Prepared once and reused: a full run calls this for every file whose
+        // stat moved without its bytes moving, which after a checkout is most of
+        // the repository.
+        self.conn
+            .prepare_cached("UPDATE files SET size = ?1, mtime = ?2 WHERE rel = ?3 AND (size <> ?1 OR mtime <> ?2)")?
+            .execute(params![size, mtime, rel])?;
         Ok(())
     }
 
