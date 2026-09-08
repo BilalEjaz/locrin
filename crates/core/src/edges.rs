@@ -44,12 +44,11 @@ pub fn from_imports(from_rel: &str, imports: &[Import], resolver: &Resolver) -> 
     out
 }
 
-/// Replaces every edge leaving `from_rel` in one transaction, for the same reason
+/// Replaces every edge leaving `from_rel` in one savepoint, for the same reason
 /// `symbols::store` does: a half-written edge set looks complete to the hash check.
 pub fn store(ix: &mut Index, from_rel: &str, edges: &[Edge]) -> anyhow::Result<()> {
-    let tx = ix.conn().unchecked_transaction()?;
-    tx.execute("DELETE FROM edges WHERE from_rel = ?1", params![from_rel])?;
-    {
+    ix.savepoint("edges", |tx| {
+        tx.execute("DELETE FROM edges WHERE from_rel = ?1", params![from_rel])?;
         let mut stmt = tx.prepare(
             "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -57,9 +56,8 @@ pub fn store(ix: &mut Index, from_rel: &str, edges: &[Edge]) -> anyhow::Result<(
         for e in edges {
             stmt.execute(params![e.from_rel, e.to_rel, e.specifier, e.name, e.kind, e.resolution, e.line])?;
         }
-    }
-    tx.commit()?;
-    Ok(())
+        Ok(())
+    })
 }
 
 const COLUMNS: &str = "from_rel, to_rel, specifier, name, kind, resolution, line";

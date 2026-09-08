@@ -152,14 +152,12 @@ pub fn enclosing_symbol(file: &ParsedFile, line: u32) -> Option<String> {
 }
 
 /// Replaces the stored symbols for `file.rel` atomically. The delete and every
-/// insert share one transaction, so a failure part way through the loop rolls
-/// the whole replacement back rather than leaving a partial symbol set that the
+/// insert share one savepoint, so a failure part way through the loop rolls the
+/// whole replacement back rather than leaving a partial symbol set that the
 /// content-hash check would consider up to date and never repair.
 pub fn store(index: &mut Index, file: &ParsedFile, syms: &[Symbol]) -> anyhow::Result<()> {
-    let conn = index.conn();
-    let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM symbols WHERE rel = ?1", params![file.rel])?;
-    {
+    index.savepoint("symbols", |tx| {
+        tx.execute("DELETE FROM symbols WHERE rel = ?1", params![file.rel])?;
         let mut stmt = tx.prepare(
             "INSERT INTO symbols(rel, kind, name, export_name, start_line, start_col, end_line, end_col, exported)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -177,9 +175,8 @@ pub fn store(index: &mut Index, file: &ParsedFile, syms: &[Symbol]) -> anyhow::R
                 s.exported as i64
             ])?;
         }
-    }
-    tx.commit()?;
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Every exported symbol in the index, in a reproducible order.

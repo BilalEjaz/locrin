@@ -49,6 +49,15 @@ mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
+    /// A database path of its own, so two tests never share one file.
+    fn scratch_db(tag: &str) -> PathBuf {
+        let nanos =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("locrin-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("index.db")
+    }
+
     #[test]
     fn record_fills_every_table_and_writes_the_file_row_last() {
         let root = canonical_root(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mini"));
@@ -69,5 +78,42 @@ mod tests {
         broken.conn().execute_batch("DROP TABLE symbols").unwrap();
         assert!(record(&mut broken, &file, "h2", &resolver).is_err());
         assert_eq!(broken.parse_status("src/index.ts").unwrap(), None, "a failed record must not look indexed");
+    }
+
+    /// A whole run is one unit: `begin` opens the transaction, every `record`
+    /// nests a savepoint inside it, and only `commit` makes the run visible to
+    /// the next one. A run that ends without committing leaves the index exactly
+    /// as it found it, so a half-written run is never mistaken for a complete one.
+    #[test]
+    fn a_run_commits_once_and_an_abandoned_run_leaves_nothing() {
+        let root = canonical_root(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mini"));
+        let indexed: HashSet<String> = ["src/index.ts", "src/util.ts"].iter().map(|s| s.to_string()).collect();
+        let resolver = Resolver::new(&root, indexed);
+        let a = parse_file(&root, &root.join("src/index.ts")).unwrap().unwrap();
+        let b = parse_file(&root, &root.join("src/util.ts")).unwrap().unwrap();
+
+        let committed = scratch_db("indexer-commit");
+        let mut ix = Index::open_at(&committed).unwrap();
+        ix.begin().unwrap();
+        record(&mut ix, &a, &content_hash(&a.source), &resolver).unwrap();
+        record(&mut ix, &b, &content_hash(&b.source), &resolver).unwrap();
+        ix.commit().unwrap();
+        drop(ix);
+        let ix = Index::open_at(&committed).unwrap();
+        assert_eq!(ix.all_files().unwrap(), vec!["src/index.ts".to_string(), "src/util.ts".to_string()]);
+        drop(ix);
+
+        let abandoned = scratch_db("indexer-abandoned");
+        let mut ix = Index::open_at(&abandoned).unwrap();
+        ix.begin().unwrap();
+        record(&mut ix, &a, &content_hash(&a.source), &resolver).unwrap();
+        drop(ix);
+        let ix = Index::open_at(&abandoned).unwrap();
+        assert!(ix.all_files().unwrap().is_empty(), "a run that never committed must leave no trace");
+        drop(ix);
+
+        for db in [committed, abandoned] {
+            std::fs::remove_dir_all(db.parent().unwrap()).ok();
+        }
     }
 }

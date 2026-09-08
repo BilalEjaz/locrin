@@ -147,11 +147,17 @@ pub struct Index {
 
 impl Index {
     pub fn open(repo_root: &Path) -> anyhow::Result<Index> {
-        let path = cache_path(repo_root);
+        Index::open_at(&cache_path(repo_root))
+    }
+
+    /// Opens the index database at an exact path, rebuilding it when its schema
+    /// is not this build's. [`Index::open`] derives that path from a repository
+    /// root; callers that already know where the database lives use this.
+    pub fn open_at(path: &Path) -> anyhow::Result<Index> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let conn = open_with_timeout(&path)?;
+        let conn = open_with_timeout(path)?;
         let mut ix = Index { conn };
         // A file that is not a database at all fails the same way a stale schema
         // does: it is a cache the engine cannot read, and spec 9 says rebuild it
@@ -176,8 +182,8 @@ impl Index {
         };
         if rebuild {
             drop(ix);
-            remove_database_files(&path)?;
-            ix = Index { conn: open_with_timeout(&path)? };
+            remove_database_files(path)?;
+            ix = Index { conn: open_with_timeout(path)? };
         }
         ix.init()?;
         Ok(ix)
@@ -222,6 +228,60 @@ impl Index {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Runs `body` as one atomic unit, releasing the savepoint on success and
+    /// rolling back to it on failure.
+    ///
+    /// A savepoint outside any transaction behaves like `BEGIN DEFERRED`, so a
+    /// caller that opens no transaction of its own still gets one commit per
+    /// call. Inside the run-wide transaction [`Index::begin`] opens it nests
+    /// instead, which is what lets a whole run share a single commit.
+    ///
+    /// `name` is a SQL identifier and is only ever a literal from this crate.
+    ///
+    /// A failed rollback is not reported: the caller's error is the one that
+    /// explains what went wrong, and replacing it with the cleanup's error would
+    /// hide the cause.
+    pub(crate) fn savepoint<T>(
+        &self,
+        name: &str,
+        body: impl FnOnce(&Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        match body(&self.conn) {
+            Ok(value) => {
+                self.conn.execute_batch(&format!("RELEASE {name}"))?;
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Opens a transaction meant to span a whole run.
+    ///
+    /// Every write the index does is a savepoint, so without this each one is
+    /// its own commit: several thousand fsync-shaped units for a repository the
+    /// size of a real app. Wrapping the run turns those into one. The caller
+    /// owns the pair: call [`Index::commit`] once the run's writes are done, and
+    /// drop the index instead if anything failed, which rolls the run back.
+    ///
+    /// The write lock is held from the run's first write until the commit, so a
+    /// second locrin writing the same cache waits (up to the busy timeout)
+    /// rather than interleaving with it. Readers are unaffected: the database is
+    /// in WAL mode.
+    pub fn begin(&mut self) -> anyhow::Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        Ok(())
+    }
+
+    /// Commits the transaction [`Index::begin`] opened.
+    pub fn commit(&mut self) -> anyhow::Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
     }
 
     pub fn upsert_file(
@@ -270,16 +330,14 @@ impl Index {
     /// stored before. The rule runner consults this for findings on files it did not
     /// parse this run, so suppression works for graph rules too.
     pub fn replace_allow_lines(&mut self, rel: &str, lines: &[u32]) -> anyhow::Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM allow_lines WHERE rel = ?1", params![rel])?;
-        {
+        self.savepoint("allow_lines", |tx| {
+            tx.execute("DELETE FROM allow_lines WHERE rel = ?1", params![rel])?;
             let mut stmt = tx.prepare("INSERT INTO allow_lines(rel, line) VALUES (?1, ?2)")?;
             for line in lines {
                 stmt.execute(params![rel, line])?;
             }
-        }
-        tx.commit()?;
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn is_allowed(&self, rel: &str, line: u32) -> anyhow::Result<bool> {
@@ -310,19 +368,22 @@ impl Index {
         let existing: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         drop(stmt);
         let keep: std::collections::HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
-        let mut removed = 0;
-        let tx = self.conn.transaction()?;
-        for rel in existing.iter().filter(|r| !keep.contains(r.as_str())) {
-            for (table, column) in PER_FILE_TABLES {
-                tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), params![rel])?;
+        self.savepoint("remove_missing", |tx| {
+            let mut removed = 0;
+            for rel in existing.iter().filter(|r| !keep.contains(r.as_str())) {
+                for (table, column) in PER_FILE_TABLES {
+                    tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), params![rel])?;
+                }
+                // Edges from files that stayed still point here. The target is gone, so
+                // the edge is no longer resolved: it keeps its specifier and says so.
+                tx.execute(
+                    "UPDATE edges SET to_rel = NULL, resolution = 'unresolved' WHERE to_rel = ?1",
+                    params![rel],
+                )?;
+                removed += 1;
             }
-            // Edges from files that stayed still point here. The target is gone, so
-            // the edge is no longer resolved: it keeps its specifier and says so.
-            tx.execute("UPDATE edges SET to_rel = NULL, resolution = 'unresolved' WHERE to_rel = ?1", params![rel])?;
-            removed += 1;
-        }
-        tx.commit()?;
-        Ok(removed)
+            Ok(removed)
+        })
     }
 }
 

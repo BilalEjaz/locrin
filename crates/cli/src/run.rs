@@ -68,6 +68,11 @@ fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow:
 /// they were asked about; if they also stamped the hashes they saw, an edit made
 /// between two commands would look already-seen and the next `--changed` check
 /// would skip it. Only `check` and `scan` are entitled to move the watermark.
+///
+/// A recording run owns the whole write side of the index: it opens one
+/// transaction, records, prunes the files that left the repository, and commits
+/// once. Pruning lives here rather than in the callers so that the transaction
+/// has a single scope, and so a run that fails part way commits nothing at all.
 fn index_files(
     root: &Path,
     candidates: &[PathBuf],
@@ -80,9 +85,14 @@ fn index_files(
     let mut files = Vec::new();
     let mut changed = 0;
     let mut recorded: HashSet<String> = HashSet::new();
+    let mut present: Vec<String> = Vec::with_capacity(candidates.len());
     let mut any_new = false;
+    if record {
+        ix.begin()?;
+    }
     for path in candidates {
         let rel = rel_path(root, path);
+        present.push(rel.clone());
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let source = match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -134,6 +144,12 @@ fn index_files(
             }
         }
     }
+    // The candidate list is the whole repository on every run, so pruning rows
+    // for files that went away is safe whenever the run is recording.
+    if record {
+        ix.remove_missing(&present)?;
+        ix.commit()?;
+    }
     Ok(Indexed { files, changed })
 }
 
@@ -163,11 +179,6 @@ fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Ve
     // over every file. A named path or `--changed` parses only what it must.
     let parse_all = scope.is_none() && !opts.changed_only;
     let indexed = index_files(root, &candidates, parse_all, scope.as_ref(), record, &resolver, &mut ix)?;
-    // The candidate list is the whole repository on every run now, so pruning
-    // rows for files that went away is safe whenever the run is recording.
-    if record {
-        ix.remove_missing(&rels)?;
-    }
     let entries = EntryPoints::detect(root, &config.entry_points)?;
     let ctx = RuleContext { files: &indexed.files, config: &config, index: &ix, entries: &entries };
     let mut findings = run_all(&ctx)?;
@@ -199,7 +210,6 @@ pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
     let resolver = Resolver::new(&root, rels.iter().cloned().collect());
     let mut ix = Index::open(&root)?;
     let indexed = index_files(&root, &candidates, false, None, true, &resolver, &mut ix)?;
-    ix.remove_missing(&rels)?;
     Ok((candidates.len(), indexed.changed))
 }
 
