@@ -147,8 +147,17 @@ fn index_files(
         };
         let hash = content_hash(&source);
         let is_changed = ix.changed(&rel, &hash)?;
-        if !is_changed && !parse_all && !in_scope {
-            continue;
+        if !is_changed {
+            // The file was touched but not edited: the stat disagreed and the
+            // hash overruled it. Nothing is recorded for such a file, so the
+            // stale stat has to be replaced here or this run's read and hash
+            // are repeated by every run after it.
+            if record {
+                ix.refresh_stat(&rel, stat.0, stat.1)?;
+            }
+            if !parse_all && !in_scope {
+                continue;
+            }
         }
         pending.push(Pending { path: path.clone(), rel, hash, is_changed, source, stat });
     }

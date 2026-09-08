@@ -313,6 +313,74 @@ fn stored_hash(dir: &std::path::Path, rel: &str) -> Option<String> {
     conn.query_row("SELECT content_hash FROM files WHERE rel = ?1", [rel], |r| r.get(0)).optional().unwrap()
 }
 
+/// The stored size and modification time for one file, read straight from the
+/// index.
+fn stored_stat(dir: &std::path::Path, rel: &str) -> Option<(i64, i64)> {
+    use rusqlite::OptionalExtension;
+    let conn = rusqlite::Connection::open(index_db(dir)).unwrap();
+    conn.query_row("SELECT size, mtime FROM files WHERE rel = ?1", [rel], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .unwrap()
+}
+
+/// A file touched without being edited is unchanged, and the content hash is
+/// what says so. The run also stores the stat it took on the way, so the next
+/// run takes the shortcut instead of reading and hashing that file all over
+/// again. A checkout, a formatter or a stash pop rewrites hundreds of unchanged
+/// files at once, and without this every later run would pay for all of them,
+/// forever.
+#[test]
+fn a_touched_file_gets_its_stored_stat_refreshed() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("scan").assert().success();
+
+    let touched = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let path = dir.path().join("src/clean.ts");
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(touched).unwrap();
+    drop(file);
+
+    let out = locrin(dir.path()).arg("scan").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("0 changed"), "the bytes did not change, but the run said: {text}");
+    assert_eq!(
+        stored_stat(dir.path(), "src/clean.ts").map(|s| s.1),
+        Some(1_000_000_000_000_000_000),
+        "the stat the run took has to replace the stale one, in nanoseconds"
+    );
+}
+
+/// The shortcut is a stat match and deliberately nothing more: a file whose size
+/// and modification time still equal the ones the index recorded is skipped
+/// without being opened, even when its bytes have changed underneath. That is
+/// what keeps a narrowed run from reading the whole repository, and the hole it
+/// leaves (a rewrite that preserves both the length and the modification time to
+/// the nanosecond) is not something an editor, a compiler or a checkout does.
+#[test]
+fn a_file_whose_stat_still_matches_is_skipped_without_being_read() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("scan").assert().success();
+    let before = stored_hash(dir.path(), "src/clean.ts").expect("scan indexes clean.ts");
+
+    let path = dir.path().join("src/clean.ts");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let rewritten = original.replace("return 1;", "return 2;");
+    assert_eq!(rewritten.len(), original.len(), "the rewrite has to keep the file's length");
+    assert_ne!(rewritten, original, "the rewrite has to change the bytes");
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, &rewritten).unwrap();
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+
+    let out = locrin(dir.path()).arg("scan").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("0 changed"), "a file whose stat matches is not read at all, but the run said: {text}");
+    assert_eq!(
+        stored_hash(dir.path(), "src/clean.ts").as_deref(),
+        Some(before.as_str()),
+        "a file that was never read cannot have been re-hashed"
+    );
+}
+
 /// The stat recorded for a file belongs to the bytes that were read, so a save
 /// landing between the read and the record leaves the index holding a stat older
 /// than the file's real one. That disagreement is what makes the next run read

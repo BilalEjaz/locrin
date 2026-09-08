@@ -348,6 +348,32 @@ impl Index {
         Ok(())
     }
 
+    /// Brings the stored size and modification time for `rel` up to date without
+    /// saying anything about its content.
+    ///
+    /// This is for the file that was touched but not edited: the stat disagreed,
+    /// the run read and hashed the file, and the hash said unchanged. Nothing is
+    /// re-recorded for such a file, so without this the stale stat would stay and
+    /// the file would pay a read and a hash on every run from now on. A checkout,
+    /// a formatter or a stash pop rewrites hundreds of unchanged files at once,
+    /// so that adds up.
+    ///
+    /// The stat passed in must be the one taken before the read, the same rule
+    /// [`indexer::record_with_stat`](crate::indexer::record_with_stat) explains.
+    /// A stat that could not answer is not stored, and a file the index has never
+    /// seen is not invented: only an existing row is updated, and only when the
+    /// values actually differ.
+    pub fn refresh_stat(&mut self, rel: &str, size: i64, mtime: i64) -> anyhow::Result<()> {
+        if size == 0 || mtime == 0 {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE files SET size = ?1, mtime = ?2 WHERE rel = ?3 AND (size <> ?1 OR mtime <> ?2)",
+            params![size, mtime, rel],
+        )?;
+        Ok(())
+    }
+
     /// Whether `rel` is certainly the file this index already recorded, judged
     /// by size and modification time alone.
     ///
@@ -509,6 +535,26 @@ mod tests {
         assert!(!ix.unchanged_by_stat("src/b.ts", 0, 100).unwrap(), "an unknown size is not a match");
         ix.upsert_file_stat("src/c.ts", "typescript", "h1", "ok", 10, 0).unwrap();
         assert!(!ix.unchanged_by_stat("src/c.ts", 10, 0).unwrap(), "an unknown mtime is not a match");
+    }
+
+    /// A file that was touched but not edited has to have its stat brought up
+    /// to date, or the run that read it to find that out pays that read on
+    /// every later run too. Nothing about the content changed, so the hash is
+    /// left exactly as it was.
+    #[test]
+    fn refresh_stat_updates_a_row_without_touching_its_hash() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file_stat("src/a.ts", "typescript", "h1", "ok", 10, 100).unwrap();
+        ix.refresh_stat("src/a.ts", 10, 250).unwrap();
+        assert!(ix.unchanged_by_stat("src/a.ts", 10, 250).unwrap());
+        assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"), "a refresh says nothing about content");
+
+        ix.refresh_stat("src/a.ts", 0, 300).unwrap();
+        ix.refresh_stat("src/a.ts", 10, 0).unwrap();
+        assert!(ix.unchanged_by_stat("src/a.ts", 10, 250).unwrap(), "a stat that could not answer is not one to store");
+
+        ix.refresh_stat("src/gone.ts", 10, 250).unwrap();
+        assert!(ix.file_hash("src/gone.ts").unwrap().is_none(), "a refresh never invents a file row");
     }
 
     #[test]
