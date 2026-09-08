@@ -14,6 +14,7 @@ use locrin_core::parse::{parse_source, rel_path, ParsedFile};
 use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
 use locrin_rules::{run_all, RuleContext};
+use rayon::prelude::*;
 
 pub struct Options {
     pub root: PathBuf,
@@ -25,6 +26,15 @@ pub struct Options {
 struct Indexed {
     files: Vec<ParsedFile>,
     changed: usize,
+}
+
+/// A candidate that has been read and judged, waiting to be parsed.
+struct Pending {
+    path: PathBuf,
+    rel: String,
+    hash: String,
+    is_changed: bool,
+    source: String,
 }
 
 /// The files named on the command line, canonical and inside the root, or None
@@ -90,6 +100,10 @@ fn index_files(
     if record {
         ix.begin()?;
     }
+    // Reading and deciding is cheap and touches the index, so it stays here, on
+    // the one thread that owns the connection. Parsing is neither, so it goes to
+    // the pool below.
+    let mut pending: Vec<Pending> = Vec::new();
     for path in candidates {
         let rel = rel_path(root, path);
         present.push(rel.clone());
@@ -107,16 +121,30 @@ fn index_files(
         if !is_changed && !parse_all && !in_scope {
             continue;
         }
-        let Some(parsed) = parse_source(path, &rel, source) else { continue };
+        pending.push(Pending { path: path.clone(), rel, hash, is_changed, source });
+    }
+    // Parsing is the single largest cost of a cold run and needs nothing but the
+    // source text, so it runs across the pool. `collect` keeps candidate order,
+    // which is what the recording pass below and the returned `files` rely on.
+    let parsed: Vec<(String, bool, Option<ParsedFile>)> = pending
+        .into_par_iter()
+        .map(|p| {
+            let Pending { path, rel, hash, is_changed, source } = p;
+            let file = parse_source(&path, &rel, source);
+            (hash, is_changed, file)
+        })
+        .collect();
+    for (hash, is_changed, file) in parsed {
+        let Some(parsed) = file else { continue };
         if parsed.has_error {
-            eprintln!("warning: parse errors in {rel}; excluded from rules");
+            eprintln!("warning: parse errors in {}; excluded from rules", parsed.rel);
         }
         if is_changed {
             changed += 1;
             if record {
-                any_new |= ix.file_hash(&rel)?.is_none();
+                any_new |= ix.file_hash(&parsed.rel)?.is_none();
                 indexer::record(ix, &parsed, &hash, resolver)?;
-                recorded.insert(rel.clone());
+                recorded.insert(parsed.rel.clone());
             }
         }
         files.push(parsed);
