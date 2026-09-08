@@ -4,6 +4,7 @@ use common::{fixture, run_on};
 use locrin_core::config::Config;
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::dead_export::DeadExport;
+use locrin_rules::dead_file::DeadFile;
 
 fn view(out: &[locrin_core::finding::Finding]) -> Vec<(String, u32, String)> {
     out.iter().map(|f| (f.file.clone(), f.span.start_line, f.evidence.clone())).collect()
@@ -30,6 +31,10 @@ fn flags_unimported_exports_defaults_and_barrel_reexports() {
 fn entries_aliases_output_extensions_and_default_imports_are_live() {
     let out = run_on(Box::new(DeadExport), &fixture("dead_export", "clean"), &Config::default());
     assert!(out.is_empty(), "{out:?}");
+    // dead-export skips a file no one imports, so this fixture would pass vacuously
+    // if the resolver ever orphaned one; dead-file being empty pins every file as reached.
+    let reached = run_on(Box::new(DeadFile), &fixture("dead_export", "clean"), &Config::default());
+    assert!(reached.is_empty(), "{reached:?}");
 }
 
 #[test]
