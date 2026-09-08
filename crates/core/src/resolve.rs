@@ -61,6 +61,11 @@ fn match_pattern(pattern: &str, specifier: &str) -> Option<String> {
 /// The literal text a pattern requires before its `*`, or the whole pattern when it has none.
 /// TypeScript gives an ambiguous specifier to the longest such prefix whatever the declaration
 /// order, and `TsConfig::paths` arrives sorted by key rather than in that order.
+/// A TypeScript declaration file: it types a module rather than being one.
+fn is_declaration(path: &str) -> bool {
+    path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
+}
+
 fn literal_prefix_len(pattern: &str) -> usize {
     match pattern.split_once('*') {
         Some((prefix, _)) => prefix.len(),
@@ -122,7 +127,9 @@ impl Resolver {
         Resolution::External
     }
 
-    fn probe(&self, p: &str) -> Resolution {
+    /// Every path TypeScript would accept for `p`: the literal path, the source behind an
+    /// output extension, `p` plus each source extension, and `index.<ext>` inside `p`.
+    fn candidates(&self, p: &str) -> Vec<String> {
         let mut candidates = vec![p.to_string()];
         for (output, source) in OUTPUT_TO_SOURCE {
             if let Some(stem) = p.strip_suffix(output) {
@@ -135,15 +142,37 @@ impl Resolver {
         for ext in SOURCE_EXTS {
             candidates.push(format!("{p}/index.{ext}"));
         }
-        if let Some(hit) = candidates.iter().find(|c| self.indexed.contains(c.as_str())) {
-            return Resolution::Resolved(hit.clone());
+        candidates
+    }
+
+    /// The first candidate the caller indexed, ignoring declaration files: a `.d.ts` describes a
+    /// module, it is not one, so it is never a node in this graph however it reached `indexed`.
+    fn indexed_hit(&self, candidates: &[String]) -> Option<String> {
+        candidates.iter().find(|c| !is_declaration(c) && self.indexed.contains(c.as_str())).cloned()
+    }
+
+    fn probe(&self, p: &str) -> Resolution {
+        let candidates = self.candidates(p);
+        if let Some(hit) = self.indexed_hit(&candidates) {
+            return Resolution::Resolved(hit);
         }
         let on_disk = self.root.join(p);
-        let exists = on_disk.is_file()
+        if on_disk.join("package.json").is_file() {
+            // A directory that carries a package file states its own entry point. Resolve that
+            // entry once and stop: a `main` naming the directory again must not recurse.
+            if let Some(main) = PackageJson::load(&on_disk).and_then(|pkg| pkg.main) {
+                if let Some(target) = normalize(&join(p, &main)) {
+                    return match self.indexed_hit(&self.candidates(&target)) {
+                        Some(hit) => Resolution::Resolved(hit),
+                        None => Resolution::External,
+                    };
+                }
+            }
+        }
+        let exists = candidates.iter().any(|c| self.root.join(c).is_file())
             || on_disk.join("package.json").is_file()
             || on_disk.join("index.d.ts").is_file()
-            || self.root.join(format!("{p}.d.ts")).is_file()
-            || SOURCE_EXTS.iter().any(|e| self.root.join(format!("{p}.{e}")).is_file());
+            || self.root.join(format!("{p}.d.ts")).is_file();
         if exists {
             Resolution::External
         } else {
@@ -188,6 +217,8 @@ mod tests {
         write(&dir, "src/b.tsx", "");
         write(&dir, "src/c/index.ts", "");
         write(&dir, "src/gen/x.ts", "");
+        write(&dir, "src/gen/index.ts", "");
+        write(&dir, "src/x.ts", "");
         write(&dir, "src/types.d.ts", "");
         write(&dir, "src/logo.png", "");
         let r = resolver(&dir, &["src/a.ts", "src/b.tsx", "src/c/index.ts", "src/main.ts"]);
@@ -201,6 +232,16 @@ mod tests {
         assert_eq!(r.resolve("src/main.ts", "./c"), Resolution::Resolved("src/c/index.ts".into()));
         assert_eq!(r.resolve("src/c/index.ts", "../a"), Resolution::Resolved("src/a.ts".into()));
         assert_eq!(r.resolve("src/main.ts", "./gen/x"), Resolution::External, "on disk but not indexed (excluded)");
+        assert_eq!(
+            r.resolve("src/main.ts", "./gen"),
+            Resolution::External,
+            "an index file on disk but not indexed is external, not unresolved"
+        );
+        assert_eq!(
+            r.resolve("src/main.ts", "./x.js"),
+            Resolution::External,
+            "the source behind an output extension is on disk but not indexed"
+        );
         assert_eq!(r.resolve("src/main.ts", "./types"), Resolution::External, "declaration file");
         assert_eq!(r.resolve("src/main.ts", "./logo.png"), Resolution::External, "asset");
         assert_eq!(r.resolve("src/main.ts", "./missing"), Resolution::Unresolved);
@@ -257,6 +298,39 @@ mod tests {
             "the more specific alias owns the specifier"
         );
         assert_eq!(r.resolve("src/main.ts", "@/other"), Resolution::Unresolved);
+    }
+
+    #[test]
+    fn declaration_files_are_never_resolved() {
+        let dir = fresh("decl");
+        write(&dir, "src/types.d.ts", "");
+        let r = resolver(&dir, &["src/types.d.ts", "src/main.ts"]);
+        assert_eq!(r.resolve("src/main.ts", "./types"), Resolution::External);
+        assert_eq!(
+            r.resolve("src/main.ts", "./types.d.ts"),
+            Resolution::External,
+            "a declaration file is never a node in this graph, whatever the caller indexed"
+        );
+    }
+
+    #[test]
+    fn a_directory_with_a_package_json_resolves_through_its_main() {
+        let dir = fresh("dirmain");
+        write(&dir, "packages/ui/package.json", "{ \"name\": \"@acme/ui\", \"main\": \"src/index.ts\" }");
+        write(&dir, "packages/ui/src/index.ts", "");
+        write(&dir, "packages/lib/package.json", "{ \"name\": \"@acme/lib\", \"main\": \"src/index.ts\" }");
+        write(&dir, "packages/lib/src/index.ts", "");
+        let r = resolver(&dir, &["packages/ui/src/index.ts", "src/main.ts"]);
+        assert_eq!(
+            r.resolve("src/main.ts", "../packages/ui"),
+            Resolution::Resolved("packages/ui/src/index.ts".into()),
+            "the package file states the entry point"
+        );
+        assert_eq!(
+            r.resolve("src/main.ts", "../packages/lib"),
+            Resolution::External,
+            "an entry point on disk but not indexed is external"
+        );
     }
 
     #[test]
