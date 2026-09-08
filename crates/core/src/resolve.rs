@@ -58,14 +58,14 @@ fn match_pattern(pattern: &str, specifier: &str) -> Option<String> {
     }
 }
 
-/// The literal text a pattern requires before its `*`, or the whole pattern when it has none.
-/// TypeScript gives an ambiguous specifier to the longest such prefix whatever the declaration
-/// order, and `TsConfig::paths` arrives sorted by key rather than in that order.
 /// A TypeScript declaration file: it types a module rather than being one.
 fn is_declaration(path: &str) -> bool {
     path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
 }
 
+/// The literal text a pattern requires before its `*`, or the whole pattern when it has none.
+/// TypeScript gives an ambiguous specifier to the longest such prefix whatever the declaration
+/// order, and `TsConfig::paths` arrives sorted by key rather than in that order.
 fn literal_prefix_len(pattern: &str) -> usize {
     match pattern.split_once('*') {
         Some((prefix, _)) => prefix.len(),
