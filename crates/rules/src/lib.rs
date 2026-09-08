@@ -416,7 +416,7 @@ mod tests {
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 5, "the five rules shipped before the graph rules");
+        assert_eq!(file_rules().len(), 5, "five file rules and three graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
             vec!["dead-export", "dead-file", "boundary-violation"]
