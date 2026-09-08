@@ -355,3 +355,56 @@ want before deciding whether to narrow it. No `dead-export` finding was added.
 
 `unused-import` is untouched at 57, which is correct: it is a file-scope rule that
 reads neither edges nor entry points.
+
+## Benchmarks after Task 15c
+
+Same command, same FastLift checkout, same machine: `cargo test --release -p
+locrin-cli -- --ignored --nocapture`, run three times back to back. All three
+benchmarks pass on all three runs.
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 2589 ms | 2313 ms | 2347 ms | PASS |
+| warm single-file check | under 300 ms | 254 ms | 246 ms | 252 ms | PASS |
+| startup (`--help`) | under 50 ms | 25 ms | 26 ms | 25 ms | PASS |
+
+The starting point measured immediately before the work, on the same machine,
+was 4731 / 4371 / 4815 ms cold, 336 / 332 ms warm and 27 / 28 / 26 ms startup.
+That cold figure is well under the 10038 ms this document recorded earlier;
+the difference is the operating system's file cache, which was cold for the
+earlier measurement and warm for these. The warm check failed its target in
+both states, before and after that difference.
+
+### What each change bought
+
+| Step | Cold | Warm |
+| --- | --- | --- |
+| before | 4731 ms | 336 ms |
+| one transaction per run | 3981 ms | 306 ms |
+| parallel parsing | 2539 ms | 340 ms |
+| stat before read | 2630 ms | 257 ms |
+
+Parallel parsing does nothing for the warm check, which parses one file, and the
+stat check does nothing for a cold scan, which has no stored stats to compare
+against. Each target needed its own fix.
+
+### Where the warm check's remaining time goes
+
+Measured by instrumenting `full_findings` temporarily and reverting the
+instrumentation, on a warm cache, `check app/_layout.tsx` over 1819 files:
+
+| Phase | Time |
+| --- | --- |
+| walk | 106 ms |
+| stat plus index lookup, every file, then read the one named file | 47 ms |
+| rules | 46 ms |
+| index open | 7 ms |
+| config, resolver, entry points, prune, commit | about 2 ms |
+| process start and exit, baseline load, reporting | about 40 ms |
+
+The walk is now the largest single item and the obvious next lever: `walk.rs`
+uses `WalkBuilder::build_parallel`'s single-threaded sibling, `build`. Nothing
+was changed there, because all three targets pass without it and the plan's
+instruction was not to parallelise the walk unless the warm target needed it.
+It is worth revisiting: the warm check clears its target by about 45 ms, which
+is a real but not generous margin.
