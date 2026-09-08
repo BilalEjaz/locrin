@@ -1,8 +1,9 @@
 use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 
 use crate::lang::Language;
 
@@ -39,6 +40,21 @@ fn build_globset(extra: &[String]) -> anyhow::Result<GlobSet> {
         b.add(Glob::new(&g)?);
     }
     Ok(b.build()?)
+}
+
+/// How many workers the walk spreads itself over.
+///
+/// Capped because the walk is bound by the filesystem rather than by the CPU:
+/// past a handful of workers the extra threads queue on the same disk instead of
+/// finding more work.
+fn walk_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
+}
+
+/// Take a lock held only for pushes and never across a fallible call, so a
+/// poisoned lock means a worker panicked and the data behind it is still whole.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn rel_of(path: &Path, root: &Path) -> String {
@@ -104,25 +120,57 @@ pub fn walk_with_stats(root: &Path, opts: &WalkOptions) -> anyhow::Result<(Vec<P
         !filter_excludes.is_match(format!("{rel}/"))
     });
 
-    let mut out = Vec::new();
-    let mut stats = WalkStats::default();
-    for entry in builder.build() {
-        let entry = entry?;
-        stats.visited += 1;
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let path = entry.path();
-        let rel = rel_of(path, &root);
-        if excludes.is_match(&rel) {
-            continue;
-        }
-        if Language::from_path(path).is_none() {
-            continue;
-        }
-        out.push(path.to_path_buf());
+    builder.threads(walk_threads());
+
+    let out = Mutex::new(Vec::new());
+    let visited = AtomicUsize::new(0);
+    // The sequential walk aborted on the first bad entry. The pool cannot return
+    // early, so the first error is parked here and returned once the walk stops.
+    let failure: Mutex<Option<ignore::Error>> = Mutex::new(None);
+
+    builder.build_parallel().run(|| {
+        let out = &out;
+        let visited = &visited;
+        let failure = &failure;
+        let excludes = Arc::clone(&excludes);
+        let root = root.clone();
+        Box::new(move |result| {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(err) => {
+                    let mut slot = lock(failure);
+                    if slot.is_none() {
+                        *slot = Some(err);
+                    }
+                    return WalkState::Quit;
+                }
+            };
+            visited.fetch_add(1, Ordering::Relaxed);
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                return WalkState::Continue;
+            }
+            let path = entry.path();
+            let rel = rel_of(path, &root);
+            if excludes.is_match(&rel) {
+                return WalkState::Continue;
+            }
+            if Language::from_path(path).is_none() {
+                return WalkState::Continue;
+            }
+            // The lock is taken once per matching file, never while reading the
+            // directory, so the workers contend for it only briefly.
+            lock(out).push(path.to_path_buf());
+            WalkState::Continue
+        })
+    });
+
+    if let Some(err) = lock(&failure).take() {
+        return Err(err.into());
     }
+
+    let mut out = out.into_inner().unwrap_or_else(|e| e.into_inner());
     out.sort();
+    let stats = WalkStats { visited: visited.load(Ordering::Relaxed) };
     Ok((out, stats))
 }
 
@@ -154,6 +202,54 @@ mod tests {
         let files = source_files(&fixture(), &opts).unwrap();
         assert_eq!(files.len(), all.len() - 1);
         assert!(!files.iter().any(|p| p.ends_with("util.ts")));
+    }
+
+    /// The walk runs across a thread pool. This pins its output to the output of
+    /// a single-threaded [`ignore::Walk`] carrying the identical filters, so a
+    /// change to the pool cannot quietly change which files the engine sees.
+    #[test]
+    fn walking_across_the_pool_matches_a_sequential_walk() {
+        let root = canonical_root(&fixture());
+        let excludes = build_globset(&[]).unwrap();
+
+        let filter_root = root.clone();
+        let filter_excludes = build_globset(&[]).unwrap();
+        let mut builder = WalkBuilder::new(&root);
+        builder.hidden(false).git_ignore(true);
+        builder.filter_entry(move |entry| {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                return true;
+            }
+            let rel = rel_of(entry.path(), &filter_root);
+            if rel.is_empty() {
+                return true;
+            }
+            !filter_excludes.is_match(format!("{rel}/"))
+        });
+
+        let mut sequential = Vec::new();
+        let mut visited = 0usize;
+        for entry in builder.build() {
+            let entry = entry.unwrap();
+            visited += 1;
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            if excludes.is_match(rel_of(path, &root)) {
+                continue;
+            }
+            if Language::from_path(path).is_none() {
+                continue;
+            }
+            sequential.push(path.to_path_buf());
+        }
+        sequential.sort();
+        assert!(!sequential.is_empty(), "the fixture must yield files for this comparison to mean anything");
+
+        let (parallel, stats) = walk_with_stats(&fixture(), &WalkOptions::default()).unwrap();
+        assert_eq!(parallel, sequential, "the pooled walk must return exactly the sequential walk's files");
+        assert_eq!(stats.visited, visited, "the pooled walk must visit exactly as many entries");
     }
 
     #[test]

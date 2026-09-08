@@ -447,3 +447,23 @@ cancel drift: 270 / 254 / 261 / 258 ms with the fixes against 285 / 289 / 292 /
 machine is. The margin is about 30 ms and the walk is still 106 ms of the total,
 so `WalkBuilder::build_parallel` remains the lever if the margin is judged too
 thin.
+
+### After the parallel walk
+
+The lever named twice above was pulled: `walk_with_stats` now uses
+`WalkBuilder::build_parallel` over `available_parallelism()` capped at 8, with
+matches collected into a shared vector and sorted at the end, so the file list is
+byte-identical to the sequential walk's. Same command, same FastLift checkout,
+same machine, three runs back to back:
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 3171 ms | 2418 ms | 2522 ms | PASS |
+| warm single-file check | under 300 ms | 175 ms | 196 ms | 243 ms | PASS |
+| startup (`--help`) | under 50 ms | 35 ms | 29 ms | 30 ms | PASS |
+
+The warm check's margin goes from about 20 to 30 ms to about 57 to 125 ms, which
+is roughly the 106 ms the walk was costing, less what the pool cannot remove. The
+spread across the three runs is still the machine: run 3's 243 ms is the same
+loaded-box noise that produced the 302 ms and 335 ms failures recorded above, but
+it now lands inside the target rather than outside it.
