@@ -6,6 +6,7 @@ pub mod index;
 pub mod lang;
 pub mod parse;
 pub mod project;
+pub mod resolve;
 pub mod symbols;
 pub mod tree;
 pub mod walk;
