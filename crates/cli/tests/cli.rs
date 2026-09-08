@@ -169,6 +169,67 @@ fn baseline_accept_does_not_swallow_a_concurrent_edit() {
     assert!(text.contains("src/clean.ts"), "{text}");
 }
 
+/// The rules named by the entries of the baseline file in `dir`.
+fn baseline_rules(dir: &std::path::Path) -> Vec<String> {
+    let text = std::fs::read_to_string(dir.join("locrin-baseline.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["entries"].as_array().unwrap().iter().map(|e| e["rule"].as_str().unwrap().to_string()).collect()
+}
+
+/// The first run against a repository is the one that writes the baseline, and
+/// on a fresh cache (every CI job, every fresh clone) nothing has written the
+/// index the graph rules query. `baseline create` has to build that index for
+/// itself, or the line in the sand silently omits every graph finding and the
+/// next `check` blocks on debt the baseline was supposed to hold.
+#[test]
+fn baseline_create_on_a_fresh_cache_captures_dead_exports() {
+    let dir = copy_fixture();
+    // extra.ts is imported, so it is not an orphan file, but nothing imports the
+    // name it exports.
+    std::fs::write(dir.path().join("src/extra.ts"), "export const unused = 1;\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport \"./extra\";\nexport const total = ok() + bad();\n",
+    )
+    .unwrap();
+
+    locrin(dir.path()).args(["baseline", "create"]).assert().success();
+    let rules = baseline_rules(dir.path());
+    assert!(rules.iter().any(|r| r == "dead-export"), "the baseline holds no dead-export entry: {rules:?}");
+
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert!(dead.is_empty(), "the baseline should have suppressed these: {dead:?} in {v}");
+}
+
+/// The same on the rule the operator declared themselves: a boundary the
+/// repository already violates belongs in the first baseline, and a `check`
+/// straight after `baseline create` has nothing left to block on.
+#[test]
+fn baseline_create_on_a_fresh_cache_captures_boundary_violations() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("locrin.toml"),
+        "[[boundaries]]\nname = \"index stays off dirty\"\nfrom = \"src/index.ts\"\nforbid = [\"src/dirty.ts\"]\n",
+    )
+    .unwrap();
+
+    locrin(dir.path()).args(["baseline", "create"]).assert().success();
+    let rules = baseline_rules(dir.path());
+    assert!(rules.iter().any(|r| r == "boundary-violation"), "the baseline holds no boundary entry: {rules:?}");
+
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{text}");
+}
+
 /// The index database the runs against `dir` wrote, found under the cache
 /// directory the test pinned with `LOCRIN_CACHE_DIR`.
 fn index_db(dir: &std::path::Path) -> PathBuf {
