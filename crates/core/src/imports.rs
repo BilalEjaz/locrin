@@ -50,9 +50,9 @@ fn unquote(s: &str) -> String {
     s.trim_matches(|c| c == '"' || c == '\'').to_string()
 }
 
-/// The value of a plain string literal, or None for anything with escapes or
-/// interpolation: a path the engine cannot read off the source is not a path
-/// it should record.
+/// The value of a plain string literal, or None for an empty one and for anything
+/// with escapes or interpolation: a path the engine cannot read off the source, or
+/// that is not a path at all, is not one it should record.
 fn literal(node: Node, src: &str) -> Option<String> {
     if node.kind() != "string" {
         return None;
@@ -60,7 +60,7 @@ fn literal(node: Node, src: &str) -> Option<String> {
     let mut cursor = node.walk();
     let parts: Vec<Node> = node.named_children(&mut cursor).collect();
     match parts.as_slice() {
-        [] => Some(String::new()),
+        [] => None,
         [f] if f.kind() == "string_fragment" => Some(text(*f, src).to_string()),
         _ => None,
     }
@@ -221,6 +221,7 @@ export { d } from "./d";
 export * from "./e";
 export * as f from "./f";
 export const g = 1;
+import "";
 "#;
 
     fn parsed() -> ParsedFile {
