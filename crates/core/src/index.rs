@@ -288,12 +288,17 @@ impl Index {
     /// owns the pair: call [`Index::commit`] once the run's writes are done, and
     /// drop the index instead if anything failed, which rolls the run back.
     ///
-    /// The write lock is held from the run's first write until the commit, so a
-    /// second locrin writing the same cache waits (up to the busy timeout)
-    /// rather than interleaving with it. Readers are unaffected: the database is
-    /// in WAL mode.
+    /// The transaction is `IMMEDIATE`, so the write lock is taken here rather
+    /// than at the run's first write. That is what makes a second locrin against
+    /// the same cache wait (up to the busy timeout) instead of failing: in WAL
+    /// mode a deferred transaction that has already read and then tries to write
+    /// after another connection committed is refused with a snapshot conflict
+    /// straight away, and the busy handler is never consulted for it. Taking the
+    /// lock up front sends the second run through the busy handler, where
+    /// waiting is what it is for. Readers are unaffected either way: the
+    /// database is in WAL mode. The lock is then held for the whole run.
     pub fn begin(&mut self) -> anyhow::Result<()> {
-        self.conn.execute_batch("BEGIN")?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
         Ok(())
     }
 
@@ -524,6 +529,44 @@ mod tests {
         drop(handle);
         assert_eq!(file_stat(&path).1, 1_000_000_000_000_000_000, "the modification time is nanoseconds");
         assert_eq!(file_stat(&dir.join("nothing.ts")), (0, 0), "a path that is not there answers nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The run-wide transaction takes the write lock when it opens, so a second
+    /// run waits for the first through the busy handler and then says the
+    /// database is busy. A deferred transaction would instead read happily and
+    /// fail on its first write with a snapshot conflict, which the busy handler
+    /// is never consulted for: the second run would fail immediately rather than
+    /// wait its turn.
+    #[test]
+    fn begin_takes_the_write_lock_up_front() {
+        let dir = unique_cache_dir("begin");
+        let path = dir.join("index.db");
+        let mut first = Index::open_at(&path).unwrap();
+        let mut second = Index::open_at(&path).unwrap();
+        // Short, so the test does not sit out the real five second timeout. The
+        // point is that the wait happens at all.
+        let wait = std::time::Duration::from_millis(50);
+        second.conn().busy_timeout(wait).unwrap();
+
+        first.begin().unwrap();
+        assert!(first.begin().is_err(), "one transaction at a time on one connection");
+
+        let started = std::time::Instant::now();
+        let err = second.begin().expect_err("the first run holds the write lock");
+        let waited = started.elapsed();
+        let code = err.downcast_ref::<rusqlite::Error>().map(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _) => f.code,
+            _ => rusqlite::ErrorCode::Unknown,
+        });
+        assert_eq!(code, Some(rusqlite::ErrorCode::DatabaseBusy), "{err:?}");
+        assert!(waited >= wait / 2, "the busy handler has to be consulted, but it gave up after {waited:?}");
+
+        first.commit().unwrap();
+        second.begin().expect("the write lock is free once the first run commits");
+        second.commit().unwrap();
+        drop(first);
+        drop(second);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
