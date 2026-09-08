@@ -313,6 +313,43 @@ fn stored_hash(dir: &std::path::Path, rel: &str) -> Option<String> {
     conn.query_row("SELECT content_hash FROM files WHERE rel = ?1", [rel], |r| r.get(0)).optional().unwrap()
 }
 
+/// The stat recorded for a file belongs to the bytes that were read, so a save
+/// landing between the read and the record leaves the index holding a stat older
+/// than the file's real one. That disagreement is what makes the next run read
+/// the file again instead of trusting the shortcut and serving stale symbols,
+/// edges and findings until somebody edits the file.
+#[test]
+fn a_stored_stat_older_than_the_file_forces_a_re_read() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("scan").assert().success();
+    let before = stored_hash(dir.path(), "src/clean.ts").expect("scan indexes clean.ts");
+
+    // New bytes, same length, same modification time: to a later run the file on
+    // disk looks exactly as it did to the scan, and only the index knows better.
+    let path = dir.path().join("src/clean.ts");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let rewritten = original.replace("return 1;", "return 2;");
+    assert_eq!(rewritten.len(), original.len(), "the rewrite has to keep the file's length");
+    assert_ne!(rewritten, original, "the rewrite has to change the bytes");
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, &rewritten).unwrap();
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+    // The state a run leaves behind when a save landed between its stat and its
+    // record: the stat it stored is older than the file's real one.
+    let conn = rusqlite::Connection::open(index_db(dir.path())).unwrap();
+    conn.execute("UPDATE files SET mtime = mtime - 1 WHERE rel = 'src/clean.ts'", []).unwrap();
+    drop(conn);
+
+    let out = locrin(dir.path()).arg("scan").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("1 changed"), "a stat the index disagrees with has to be read again, but: {text}");
+    assert_ne!(
+        stored_hash(dir.path(), "src/clean.ts").as_deref(),
+        Some(before.as_str()),
+        "the re-read has to record what the file says now"
+    );
+}
+
 /// A narrowed run skips a file whose size and modification time still match the
 /// ones it recorded, but the stat is only a shortcut: when it disagrees the run
 /// still reads and hashes the file. So a file that was touched without being

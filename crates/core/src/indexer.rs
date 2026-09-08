@@ -30,15 +30,36 @@ fn file_imports(file: &ParsedFile) -> Vec<imports::Import> {
     found
 }
 
-/// Records `file` under `hash`. The `files` row is written last on purpose: it
-/// carries the content hash that later runs compare against, so anything that
-/// fails before it leaves the file looking stale and it is redone next run.
+/// Records `file` under `hash`, without a stat for a later run to compare
+/// against, so that run reads and hashes the file rather than skipping it.
+/// Callers that took the file's size and modification time before reading it
+/// pass them to [`record_with_stat`] instead.
+pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver) -> anyhow::Result<()> {
+    record_with_stat(ix, file, hash, resolver, (0, 0))
+}
+
+/// Records `file` under `hash` and `stat`. The `files` row is written last on
+/// purpose: it carries the content hash that later runs compare against, so
+/// anything that fails before it leaves the file looking stale and it is redone
+/// next run.
 ///
 /// That row also carries the file's size and modification time, which is what
-/// lets a later run skip reading the file at all. A path that cannot be stat'ed
-/// records zeroes, and a zero never matches, so such a file is simply always
-/// read and hashed.
-pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver) -> anyhow::Result<()> {
+/// lets a later run skip reading the file at all. `stat` must be the one the
+/// caller took BEFORE it read the bytes it is recording. A stat taken here would
+/// belong to whatever is on disk now, which is not necessarily what was read: a
+/// save landing in between would be stored as the new stat beside the old hash,
+/// and every later narrowed run would match that stat and skip the file, serving
+/// stale symbols, edges and findings until it was edited again.
+///
+/// Zero for either value is "no stat", which never matches, so the file is
+/// simply always read and hashed.
+pub fn record_with_stat(
+    ix: &mut Index,
+    file: &ParsedFile,
+    hash: &str,
+    resolver: &Resolver,
+    stat: (i64, i64),
+) -> anyhow::Result<()> {
     let syms = symbols::extract(file);
     symbols::store(ix, file, &syms)?;
     let edges = edges::from_imports(&file.rel, &file_imports(file), resolver);
@@ -47,8 +68,7 @@ pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver
         file.source.lines().enumerate().filter(|(_, l)| l.contains(ALLOW_MARK)).map(|(i, _)| i as u32 + 1).collect();
     ix.replace_allow_lines(&file.rel, &allow)?;
     let status = if file.has_error { "error" } else { "ok" };
-    let (size, mtime) = crate::index::file_stat(&file.path);
-    ix.upsert_file_stat(&file.rel, file.language.as_str(), hash, status, size, mtime)
+    ix.upsert_file_stat(&file.rel, file.language.as_str(), hash, status, stat.0, stat.1)
 }
 
 #[cfg(test)]
@@ -113,6 +133,40 @@ mod tests {
         broken.conn().execute_batch("DROP TABLE symbols").unwrap();
         assert!(record(&mut broken, &file, "h2", &resolver).is_err());
         assert_eq!(broken.parse_status("src/index.ts").unwrap(), None, "a failed record must not look indexed");
+    }
+
+    /// The stat stored with a file is the one the caller took before it read the
+    /// file, never one taken while recording. A save landing between the read
+    /// and the record would otherwise be stored as the stat of the new bytes
+    /// beside the hash of the old ones, and every later narrowed run would match
+    /// that stat, skip the file, and keep serving stale symbols, edges and
+    /// findings until somebody edited it again.
+    #[test]
+    fn record_stores_the_stat_it_was_given_not_one_it_takes_itself() {
+        let root = canonical_root(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mini"));
+        let indexed: HashSet<String> = ["src/index.ts", "src/util.ts"].iter().map(|s| s.to_string()).collect();
+        let resolver = Resolver::new(&root, indexed);
+        let file = parse_file(&root, &root.join("src/index.ts")).unwrap().unwrap();
+        let on_disk = crate::index::file_stat(&file.path);
+        // What a run holds after a save lands between its stat and its record:
+        // the bytes on disk are newer than the stat it took.
+        let taken_before_the_read = (on_disk.0, on_disk.1 - 1);
+
+        let mut ix = Index::open_in_memory().unwrap();
+        let hash = content_hash(&file.source);
+        record_with_stat(&mut ix, &file, &hash, &resolver, taken_before_the_read).unwrap();
+        assert!(ix.unchanged_by_stat("src/index.ts", taken_before_the_read.0, taken_before_the_read.1).unwrap());
+        assert!(
+            !ix.unchanged_by_stat("src/index.ts", on_disk.0, on_disk.1).unwrap(),
+            "the file on disk is newer than the stat that was recorded, so the next run has to read it"
+        );
+
+        let mut plain = Index::open_in_memory().unwrap();
+        record(&mut plain, &file, &hash, &resolver).unwrap();
+        assert!(
+            !plain.unchanged_by_stat("src/index.ts", on_disk.0, on_disk.1).unwrap(),
+            "a caller with no stat to offer records none, so the file is always read again"
+        );
     }
 
     /// A whole run is one unit: `begin` opens the transaction, every `record`

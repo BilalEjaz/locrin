@@ -35,6 +35,19 @@ struct Pending {
     hash: String,
     is_changed: bool,
     source: String,
+    /// The size and modification time taken before the read, so it belongs to
+    /// the bytes in `source` and never to a later save. See
+    /// [`indexer::record_with_stat`].
+    stat: (i64, i64),
+}
+
+/// A candidate that has been through the parser, waiting to be recorded. `file`
+/// is None when the path had no language the engine parses.
+struct Parsed {
+    hash: String,
+    is_changed: bool,
+    stat: (i64, i64),
+    file: Option<ParsedFile>,
 }
 
 /// The files named on the command line, canonical and inside the root, or None
@@ -108,6 +121,12 @@ fn index_files(
         let rel = rel_path(root, path);
         present.push(rel.clone());
         let in_scope = scope.is_some_and(|s| s.contains(&rel));
+        // The stat is taken before the read, always, because it is stored beside
+        // the hash of the bytes this run reads. A stat taken after the read
+        // would belong to whatever is on disk by then: a save landing in between
+        // would be recorded as the new stat beside the old hash, and every later
+        // narrowed run would match that stat and skip the file for good.
+        let stat = file_stat(path);
         // A narrowed run reads a file only to find out whether it changed, and
         // for almost every file the answer is no. Size and modification time
         // answer that without opening the file, which is what keeps a
@@ -115,11 +134,8 @@ fn index_files(
         // say "certainly unchanged": anything else falls through to the read and
         // the content hash below, so a file touched without being edited is
         // still recognised as unchanged.
-        if !parse_all && !in_scope {
-            let (size, mtime) = file_stat(path);
-            if ix.unchanged_by_stat(&rel, size, mtime)? {
-                continue;
-            }
+        if !parse_all && !in_scope && ix.unchanged_by_stat(&rel, stat.0, stat.1)? {
+            continue;
         }
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let source = match String::from_utf8(bytes) {
@@ -134,20 +150,20 @@ fn index_files(
         if !is_changed && !parse_all && !in_scope {
             continue;
         }
-        pending.push(Pending { path: path.clone(), rel, hash, is_changed, source });
+        pending.push(Pending { path: path.clone(), rel, hash, is_changed, source, stat });
     }
     // Parsing is the single largest cost of a cold run and needs nothing but the
     // source text, so it runs across the pool. `collect` keeps candidate order,
     // which is what the recording pass below and the returned `files` rely on.
-    let parsed: Vec<(String, bool, Option<ParsedFile>)> = pending
+    let parsed: Vec<Parsed> = pending
         .into_par_iter()
         .map(|p| {
-            let Pending { path, rel, hash, is_changed, source } = p;
+            let Pending { path, rel, hash, is_changed, source, stat } = p;
             let file = parse_source(&path, &rel, source);
-            (hash, is_changed, file)
+            Parsed { hash, is_changed, stat, file }
         })
         .collect();
-    for (hash, is_changed, file) in parsed {
+    for Parsed { hash, is_changed, stat, file } in parsed {
         let Some(parsed) = file else { continue };
         if parsed.has_error {
             eprintln!("warning: parse errors in {}; excluded from rules", parsed.rel);
@@ -156,7 +172,7 @@ fn index_files(
             changed += 1;
             if record {
                 any_new |= ix.file_hash(&parsed.rel)?.is_none();
-                indexer::record(ix, &parsed, &hash, resolver)?;
+                indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
                 recorded.insert(parsed.rel.clone());
             }
         }
@@ -175,11 +191,13 @@ fn index_files(
                 continue;
             }
             let Some(path) = by_rel.get(&rel) else { continue };
+            // Before the read, for the same reason as the pass above.
+            let stat = file_stat(path);
             let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
             let Ok(source) = String::from_utf8(bytes) else { continue };
             let hash = content_hash(&source);
             let Some(parsed) = parse_source(path, &rel, source) else { continue };
-            indexer::record(ix, &parsed, &hash, resolver)?;
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
             if !files.iter().any(|f| f.rel == rel) {
                 files.push(parsed);
             }
