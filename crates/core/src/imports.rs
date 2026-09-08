@@ -202,6 +202,148 @@ pub fn extract(file: &ParsedFile) -> Vec<Import> {
     out
 }
 
+/// One significant piece of source text, with comments already removed.
+enum Tok {
+    Word(String),
+    Punct(char),
+    /// A single- or double-quoted literal with no escapes, and the line it opened on.
+    Literal(String, u32),
+    /// A literal the scan will not read as a path: escaped, empty, unterminated, or
+    /// a template literal, which may interpolate.
+    Opaque,
+}
+
+/// Splits `source` into words, punctuation and string literals, dropping `//` and
+/// `/* */` comments. Deliberately not a JavaScript lexer: it does not know regular
+/// expression literals from division, so a quote inside a regex reads as the start
+/// of a string. That string then runs to the end of the line and is discarded as
+/// unterminated, which costs at most the specifiers on that one line.
+fn tokenize(source: &str) -> Vec<Tok> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut line = 1u32;
+    // Steps over a backslash and whatever it escapes, keeping the line count right.
+    let skip_escape = |i: &mut usize, line: &mut u32| {
+        if chars.get(*i + 1) == Some(&'\n') {
+            *line += 1;
+        }
+        *i = (*i + 2).min(chars.len());
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                if chars[i] == '\n' {
+                    line += 1;
+                }
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            let opened = line;
+            let mut value = String::new();
+            let (mut escaped, mut closed) = (false, false);
+            i += 1;
+            while i < chars.len() && chars[i] != '\n' {
+                if chars[i] == '\\' {
+                    escaped = true;
+                    skip_escape(&mut i, &mut line);
+                    continue;
+                }
+                if chars[i] == c {
+                    closed = true;
+                    i += 1;
+                    break;
+                }
+                value.push(chars[i]);
+                i += 1;
+            }
+            out.push(if closed && !escaped && !value.is_empty() { Tok::Literal(value, opened) } else { Tok::Opaque });
+            continue;
+        }
+        if c == '`' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' {
+                    skip_escape(&mut i, &mut line);
+                    continue;
+                }
+                if chars[i] == '\n' {
+                    line += 1;
+                }
+                let done = chars[i] == '`';
+                i += 1;
+                if done {
+                    break;
+                }
+            }
+            out.push(Tok::Opaque);
+            continue;
+        }
+        if c.is_alphanumeric() || c == '_' || c == '$' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
+                i += 1;
+            }
+            out.push(Tok::Word(chars[start..i].iter().collect()));
+            continue;
+        }
+        out.push(Tok::Punct(c));
+        i += 1;
+    }
+    out
+}
+
+/// Specifiers found by scanning the source text, for a file whose tree came back
+/// with errors. Tree-sitter drops whole statements around an ERROR node, so the
+/// syntactic extraction is partial; this text scan is not. Every hit is recorded
+/// as the whole module (`*`), because the engine cannot tell which names a broken
+/// file uses, and a file it cannot read must never make another file look dead.
+pub fn extract_text_fallback(source: &str) -> Vec<Import> {
+    let toks = tokenize(source);
+    let mut out: Vec<Import> = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        let Tok::Literal(specifier, line) = tok else { continue };
+        let before = |n: usize| i.checked_sub(n).map(|k| &toks[k]);
+        // `from "x"` covers both export forms as well as every named import.
+        let triggered = match before(1) {
+            Some(Tok::Word(w)) => w == "from" || w == "import",
+            Some(Tok::Punct('(')) => matches!(before(2), Some(Tok::Word(w)) if w == "import" || w == "require"),
+            _ => false,
+        };
+        if !triggered || out.iter().any(|x| &x.specifier == specifier) {
+            continue;
+        }
+        out.push(Import {
+            specifier: specifier.clone(),
+            kind: ImportKind::Import,
+            line: *line,
+            names: vec!["*".into()],
+            bindings: vec![],
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +412,54 @@ import "";
     fn lines_point_at_the_statement() {
         let imports = extract(&parsed());
         assert_eq!(imports.iter().map(|i| i.line).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6, 7, 10, 11, 12]);
+    }
+
+    /// An unclosed JSX element: tree-sitter's recovery swallows both import
+    /// statements that follow it.
+    const BROKEN: &str = "const shell = <View>;\nimport { a } from \"./a\";\nimport { b } from \"./b\";\n";
+
+    #[test]
+    fn the_text_fallback_finds_imports_the_parser_dropped() {
+        let file = parse_source(Path::new("src/broken.tsx"), "src/broken.tsx", BROKEN.to_string()).unwrap();
+        assert!(file.has_error, "the fixture must be a file that failed to parse");
+        let syntactic: Vec<String> = extract(&file).iter().map(|i| i.specifier.clone()).collect();
+        assert!(syntactic.len() < 2, "recovery must drop at least one of the two imports: {syntactic:?}");
+
+        let found = extract_text_fallback(&file.source);
+        let view: Vec<(&str, u32, Vec<String>)> =
+            found.iter().map(|i| (i.specifier.as_str(), i.line, i.names.clone())).collect();
+        assert_eq!(view, vec![("./a", 2, vec!["*".to_string()]), ("./b", 3, vec!["*".to_string()])]);
+        assert!(found.iter().all(|i| i.kind == ImportKind::Import && i.bindings.is_empty()));
+    }
+
+    #[test]
+    fn the_text_scan_covers_every_form_skips_comments_and_dedups() {
+        let src = concat!(
+            "// import \"./comment\";\n",
+            "/* require(\"./block\") */\n",
+            "import \"./side\";\n",
+            "import def from \"./a\";\n",
+            "export { x } from \"./a\";\n",
+            "export * from \"./b\";\n",
+            "const c = require(\"./c\");\n",
+            "const d = await import(\"./d\");\n",
+            "const e = require(name);\n",
+            "const f = import(`./${name}`);\n",
+            "const g = \"./notanimport\";\n",
+            "import x = require(\"./c\");\n",
+            "import \"./esc\\ape\";\n",
+        );
+        let view: Vec<(String, u32)> =
+            extract_text_fallback(src).iter().map(|i| (i.specifier.clone(), i.line)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("./side".to_string(), 3),
+                ("./a".to_string(), 4),
+                ("./b".to_string(), 6),
+                ("./c".to_string(), 7),
+                ("./d".to_string(), 8),
+            ]
+        );
     }
 }

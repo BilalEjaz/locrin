@@ -1,5 +1,7 @@
 //! Puts one parsed file into every table the index keeps about a file.
 
+use std::collections::HashSet;
+
 use crate::edges;
 use crate::imports;
 use crate::index::Index;
@@ -8,13 +10,28 @@ use crate::resolve::Resolver;
 use crate::symbols;
 use crate::ALLOW_MARK;
 
+/// Every import the file has, syntactic ones first. A file whose tree came back
+/// with errors also gets the text scan merged in, because tree-sitter's recovery
+/// drops whole statements and the leftover edge set would otherwise let a broken
+/// file make the modules it really imports look dead. Syntactic entries win where
+/// both found the same specifier: they carry the names and bindings.
+fn file_imports(file: &ParsedFile) -> Vec<imports::Import> {
+    let mut found = imports::extract(file);
+    if file.has_error {
+        let known: HashSet<String> = found.iter().map(|i| i.specifier.clone()).collect();
+        found
+            .extend(imports::extract_text_fallback(&file.source).into_iter().filter(|i| !known.contains(&i.specifier)));
+    }
+    found
+}
+
 /// Records `file` under `hash`. The `files` row is written last on purpose: it
 /// carries the content hash that later runs compare against, so anything that
 /// fails before it leaves the file looking stale and it is redone next run.
 pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver) -> anyhow::Result<()> {
     let syms = symbols::extract(file);
     symbols::store(ix, file, &syms)?;
-    let edges = edges::from_imports(&file.rel, &imports::extract(file), resolver);
+    let edges = edges::from_imports(&file.rel, &file_imports(file), resolver);
     edges::store(ix, &file.rel, &edges)?;
     let allow: Vec<u32> =
         file.source.lines().enumerate().filter(|(_, l)| l.contains(ALLOW_MARK)).map(|(i, _)| i as u32 + 1).collect();
