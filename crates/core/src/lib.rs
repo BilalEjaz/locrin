@@ -5,6 +5,7 @@ pub mod index;
 pub mod lang;
 pub mod parse;
 pub mod symbols;
+pub mod tree;
 pub mod walk;
 
 pub const ENGINE_NAME: &str = "locrin";
