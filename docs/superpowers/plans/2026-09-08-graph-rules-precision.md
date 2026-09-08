@@ -356,6 +356,21 @@ want before deciding whether to narrow it. No `dead-export` finding was added.
 `unused-import` is untouched at 57, which is correct: it is a file-scope rule that
 reads neither edges nor entry points.
 
+### After review
+
+Both blanket globs were dropped on the founder's ruling: `supabase/functions/**`
+because `**/functions/*/index.*` already matches every `dead-file` finding it
+removed while the wide form silenced 82 hand-verified true `dead-export` findings
+under `_shared`, and `plugins/**` because `app.json` already names the Expo
+plugins that are entry points and a root `plugins/` directory of application code
+would otherwise have its dead files hidden. `wrangler.toml`'s `main` was added as
+an entry source, which answers the one remaining false positive that was not a
+hand-run script, and `dead-file` now ships disabled by default (opt in with
+`[rules.dead-file]` `enabled = true`) until a repository's `entry_points` are
+curated, because 6/9 is below the spec 10.2 precision gate and every remaining
+miss is an entry point named outside JavaScript. These figures were not
+re-measured on FastLift.
+
 ## Benchmarks after Task 15c
 
 Same command, same FastLift checkout, same machine: `cargo test --release -p
