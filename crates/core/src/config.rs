@@ -75,7 +75,7 @@ impl Config {
     }
 
     /// Checks that every configured glob compiles, naming the one that does not,
-    /// and that every boundary reads one way.
+    /// and that every boundary reads one way and names the files it rules on.
     fn validate_globs(&self) -> anyhow::Result<()> {
         let lists: [(&str, &Vec<String>); 3] = [
             ("excludes", &self.excludes),
@@ -91,6 +91,11 @@ impl Config {
             let label = b.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
             if b.forbid.is_empty() == b.allow.is_empty() {
                 anyhow::bail!("boundaries entry {label} must set exactly one of forbid or allow");
+            }
+            // An empty `from` compiles as a glob matching nothing, so without this
+            // the entry would load and then enforce nothing at all.
+            if b.from.is_empty() {
+                anyhow::bail!("boundaries entry {label} must set from");
             }
             for g in std::iter::once(&b.from).chain(b.forbid.iter()).chain(b.allow.iter()) {
                 globset::Glob::new(g)
@@ -240,6 +245,19 @@ mod tests {
             assert!(err.contains("boundaries"), "{err}");
             assert!(err.contains(CONFIG_FILE), "{err}");
         }
+    }
+
+    /// An absent `from` deserialises to an empty string, which compiles as a glob
+    /// that matches nothing. The entry would then sit in the config looking like a
+    /// rule while enforcing nothing, so it is rejected at load instead.
+    #[test]
+    fn a_boundary_needs_a_from_glob() {
+        let dir = fresh("config12");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[[boundaries]]\nforbid = [\"src/db/**\"]\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains("from"), "{err}");
+        assert!(err.contains("boundaries"), "{err}");
+        assert!(err.contains(CONFIG_FILE), "{err}");
     }
 
     #[test]
