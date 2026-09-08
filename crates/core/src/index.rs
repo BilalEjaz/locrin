@@ -74,13 +74,18 @@ pub fn content_hash(source: &str) -> String {
 
 /// The size and modification time a stat-based change check compares against.
 ///
+/// The modification time is in nanoseconds, as fine as the filesystem records.
+/// Seconds would be too coarse to be safe: an editor hook that saves twice
+/// inside one second, ending at the same byte length, would leave the second
+/// save looking unchanged and its findings stale until the file is edited again.
+///
 /// Zero for either value means the filesystem did not answer, which
 /// [`Index::unchanged_by_stat`] treats as "no answer" rather than as a match, so
 /// a platform that cannot supply one simply never takes the shortcut.
 pub fn file_stat(path: &Path) -> (i64, i64) {
     let Ok(meta) = std::fs::metadata(path) else { return (0, 0) };
     let mtime =
-        meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+        meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos() as i64).unwrap_or(0);
     (meta.len() as i64, mtime)
 }
 
@@ -510,6 +515,14 @@ mod tests {
         let (size, mtime) = file_stat(&path);
         assert_eq!(size, 20);
         assert!(mtime > 0, "a file on disk has a modification time");
+        // Nanoseconds, not seconds. Two saves inside one wall clock second is an
+        // ordinary editor-hook workflow, and if they end at the same length a
+        // second-granularity mtime would call the second one unchanged and leave
+        // the file's findings stale until it is edited again.
+        let handle = std::fs::File::options().write(true).open(&path).unwrap();
+        handle.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)).unwrap();
+        drop(handle);
+        assert_eq!(file_stat(&path).1, 1_000_000_000_000_000_000, "the modification time is nanoseconds");
         assert_eq!(file_stat(&dir.join("nothing.ts")), (0, 0), "a path that is not there answers nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
