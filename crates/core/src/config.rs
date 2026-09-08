@@ -20,11 +20,25 @@ pub struct RuleOverride {
     pub severity: Option<Severity>,
 }
 
+/// One import direction the operator has ruled on (spec 7.5). `forbid` names
+/// targets a `from` file may not import; `allow` names the only targets it may.
+/// Exactly one of the two is set, so a boundary always reads one way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Boundary {
+    pub name: Option<String>,
+    pub from: String,
+    pub forbid: Vec<String>,
+    pub allow: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub excludes: Vec<String>,
     pub debug_allowed: Vec<String>,
+    pub entry_points: Vec<String>,
+    pub boundaries: Vec<Boundary>,
     pub rules: BTreeMap<String, RuleOverride>,
 }
 
@@ -33,6 +47,8 @@ impl Default for Config {
         Config {
             excludes: vec![],
             debug_allowed: vec!["**/scripts/**".into(), "**/*.config.*".into(), "**/bin/**".into()],
+            entry_points: vec![],
+            boundaries: vec![],
             rules: BTreeMap::new(),
         }
     }
@@ -43,7 +59,7 @@ impl Config {
     /// error: it means the defaults. A present but unparsable file is an error
     /// naming the path, so the operator can find the file to fix.
     ///
-    /// Every glob is validated here, in both lists, so a bad pattern fails the
+    /// Every glob is validated here, in every list, so a bad pattern fails the
     /// run at the config rather than being dropped by whichever consumer happens
     /// to compile it. `excludes` used to fail late in the walker and
     /// `debug_allowed` used to be discarded in silence.
@@ -58,11 +74,27 @@ impl Config {
         Ok(config)
     }
 
-    /// Checks that every configured glob compiles, naming the one that does not.
+    /// Checks that every configured glob compiles, naming the one that does not,
+    /// and that every boundary reads one way.
     fn validate_globs(&self) -> anyhow::Result<()> {
-        for (field, globs) in [("excludes", &self.excludes), ("debug_allowed", &self.debug_allowed)] {
+        let lists: [(&str, &Vec<String>); 3] = [
+            ("excludes", &self.excludes),
+            ("debug_allowed", &self.debug_allowed),
+            ("entry_points", &self.entry_points),
+        ];
+        for (field, globs) in lists {
             for g in globs {
                 globset::Glob::new(g).with_context(|| format!("{field} contains an invalid glob: {g}"))?;
+            }
+        }
+        for (i, b) in self.boundaries.iter().enumerate() {
+            let label = b.name.clone().unwrap_or_else(|| format!("#{}", i + 1));
+            if b.forbid.is_empty() == b.allow.is_empty() {
+                anyhow::bail!("boundaries entry {label} must set exactly one of forbid or allow");
+            }
+            for g in std::iter::once(&b.from).chain(b.forbid.iter()).chain(b.allow.iter()) {
+                globset::Glob::new(g)
+                    .with_context(|| format!("boundaries entry {label} contains an invalid glob: {g}"))?;
             }
         }
         Ok(())
@@ -177,5 +209,50 @@ mod tests {
         let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
         assert!(err.contains("scripts/["), "{err}");
         assert!(err.contains(CONFIG_FILE), "{err}");
+    }
+
+    #[test]
+    fn parses_entry_points_and_boundaries() {
+        let dir = fresh("config8");
+        std::fs::write(
+            path(&dir).join(CONFIG_FILE),
+            "entry_points = [\"tools/**\"]\n\n[[boundaries]]\nname = \"ui stays off the database\"\nfrom = \"src/ui/**\"\nforbid = [\"src/db/**\"]\n\n[[boundaries]]\nfrom = \"src/db/**\"\nallow = [\"src/shared/**\"]\n",
+        )
+        .unwrap();
+        let c = Config::load(path(&dir)).unwrap();
+        assert_eq!(c.entry_points, vec!["tools/**"]);
+        assert_eq!(c.boundaries.len(), 2);
+        assert_eq!(c.boundaries[0].name.as_deref(), Some("ui stays off the database"));
+        assert_eq!(c.boundaries[0].forbid, vec!["src/db/**"]);
+        assert!(c.boundaries[1].name.is_none());
+        assert_eq!(c.boundaries[1].allow, vec!["src/shared/**"]);
+    }
+
+    #[test]
+    fn a_boundary_needs_exactly_one_of_forbid_or_allow() {
+        for body in [
+            "[[boundaries]]\nfrom = \"src/ui/**\"\n",
+            "[[boundaries]]\nfrom = \"a/**\"\nforbid = [\"b/**\"]\nallow = [\"c/**\"]\n",
+        ] {
+            let dir = fresh("config9");
+            std::fs::write(path(&dir).join(CONFIG_FILE), body).unwrap();
+            let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+            assert!(err.contains("boundaries"), "{err}");
+            assert!(err.contains(CONFIG_FILE), "{err}");
+        }
+    }
+
+    #[test]
+    fn boundary_and_entry_globs_are_validated() {
+        let dir = fresh("config10");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[[boundaries]]\nfrom = \"src/[\"\nforbid = [\"x/**\"]\n")
+            .unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains("src/["), "{err}");
+
+        let dir = fresh("config11");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "entry_points = [\"tools/[\"]\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains("tools/["), "{err}");
     }
 }
