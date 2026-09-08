@@ -35,6 +35,31 @@ fn forbid_and_allow_boundaries_flag_one_finding_per_import_line() {
 }
 
 #[test]
+fn two_boundaries_catching_the_same_line_each_report_it() {
+    // Both boundaries start at `src/ui/**`, so both catch `src/ui/screen.ts:1`
+    // (the import of `../db/client`): the first because `src/db/**` is forbidden,
+    // the second because `src/db/client.ts` is outside its allow list. One
+    // finding per import line per boundary means two findings on that line.
+    let config = Config {
+        boundaries: vec![
+            Boundary {
+                name: Some("ui stays off the database".into()),
+                from: "src/ui/**".into(),
+                forbid: vec!["src/db/**".into()],
+                allow: vec![],
+            },
+            Boundary { name: None, from: "src/ui/**".into(), forbid: vec![], allow: vec!["src/shared/**".into()] },
+        ],
+        ..Config::default()
+    };
+    let out = run_on(Box::new(BoundaryViolation), &fixture("boundary", "flag"), &config);
+    assert_eq!(hits(&out), vec![("src/ui/screen.ts".into(), 1), ("src/ui/screen.ts".into(), 1)], "{out:?}");
+    assert_ne!(out[0].id, out[1].id, "{out:?}");
+    assert!(out[0].evidence.contains("`ui stays off the database`"), "{}", out[0].evidence);
+    assert!(out[1].evidence.contains("`src/ui/** -> outside allow list`"), "{}", out[1].evidence);
+}
+
+#[test]
 fn no_boundaries_means_no_findings() {
     let out = run_on(Box::new(BoundaryViolation), &fixture("boundary", "flag"), &Config::default());
     assert!(out.is_empty());

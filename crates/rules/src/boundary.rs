@@ -2,6 +2,8 @@
 //! 4.1, the config-driven half of boundary checking). Inferred boundaries are
 //! release two.
 
+use std::collections::HashSet;
+
 use globset::{Glob, GlobMatcher, GlobSet, GlobSetBuilder};
 use locrin_core::config::{Boundary, CONFIG_FILE};
 use locrin_core::edges;
@@ -85,17 +87,21 @@ impl Rule for BoundaryViolation {
         }
         let compiled = compile(&ctx.config.boundaries)?;
         let mut out: Vec<Finding> = Vec::new();
+        // One finding per import line per boundary, keyed on exactly that:
+        // several names on one import line collapse into one violation, while a
+        // second boundary catching the same line is its own violation and keeps
+        // its own id, because the anchor carries the label.
+        let mut seen: HashSet<(String, u32, &str)> = HashSet::new();
         for e in edges::resolved(ctx.index)? {
             let Some(to) = e.to_rel.as_deref() else { continue };
             for c in &compiled {
                 if !c.violated(&e.from_rel, to) {
                     continue;
                 }
-                let anchor = format!("{}\x1f{}", c.label, e.specifier);
-                // Several names on one import line are one violation.
-                if out.iter().any(|f| f.file == e.from_rel && f.span.start_line == e.line && f.related[0] == to) {
+                if !seen.insert((e.from_rel.clone(), e.line, c.label.as_str())) {
                     continue;
                 }
+                let anchor = format!("{}\x1f{}", c.label, e.specifier);
                 let evidence = format!(
                     "{} imports \"{}\" ({}), which the boundary `{}` forbids",
                     e.from_rel, e.specifier, to, c.label
