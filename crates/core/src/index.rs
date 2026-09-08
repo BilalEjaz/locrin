@@ -291,6 +291,20 @@ impl Index {
         Ok(n > 0)
     }
 
+    /// Every file that still has at least one unresolved import edge, sorted.
+    ///
+    /// `remove_missing` marks edges into a departed file unresolved without
+    /// touching the importer's own row, so when that file comes back the
+    /// importer is unchanged and would never be re-indexed. This is how a run
+    /// finds the importers whose edges are worth attempting again.
+    pub fn files_with_unresolved_edges(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT from_rel FROM edges WHERE resolution = 'unresolved' ORDER BY from_rel")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn remove_missing(&mut self, present: &[String]) -> anyhow::Result<usize> {
         let mut stmt = self.conn.prepare("SELECT rel FROM files")?;
         let existing: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
@@ -439,6 +453,22 @@ mod tests {
             .unwrap();
         assert_eq!(to_rel, None, "the edge must stop pointing at a file that left the repository");
         assert_eq!(resolution, "unresolved");
+    }
+
+    #[test]
+    fn files_with_unresolved_edges_lists_each_importer_once() {
+        let ix = Index::open_in_memory().unwrap();
+        ix.conn()
+            .execute_batch(
+                "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
+                 VALUES ('b.ts',NULL,'./gone','x','import','unresolved',1),
+                        ('a.ts',NULL,'./gone','x','import','unresolved',1),
+                        ('a.ts',NULL,'./gone','y','import','unresolved',1),
+                        ('a.ts','b.ts','./b','z','import','resolved',2),
+                        ('c.ts',NULL,'react','d','import','external',1)",
+            )
+            .unwrap();
+        assert_eq!(ix.files_with_unresolved_edges().unwrap(), vec!["a.ts".to_string(), "b.ts".to_string()]);
     }
 
     #[test]

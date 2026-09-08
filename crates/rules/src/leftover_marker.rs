@@ -3,7 +3,7 @@
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, Rule, RuleContext};
+use crate::{clean_files, finding, Rule, RuleContext, Scope};
 
 pub struct LeftoverMarker;
 
@@ -65,6 +65,12 @@ impl Rule for LeftoverMarker {
     fn id(&self) -> &'static str {
         "leftover-agent-marker"
     }
+    fn description(&self) -> &'static str {
+        "TODO or FIXME without an issue reference"
+    }
+    fn scope(&self) -> Scope {
+        Scope::File
+    }
     fn category(&self) -> Category {
         Category::Erosion
     }
@@ -75,7 +81,7 @@ impl Rule for LeftoverMarker {
         Confidence::Medium
     }
 
-    fn run(&self, ctx: &RuleContext) -> Vec<Finding> {
+    fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let mut out = Vec::new();
         for file in clean_files(ctx) {
             let mut lines = Vec::new();
@@ -86,6 +92,6 @@ impl Rule for LeftoverMarker {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }

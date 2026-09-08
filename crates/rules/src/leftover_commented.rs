@@ -12,7 +12,7 @@ use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, Rule, RuleContext};
+use crate::{clean_files, finding, Rule, RuleContext, Scope};
 
 pub struct LeftoverCommented;
 
@@ -140,6 +140,12 @@ impl Rule for LeftoverCommented {
     fn id(&self) -> &'static str {
         "leftover-commented-code"
     }
+    fn description(&self) -> &'static str {
+        "Three or more consecutive commented-out statements"
+    }
+    fn scope(&self) -> Scope {
+        Scope::File
+    }
     fn category(&self) -> Category {
         Category::Erosion
     }
@@ -150,7 +156,7 @@ impl Rule for LeftoverCommented {
         Confidence::Medium
     }
 
-    fn run(&self, ctx: &RuleContext) -> Vec<Finding> {
+    fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let mut out = Vec::new();
         for file in clean_files(ctx) {
             for (line, evidence) in runs(file) {
@@ -163,6 +169,6 @@ impl Rule for LeftoverCommented {
                 ));
             }
         }
-        out
+        Ok(out)
     }
 }

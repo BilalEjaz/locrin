@@ -444,6 +444,7 @@ dependencies = [
  "locrin-core",
  "locrin-reporters",
  "locrin-rules",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]
@@ -478,6 +479,7 @@ dependencies = [
 name = "locrin-rules"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "globset",
  "locrin-core",
  "tree-sitter",

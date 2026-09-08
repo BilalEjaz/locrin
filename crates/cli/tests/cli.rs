@@ -169,6 +169,52 @@ fn baseline_accept_does_not_swallow_a_concurrent_edit() {
     assert!(text.contains("src/clean.ts"), "{text}");
 }
 
+/// The index database the runs against `dir` wrote, found under the cache
+/// directory the test pinned with `LOCRIN_CACHE_DIR`.
+fn index_db(dir: &std::path::Path) -> PathBuf {
+    walkdir(&dir.join(".cache"))
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("index.db"))
+        .expect("the run should have written an index database")
+}
+
+/// How the index currently resolves the `src/a.ts` -> `./b` import edge.
+fn edge_resolution(dir: &std::path::Path) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    let conn = rusqlite::Connection::open(index_db(dir)).unwrap();
+    conn.query_row("SELECT resolution FROM edges WHERE from_rel = 'src/a.ts' AND specifier = './b'", [], |r| r.get(0))
+        .optional()
+        .unwrap()
+}
+
+/// Deleting a file marks its importers' edges unresolved, and those importers do
+/// not change, so nothing would re-index them when the file comes back. A run
+/// that indexes a file the index has never seen has to repair them, or every
+/// graph rule would keep calling the restored file dead.
+#[test]
+fn a_restored_file_gets_its_incoming_edges_resolved_again() {
+    let dir = copy_fixture();
+    let b_source = "export function helper(): number {\n  return 1;\n}\n";
+    std::fs::write(dir.path().join("src/a.ts"), "import { helper } from \"./b\";\nexport const v = helper();\n")
+        .unwrap();
+    std::fs::write(dir.path().join("src/b.ts"), b_source).unwrap();
+
+    locrin(dir.path()).arg("check").output().unwrap();
+    assert_eq!(edge_resolution(dir.path()).as_deref(), Some("resolved"));
+
+    std::fs::remove_file(dir.path().join("src/b.ts")).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+    assert_eq!(edge_resolution(dir.path()).as_deref(), Some("unresolved"), "a departed target unresolves the edge");
+
+    std::fs::write(dir.path().join("src/b.ts"), b_source).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+    assert_eq!(
+        edge_resolution(dir.path()).as_deref(),
+        Some("resolved"),
+        "the unchanged importer must be re-indexed once the target is back"
+    );
+}
+
 #[test]
 fn engine_error_exits_two() {
     let dir = copy_fixture();
