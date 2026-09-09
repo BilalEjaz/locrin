@@ -13,3 +13,4 @@ locrin-core = { path = "../core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 globset.workspace = true
+rayon.workspace = true

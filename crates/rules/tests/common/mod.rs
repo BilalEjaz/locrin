@@ -51,7 +51,7 @@ pub fn index_dir(root: &Path, files: &[ParsedFile], config: &Config) -> (Index, 
 pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
     let files = parse_dir(root);
     let (ix, entries) = index_dir(root, &files, config);
-    let ctx = RuleContext { files: &files, config, index: &ix, entries: &entries };
+    let ctx = RuleContext { files: &files, config, index: Some(&ix), entries: &entries };
     run_rules(&[rule], &ctx).unwrap()
 }
 

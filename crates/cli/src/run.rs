@@ -15,7 +15,7 @@ use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
 use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
-use locrin_rules::{file_rules, graph_rules, run_rules, RuleContext};
+use locrin_rules::{file_rules, graph_rules, run_file_rules, run_rules, RuleContext};
 use rayon::prelude::*;
 
 pub struct Options {
@@ -412,12 +412,16 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let indexed = index_files(root, &candidates, report_all, scope.as_ref(), &key, &resolver, &mut ix)?;
 
     let entries = EntryPoints::detect(root, &config.entry_points)?;
-    // The graph rules run every time, over the whole index: they are SQL and a
-    // change anywhere can move their answer. Both rule sets run inside one block
-    // so the shared borrow of `ix` ends before the cache write takes it mutably.
-    let (fresh, graph) = {
-        let ctx = RuleContext { files: &indexed.files, config: &config, index: &ix, entries: &entries };
-        (run_rules(&rules, &ctx)?, run_rules(&graph_rules(), &ctx)?)
+    // The file rules go across the pool, a file at a time: five rules over a
+    // couple of thousand parsed files is the largest cost left in a cold run and
+    // each file is independent of every other. The graph rules run every time,
+    // over the whole index: they are SQL and a change anywhere can move their
+    // answer. The borrow of `ix` ends inside this block, before the cache write
+    // takes it mutably.
+    let fresh = run_file_rules(&rules, &indexed.files, &config, &entries)?;
+    let graph = {
+        let ctx = RuleContext { files: &indexed.files, config: &config, index: Some(&ix), entries: &entries };
+        run_rules(&graph_rules(), &ctx)?
     };
     if record {
         write_cache(&mut ix, &indexed, &fresh, &key)?;

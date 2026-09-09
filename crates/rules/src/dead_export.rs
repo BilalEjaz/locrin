@@ -17,7 +17,7 @@ pub struct DeadExport;
 /// For every file, the names resolved edges take from it. `*` is the whole module.
 pub(crate) fn imported_names(ctx: &RuleContext) -> anyhow::Result<HashMap<String, HashSet<String>>> {
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for e in edges::resolved(ctx.index)? {
+    for e in edges::resolved(ctx.index()?)? {
         if let Some(to) = e.to_rel {
             out.entry(to).or_default().insert(e.name);
         }
@@ -48,7 +48,7 @@ impl Rule for DeadExport {
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let used = imported_names(ctx)?;
         let mut out = Vec::new();
-        for s in symbols::exported(ctx.index)? {
+        for s in symbols::exported(ctx.index()?)? {
             let Some(export_name) = s.export_name.as_deref() else { continue };
             if ctx.entries.is_entry(&s.rel) {
                 continue;

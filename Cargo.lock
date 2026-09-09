@@ -489,6 +489,7 @@ dependencies = [
  "anyhow",
  "globset",
  "locrin-core",
+ "rayon",
  "tree-sitter",
 ]
 
