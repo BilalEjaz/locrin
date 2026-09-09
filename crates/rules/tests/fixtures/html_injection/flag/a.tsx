@@ -21,3 +21,7 @@ export function banner(message: string): void {
 export function fill(selector: string, markup: string): void {
   $(selector).html(markup);
 }
+
+export function decode(el: HTMLElement, raw: string): void {
+  el.innerHTML = _.unescape(raw);
+}

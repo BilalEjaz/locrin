@@ -16,3 +16,7 @@ export function render(el: HTMLElement, body: string): void {
 export function label(el: HTMLElement, name: string): void {
   el.textContent = name;
 }
+
+export function escaped(el: HTMLElement, body: string): void {
+  el.innerHTML = escapeHtml(body);
+}

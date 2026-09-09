@@ -20,6 +20,7 @@ fn every_sink_flags_its_line_in_the_fixture() {
             ("a.tsx".to_string(), 14),
             ("a.tsx".to_string(), 18),
             ("a.tsx".to_string(), 22),
+            ("a.tsx".to_string(), 26),
         ]
     );
     let evidence: Vec<&str> = out.iter().map(|f| f.evidence.as_str()).collect();
@@ -32,6 +33,7 @@ fn every_sink_flags_its_line_in_the_fixture() {
             "insertAdjacentHTML receives a concatenation",
             "document.write receives a variable",
             "$().html receives a variable",
+            "innerHTML receives a call",
         ]
     );
     assert!(out.iter().all(|f| f.fix == FIX), "{:?}", out.first());
@@ -62,12 +64,13 @@ fn findings_have_distinct_ids() {
     let mut ids: Vec<&str> = out.iter().map(|f| f.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), out.len(), "six findings, six ids");
+    assert_eq!(ids.len(), out.len(), "seven findings, seven ids");
 }
 
 /// The safe spellings: markup written here as a literal, a value put through
-/// DOMPurify or a sanitiser named like one, and text set through
-/// `textContent` rather than as markup.
+/// DOMPurify or a sanitiser named like one (`escapeHtml` included, which the
+/// `unescape` exclusion must not catch), and text set through `textContent`
+/// rather than as markup.
 #[test]
 fn literals_sanitiser_calls_and_text_content_are_left_alone() {
     let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "clean"), &Config::default());

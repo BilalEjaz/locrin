@@ -22,7 +22,9 @@
 //!   and a helper called `cleanUpMarkup` that sanitises nothing is believed.
 //!   The names are broad on purpose: a false negative here is a reviewer's
 //!   judgement call, a false positive is noise on every templating helper in the
-//!   repository.
+//!   repository. The one exception is `unescape`, which contains a sanitiser
+//!   name and does the opposite: `_.unescape(html)` turns entities back into
+//!   tags, so a callee containing it is never exempt, however it is spelled.
 //! - **A constant is not a finding, however it is spelled.** A string, a
 //!   template with nothing interpolated, and an addition of those are fixed
 //!   markup written here. An addition is also safe when its parts are
@@ -62,6 +64,11 @@ const FIX: &str =
 /// A callee name that says the value has been through a sanitiser. See the
 /// module doc for why a name is enough and what it costs.
 const SANITIZER: &str = r"(?i)(sanitize|purify|escape|clean|dompurify|xss)";
+/// The one word that contains a sanitiser name and means its opposite.
+/// `unescape(x)` and `_.unescape(html)` turn `&lt;script&gt;` back into a tag,
+/// which is the shape this rule exists to report, and the `escape` half of
+/// `SANITIZER` matched them both.
+const ANTI_SANITIZER: &str = "unescape";
 
 /// Properties whose assignment parses the right-hand side as HTML.
 const HTML_PROPERTIES: [&str; 2] = ["innerHTML", "outerHTML"];
@@ -148,7 +155,15 @@ fn callee_text(call: Node, src: &str) -> String {
 /// Whether the node is a call to something named like a sanitiser. See the
 /// module doc: the name is the whole of the evidence.
 fn is_sanitizer_call(node: Node, src: &str) -> bool {
-    node.kind() == "call_expression" && sanitizer().is_match(&callee_text(node, src))
+    if node.kind() != "call_expression" {
+        return false;
+    }
+    let callee = callee_text(node, src);
+    // Asked before the pattern, because the pattern says yes to this one.
+    if callee.to_ascii_lowercase().contains(ANTI_SANITIZER) {
+        return false;
+    }
+    sanitizer().is_match(&callee)
 }
 
 /// Whether the value is markup this file is responsible for: a fixed string
