@@ -13,6 +13,7 @@ pub mod previous;
 pub mod project;
 pub mod resolve;
 pub mod symbols;
+pub mod testcases;
 pub mod tree;
 pub mod walk;
 
