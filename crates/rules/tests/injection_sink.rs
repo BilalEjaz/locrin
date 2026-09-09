@@ -25,6 +25,8 @@ fn every_sink_family_flags_its_lines_in_the_fixture() {
             ("a.ts".to_string(), 24),
             ("a.ts".to_string(), 29),
             ("a.ts".to_string(), 34),
+            ("a.ts".to_string(), 38),
+            ("a.ts".to_string(), 42),
         ]
     );
     let evidence: Vec<&str> = out.iter().map(|f| f.evidence.as_str()).collect();
@@ -39,10 +41,26 @@ fn every_sink_family_flags_its_lines_in_the_fixture() {
             "SQL built from a concatenation reaches knex.raw",
             "SQL built from a variable reaches prisma.$queryRawUnsafe",
             "setTimeout receives a variable",
+            "shell command built from a template with substitutions",
+            "shell command built from a template with substitutions",
         ]
     );
     let fixes: Vec<&str> = out.iter().map(|f| f.fix.as_str()).collect();
-    assert_eq!(fixes, vec![CODE_FIX, CODE_FIX, COMMAND_FIX, COMMAND_FIX, SQL_FIX, SQL_FIX, SQL_FIX, CODE_FIX]);
+    assert_eq!(
+        fixes,
+        vec![
+            CODE_FIX,
+            CODE_FIX,
+            COMMAND_FIX,
+            COMMAND_FIX,
+            SQL_FIX,
+            SQL_FIX,
+            SQL_FIX,
+            CODE_FIX,
+            COMMAND_FIX,
+            COMMAND_FIX
+        ]
+    );
 }
 
 /// Spec 7.1 metadata: every finding is a High-severity Security finding under
@@ -71,6 +89,8 @@ fn every_finding_carries_the_security_metadata_for_its_family() {
             Some("CWE-89"),
             Some("CWE-89"),
             Some("CWE-95"),
+            Some("CWE-78"),
+            Some("CWE-78"),
         ]
     );
 }
@@ -83,7 +103,7 @@ fn findings_have_distinct_ids() {
     let mut ids: Vec<&str> = out.iter().map(|f| f.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), out.len(), "eight findings, eight ids");
+    assert_eq!(ids.len(), out.len(), "ten findings, ten ids");
 }
 
 /// A literal argument, a tagged template, a parameterised query, an argv-array
@@ -95,15 +115,19 @@ fn literals_tagged_templates_and_parameterised_calls_are_left_alone() {
     assert!(out.is_empty(), "{:?}", hits(&out));
 }
 
-/// The three judgement calls. Two string literals joined with `+` are a
+/// The four judgement calls. Two string literals joined with `+` are a
 /// constant, so the `exec` on line 4 is not a finding. `db.query(q)` where `q`
 /// is a plain string stands at Medium: the identifier reaches a SQL sink, but
 /// its declaration says nothing was interpolated. The allowed line is dropped
-/// by the engine, not by the rule.
+/// by the engine, not by the rule. Interpolated SQL inside a test file is
+/// advisory rather than blocking, so it stands at Medium however it was built:
+/// see the module doc.
 #[test]
 fn a_constant_is_not_a_finding_and_a_plain_variable_is_only_a_medium_one() {
     let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "edge"), &Config::default());
-    assert_eq!(hits(&out), vec![("c.ts".to_string(), 9)]);
+    assert_eq!(hits(&out), vec![("c.ts".to_string(), 9), ("seed.test.ts".to_string(), 2)]);
     assert_eq!(out[0].confidence, Confidence::Medium, "{}", out[0].evidence);
     assert_eq!(out[0].evidence, "SQL built from a variable reaches db.query");
+    assert_eq!(out[1].confidence, Confidence::Medium, "{}", out[1].evidence);
+    assert_eq!(out[1].evidence, "SQL built from a template with substitutions reaches db.query");
 }

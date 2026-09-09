@@ -19,13 +19,25 @@
 //!   parameter. It does not chase the declaration's own operands, and it does
 //!   not follow reassignment, so a query built in two steps reads as the first.
 //! - **Callee names are matched, imports are not resolved.** `exec` and
-//!   `execSync` count bare or under an object that names the child-process
-//!   module (`child_process`, `cp`, `shell`, `sh`), and no other object. That
-//!   restriction is the rule's defence against the two commonest false
-//!   positives in application code: `RegExp.prototype.exec`, where
-//!   `pattern.exec(line)` would otherwise read as a shell command, and
-//!   `db.exec`, which is SQL. The cost is a wrapper module named anything else
-//!   (`runner.exec`) going unseen.
+//!   `execSync` are a shell bare, or under an object that names the
+//!   child-process module (`child_process`, `cp`, `shell`, `sh`). Under any
+//!   other object the call is one of three things and the argument decides:
+//!   `RegExp.prototype.exec` (a regular-expression receiver, read at the call
+//!   or resolved one step, and never a sink), SQL when the string carries a
+//!   query word or when this file cannot read the string at all, and a shell
+//!   command otherwise. So `runner.exec(`rm -rf ${path}`)` is a command sink
+//!   rather than a query, and `db.exec(`insert into ...`)` and `db.exec(stmt)`
+//!   stay SQL. A wrapper whose command line this file cannot read is still
+//!   filed as SQL, which is the commoner meaning of an unplaceable `exec`.
+//! - **SQL inside a test file is advisory.** A test that seeds a fixture
+//!   database by interpolating a constant into `INSERT INTO` is doing exactly
+//!   what the rule says and nothing a reviewer would change: on the corpus that
+//!   shape was 25 of 28 findings, every one accurate and every one harmless. A
+//!   SQL-family finding in a file `locrin_core::testcases::is_test_file`
+//!   recognises therefore stands at Medium confidence whatever its shape. The
+//!   evidence, the severity and the CWE are unchanged, and the code and command
+//!   families are untouched: a shell command built in a test script runs on the
+//!   same machine as one built anywhere else.
 //! - **A constant is not a finding, however it is spelled.** `"ls " + "-la"` and
 //!   a template with no substitution are fixed strings, so they are literals
 //!   here even though the syntax is an expression. Only a non-literal operand
@@ -67,6 +79,13 @@ const ARGV_CALLEES: [&str; 3] = ["spawn", "spawnSync", "execFile"];
 /// Properties that run their first argument as SQL. `$queryRaw` and
 /// `$executeRaw` are absent on purpose: they parameterise their template.
 const SQL_PROPERTIES: [&str; 7] = ["query", "raw", "execute", "exec", "$queryRawUnsafe", "$executeRawUnsafe", "unsafe"];
+/// The words that make a string a query rather than a command line, used to
+/// tell the two meanings of `exec` apart when the receiver says neither. See
+/// `carries_sql`.
+const SQL_KEYWORDS: [&str; 14] = [
+    "select", "insert", "update", "delete", "create", "drop", "alter", "replace", "pragma", "attach", "begin",
+    "commit", "truncate", "vacuum",
+];
 
 /// How the argument was built, which is all the evidence a syntax tree offers.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,6 +231,35 @@ fn built_from_data(value: Node, src: &str) -> bool {
     matches!(sink_kind(value, src), Some(Kind::Template | Kind::Concatenation))
 }
 
+/// The fixed text an argument carries: the fragments of a template, the string
+/// literals of a concatenation. Empty when the shape carries none, which is the
+/// answer for a bare identifier.
+fn literal_text(node: Node, src: &str) -> String {
+    let node = unwrap(node);
+    let mut out = String::new();
+    walk(node, &mut |n: Node| {
+        if n.kind() == "string_fragment" {
+            out.push_str(text(n, src));
+            out.push(' ');
+        }
+    });
+    out
+}
+
+/// Whether the text an argument carries reads as SQL. A value this file cannot
+/// read carries no text and answers yes: `exec` on an object that is neither a
+/// child-process module nor a regular expression is a database handle far more
+/// often than it is a shell wrapper, so SQL is the answer to fall back on. See
+/// the module doc.
+fn carries_sql(node: Node, src: &str) -> bool {
+    let carried = literal_text(node, src).to_ascii_lowercase();
+    let mut words = carried.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).peekable();
+    if words.peek().is_none() {
+        return true;
+    }
+    words.any(|w| SQL_KEYWORDS.contains(&w))
+}
+
 /// Whether a value is a regular expression written here: a literal, or
 /// `new RegExp(...)`.
 fn is_regex_value(node: Node, src: &str) -> bool {
@@ -281,16 +329,22 @@ fn callee_object<'a>(call: Node<'a>, src: &'a str) -> Option<&'a str> {
     Some(text(f.child_by_field_name("object")?, src))
 }
 
-/// Whether any argument is an options object saying `shell: true`, which is
-/// what turns an argv call into a shell call.
+/// Whether any argument is an options object saying `shell: true` or naming a
+/// shell, which is what turns an argv call into a shell call. Node reads the
+/// option either way: `shell: "/bin/sh"` and `shell: process.env.SHELL` run the
+/// command line through a shell exactly as `shell: true` does, and a string is
+/// how the option is written whenever the shell has to be chosen.
 fn has_shell_option(call: Node, src: &str) -> bool {
     args(call).into_iter().map(unwrap).filter(|a| a.kind() == "object").any(|obj| {
         let mut cursor = obj.walk();
         let pairs: Vec<Node> = obj.named_children(&mut cursor).filter(|c| c.kind() == "pair").collect();
         pairs.into_iter().any(|pair| {
             let key = pair.child_by_field_name("key").map(|k| text(k, src).trim_matches(['"', '\'']));
-            let value = pair.child_by_field_name("value").map(|v| text(v, src));
-            key == Some("shell") && value == Some("true")
+            if key != Some("shell") {
+                return false;
+            }
+            let Some(value) = pair.child_by_field_name("value").map(unwrap) else { return false };
+            text(value, src) == "true" || matches!(value.kind(), "string" | "template_string")
         })
     })
 }
@@ -363,26 +417,32 @@ fn code_sink(call: Node, src: &str, decls: &HashMap<&str, Node>) -> Option<Form>
 }
 
 /// A command string handed to a shell.
-fn command_sink(call: Node, src: &str) -> Option<Form> {
+fn command_sink(call: Node, src: &str, decls: &HashMap<&str, Node>) -> Option<Form> {
     if call.kind() != "call_expression" {
         return None;
     }
     let name = callee_name(call, src)?;
-    let object_allowed = match callee_object(call, src) {
+    let known_object = match callee_object(call, src) {
         Some(object) => SHELL_OBJECTS.contains(&object),
         None => true,
     };
+    let first = *args(call).first()?;
     let reaches_a_shell = if SHELL_CALLEES.contains(&name) {
-        object_allowed
+        // An `exec` on an object this file cannot place is decided by what it
+        // carries: a command line is a command line whatever the wrapper is
+        // called, and reading `runner.exec(`rm ${x}`)` as SQL because the
+        // property is in the SQL set was filing a shell injection under the
+        // wrong weakness. A regular expression is neither.
+        known_object || (!is_regexp_receiver(call, src, decls) && !carries_sql(first, src))
     } else if ARGV_CALLEES.contains(&name) {
-        object_allowed && has_shell_option(call, src)
+        known_object && has_shell_option(call, src)
     } else {
         false
     };
     if !reaches_a_shell {
         return None;
     }
-    let kind = sink_kind(*args(call).first()?, src)?;
+    let kind = sink_kind(first, src)?;
     // A variable is one step short of evidence: the shape says nothing was
     // interpolated here, only that this file cannot see what was.
     let confidence = if kind == Kind::Variable { Confidence::Medium } else { Confidence::High };
@@ -453,16 +513,22 @@ fn scan(rule: &InjectionSink, file: &ParsedFile) -> Vec<Finding> {
             return;
         }
         let Some(form) =
-            code_sink(n, src, &decls).or_else(|| command_sink(n, src)).or_else(|| sql_sink(n, src, &decls))
+            code_sink(n, src, &decls).or_else(|| command_sink(n, src, &decls)).or_else(|| sql_sink(n, src, &decls))
         else {
             return;
+        };
+        // Interpolated SQL in a test file is advisory. See the module doc.
+        let confidence = if form.cwe == "CWE-89" && locrin_core::testcases::is_test_file(&file.rel) {
+            Confidence::Medium
+        } else {
+            form.confidence
         };
         // The evidence joins the symbol in the anchor so that two sinks in one
         // function are two findings rather than one id written twice.
         let at = line(n);
         let anchor = format!("{}\x1f{}", anchor_for(file, at), form.evidence);
         let mut finding = finding_at(rule, &file.rel, line_span(file, at), &anchor, &form.evidence, form.fix);
-        finding.confidence = form.confidence;
+        finding.confidence = confidence;
         finding.owasp = Some("A03:2021".to_string());
         finding.cwe = Some(form.cwe.to_string());
         out.push(finding);

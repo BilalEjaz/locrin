@@ -1,4 +1,4 @@
-import { exec, execSync } from "node:child_process";
+import { exec, execSync, spawnSync } from "node:child_process";
 
 export function runUserCode(source: string): unknown {
   return eval(source);
@@ -32,4 +32,12 @@ export function rawLookup(prisma: any, id: string) {
 export function schedule(): void {
   const code = "doWork(" + Date.now() + ")";
   setTimeout(code, 10);
+}
+
+export function remove(runner: any, path: string): void {
+  runner.exec(`rm -rf ${path}`);
+}
+
+export function build(target: string): void {
+  spawnSync(`make ${target}`, { shell: "/bin/sh" });
 }
