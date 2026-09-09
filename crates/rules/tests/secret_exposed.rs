@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use common::{fixture, hits, run_on};
 use locrin_core::config::{Config, RuleOverride};
-use locrin_core::finding::{make_id, Category, Confidence, Severity};
+use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity};
 use locrin_rules::secrets::patterns::PATTERNS;
 use locrin_rules::secrets::SecretExposed;
 
@@ -98,6 +98,19 @@ fn a_structural_token_beside_a_key_does_not_excuse_the_key() {
             (20, "Google API key"),
         ]
     );
+}
+
+/// Two private keys in one file are two decisions. Anchored on the header they
+/// were one, because the header is the same string in every repository; the
+/// anchor is the hash of the key material, so they are two.
+#[test]
+fn two_private_keys_in_one_file_are_two_findings_with_two_ids() {
+    let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
+    let keys: Vec<&Finding> = out.iter().filter(|f| provider(&f.evidence) == "Private key block").collect();
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert_ne!(keys[0].id, keys[1].id, "two keys, one id");
+    // The evidence masks the material, not the header every key block shares.
+    assert!(keys.iter().all(|f| f.evidence.contains("MIIE")), "{keys:?}");
 }
 
 #[test]

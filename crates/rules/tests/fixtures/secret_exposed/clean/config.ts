@@ -200,6 +200,11 @@ export const envUri = `postgresql://${process.env.PGUSER}:${process.env.PGPASSWO
 
 // Key material and headers built at runtime rather than written down.
 export const publicKeyBlock = "-----BEGIN PUBLIC KEY-----";
+// A header with no key material after it: a string a program strips out or
+// compares against. There is no key here, and the header is the same string in
+// every repository, so a finding anchored on it would be one id for every key.
+export const stripped = pem.replace("-----BEGIN PRIVATE KEY-----", "");
+export const looksLikeAKey = key.startsWith("-----BEGIN RSA PRIVATE KEY-----");
 export const basicAuthHeader = `Basic ${btoa(user + ":" + secret)}`;
 export const bearerHeader = { Authorization: `Bearer ${accessToken}` };
 
@@ -239,6 +244,8 @@ declare const credentials: Record<string, string>;
 declare const purchasesConfiguration: Record<string, string>;
 declare const pagerDutyIntegrationKey: string;
 declare const dbPassword: string;
+declare const pem: string;
+declare const key: string;
 declare function getExpoTokenFromSecureStore(): string;
 type ExpoAccessTokenConfiguration = string;
 type PagerDutyIntegrationKeyReference = string;

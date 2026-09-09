@@ -110,6 +110,10 @@ pub const JWT: &str = "JSON Web Token";
 pub const BASIC_AUTH: &str = "HTTP basic auth credential";
 /// The label of the entry that reads a token out of an `Authorization` header.
 pub const BEARER: &str = "bearer token literal";
+/// The label of the entry whose match is a header rather than a credential. The
+/// value [`super`] reports for it is the key material that follows, not the
+/// header, which is the same string in every repository on earth.
+pub const PRIVATE_KEY: &str = "Private key block";
 /// The labels whose gate is [`super::entropy::looks_random`].
 pub const GENERIC: [&str; 3] = ["password assignment", "API key assignment", "secret assignment"];
 
@@ -486,10 +490,7 @@ pub const PATTERNS: &[Pattern] = &[
         regex: assigned!(r#"mistral[^"'\n]{0,25}(?:api[_-]?)?key"#, r#"[A-Za-z0-9]{32}"#),
     },
     // Key material and headers.
-    Pattern {
-        provider: "Private key block",
-        regex: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
-    },
+    Pattern { provider: PRIVATE_KEY, regex: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----" },
     Pattern { provider: BASIC_AUTH, regex: r#"(?i)basic\s+(?P<v>[A-Za-z0-9+/]{20,}={0,2})"# },
     Pattern { provider: BEARER, regex: assigned!(r#"authorization"#, r#"bearer\s+"#, r#"[A-Za-z0-9._-]{20,}"#) },
     // The three generic entries, every one of them behind the entropy gate.

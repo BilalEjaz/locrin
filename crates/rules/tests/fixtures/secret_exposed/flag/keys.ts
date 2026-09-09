@@ -155,7 +155,13 @@ export const groqApiKey = "gsk_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0";
 export const perplexityApiKey = "pplx-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
 export const cohereApiKey = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0";
 export const mistralApiKey = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
-export const signingPem = "-----BEGIN RSA PRIVATE KEY-----";
+export const signingPem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsynthetic0fixture0material0for0locrin0only0A1b2\n-----END RSA PRIVATE KEY-----";
+// The same header with its material on the next source line, which is how a
+// PEM written into a template literal reaches a repository. A different key,
+// so a different finding with a different id.
+export const deployPem = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEsynthetic0second0key0for0locrin0Zk4N
+-----END PRIVATE KEY-----`;
 export const basicAuthHeader = "Basic bG9jcmluLXNlcnZpY2U6WHE3UnQyTG05UHY0Wm44Sw==";
 export const requestHeaders = { Authorization: "Bearer A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6" };
 export const dbPassword = "Xq7Rt2Lm9Pv4Zn8Kb3Wd6Yc1";

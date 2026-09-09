@@ -189,6 +189,49 @@ fn decodes_to_a_pair(value: &str) -> bool {
         && !pass.contains(':')
 }
 
+/// The shortest run of key material a private key header is allowed to be
+/// followed by on its own line, where the material is what a written `\n`
+/// escape separates from the header, and on the next source line, where a run
+/// this long at the start of a line is a PEM body and not an identifier.
+const SAME_LINE_MATERIAL: usize = 16;
+const NEXT_LINE_MATERIAL: usize = 40;
+
+/// The key material a private key header is followed by: the base64 run after a
+/// `\n` escape on the same line, or the run that opens the next source line.
+///
+/// The header on its own is not a key. It is the string a program compares
+/// against (`key.startsWith("-----BEGIN RSA PRIVATE KEY-----")`) or strips out
+/// (`pem.replace("-----BEGIN PRIVATE KEY-----", "")`), and it is character for
+/// character the same in every repository, so a finding anchored on it gives
+/// every private key in a file one id and one decision. The material is both
+/// what makes it a key and what tells two of them apart.
+fn key_material<'a>(rest_of_line: &'a str, next_line: Option<&'a str>) -> Option<&'a str> {
+    let same = base64_run(rest_of_line);
+    if same.len() >= SAME_LINE_MATERIAL {
+        return Some(same);
+    }
+    let next = base64_run(next_line?);
+    (next.len() >= NEXT_LINE_MATERIAL).then_some(next)
+}
+
+/// The base64 run at the front of a string, after the separators a header and
+/// its material can have between them inside a source literal: whitespace, the
+/// quote that closes the string, a comma, the `+` of a concatenation, and the
+/// two characters of a written `\n`.
+fn base64_run(s: &str) -> &str {
+    let mut rest = s;
+    while let Some(next) = rest
+        .strip_prefix("\\r\\n")
+        .or_else(|| rest.strip_prefix("\\n"))
+        .or_else(|| rest.strip_prefix(|c: char| c.is_whitespace() || "\"'`,+".contains(c)))
+    {
+        rest = next;
+    }
+    let end =
+        rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')).unwrap_or(rest.len());
+    &rest[..end]
+}
+
 /// The gates, in the order they cost least to run. `start` is where the whole
 /// match begins, so the JWT arm can ask what the value was assigned to.
 fn reported(provider: &str, value: &str, line: &str, start: usize) -> bool {
@@ -219,11 +262,15 @@ fn reported(provider: &str, value: &str, line: &str, start: usize) -> bool {
 
 fn scan(rule: &SecretExposed, file: &ParsedFile) -> Vec<Finding> {
     let compiled = patterns::compiled();
+    // The whole file, because one entry reads past the line it matched on: a
+    // private key header is regularly the last thing on its line and its
+    // material the first thing on the next.
+    let lines: Vec<&str> = file.source.lines().collect();
     let mut out = Vec::new();
     // One finding per line per provider: a key repeated twice on one line is one
     // decision to make, and two providers on one line are two.
     let mut seen: HashSet<(u32, &'static str)> = HashSet::new();
-    for (i, line) in file.source.lines().enumerate() {
+    for (i, line) in lines.iter().copied().enumerate() {
         let lineno = i as u32 + 1;
         if line.len() > MAX_LINE || !compiled.set.is_match(line) {
             continue;
@@ -231,8 +278,16 @@ fn scan(rule: &SecretExposed, file: &ParsedFile) -> Vec<Finding> {
         for idx in compiled.set.matches(line) {
             let pattern = &patterns::PATTERNS[idx];
             for caps in compiled.regexes[idx].captures_iter(line) {
-                let value = patterns::value_of(&caps);
-                let start = caps.get(0).map(|m| m.start()).unwrap_or(0);
+                let whole = caps.get(0).map(|m| m.range()).unwrap_or(0..0);
+                let start = whole.start;
+                let value = if pattern.provider == patterns::PRIVATE_KEY {
+                    match key_material(&line[whole.end..], lines.get(i + 1).copied()) {
+                        Some(material) => material,
+                        None => continue,
+                    }
+                } else {
+                    patterns::value_of(&caps)
+                };
                 if value.is_empty() || !reported(pattern.provider, value, line, start) {
                     continue;
                 }
@@ -282,5 +337,29 @@ impl Rule for SecretExposed {
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A private key header is a key when something follows it. The three
+    /// clean shapes below are the ones a repository actually writes: a header
+    /// compared against, a header stripped out, and a header at the end of a
+    /// line whose next line is ordinary code.
+    #[test]
+    fn key_material_is_what_follows_the_header_and_a_bare_header_is_not_a_key() {
+        let body = "MIIEowIBAAKCAQEAsynthetic0fixture0material0for0locrin0only0A1b2";
+        assert_eq!(key_material(&format!("\n{body}\n-----END"), None), Some(body), "after a written newline");
+        assert_eq!(key_material("\";", Some(&format!("  \"{body}\","))), Some(body), "on the next source line");
+        assert_eq!(key_material("\", \"\")", Some("export const looksLikeAKey = false;")), None, "stripped out");
+        assert_eq!(key_material("\");", Some("declare const pem: string;")), None, "compared against");
+        assert_eq!(key_material("", None), None, "the last line of a file");
+        // Sixteen characters on the same line is material; a short identifier
+        // opening the next line is not.
+        assert_eq!(key_material("\nMIIEowIBAAKCAQEA", None).map(str::len), Some(16));
+        assert_eq!(key_material("\nMIIEowIBAAKCAQE", None), None, "fifteen characters is not a body");
+        assert_eq!(key_material("\";", Some("someLongIdentifierName.method();")), None, "an identifier, not a body");
     }
 }
