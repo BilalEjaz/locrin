@@ -4,10 +4,12 @@
 //! same.
 //!
 //! What counts as an assertion is [`locrin_core::testcases`]: a call to
-//! `expect` or `assert` in any form, a chai `.should` chain, or a call to a
-//! same-file function whose own body asserts. That is one file's syntax and
-//! nothing more, which is why the rule ships at Medium confidence and where its
-//! false positives come from:
+//! `expect` or `assert` in any form, a chai `.should` chain, a Testing Library
+//! query that throws when it finds nothing (`getBy*`, `getAllBy*`, `findBy*`,
+//! `findAllBy*`, however the call is spelled), or a call to a same-file function
+//! whose own body asserts. That is one file's syntax and nothing more, which is
+//! why the rule ships at Medium confidence and where its false positives come
+//! from:
 //!
 //! - **Helpers are followed one level, not two.** A case calling a helper that
 //!   asserts is clean; a case calling a helper that calls a second helper that
@@ -21,7 +23,13 @@
 //!   project whose house assertion is `verify(x).equals(1)` or `t.is(a, b)`
 //!   (ava, tap) reads as assertion-free throughout. Matching on every call that
 //!   might be a matcher would flag nothing at all, so the rule holds to the
-//!   three dialects it can name.
+//!   dialects it can name. The throwing queries are named for a corpus reason:
+//!   in a React or React Native repository `render(<X />).getByText("...")` is
+//!   the house style rather than a minority spelling, and all 20 findings in the
+//!   first precision sample were that shape
+//!   (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+//!   `queryBy*` is not one of them: it returns null instead of throwing, so a
+//!   case whose only query is a `queryBy*` still checks nothing.
 //! - **Some case forms are not recognised.** `it.skip.each(table)(...)` is not
 //!   read as a case, because its callee is a member of a member rather than of
 //!   an identifier. It is skipped, so the rule would not report it either way,

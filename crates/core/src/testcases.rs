@@ -216,6 +216,18 @@ fn count_assertions(node: Node, src: &str, helpers: &HashSet<String>) -> u32 {
     count
 }
 
+/// Query prefixes that throw when nothing matches. Testing Library's `getBy*`
+/// and `getAllBy*` throw straight away and `findBy*` / `findAllBy*` return a
+/// promise that rejects, so a call to one of them fails the case when the thing
+/// it looks for is not there: it is an assertion however it is spelled.
+/// `queryBy*` and `queryAllBy*` are deliberately absent, because they return
+/// null rather than throwing and check nothing on their own.
+const THROWING_QUERY_PREFIXES: [&str; 4] = ["getBy", "getAllBy", "findBy", "findAllBy"];
+
+fn is_throwing_query(name: &str) -> bool {
+    THROWING_QUERY_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 /// Whether a single node is an assertion. Counting per node rather than per
 /// statement keeps `expect(x).toBe(1)` at one: the outer call's callee is a member
 /// whose leftmost part is a call, not the `expect` identifier.
@@ -226,11 +238,16 @@ fn asserts(node: Node, src: &str, helpers: &HashSet<String>) -> bool {
             match func.kind() {
                 "identifier" => {
                     let name = text(func, src);
-                    matches!(name, "expect" | "assert") || helpers.contains(name)
+                    matches!(name, "expect" | "assert") || is_throwing_query(name) || helpers.contains(name)
                 }
-                // `expect.assertions(1)`, `assert.equal(a, b)`.
+                // `expect.assertions(1)`, `assert.equal(a, b)`, and the throwing
+                // queries as they are usually written: `screen.getByText(...)`,
+                // `within(row).getAllByRole(...)`. The property is read on its
+                // own because the object of the second form is a call, so there
+                // is no leftmost identifier to recognise.
                 "member_expression" => {
                     leftmost_identifier(func).is_some_and(|id| matches!(text(id, src), "expect" | "assert"))
+                        || func.child_by_field_name("property").is_some_and(|p| is_throwing_query(text(p, src)))
                 }
                 _ => false,
             }
@@ -332,7 +349,11 @@ describe.skip("skipped suite", () => {
         assert_eq!(
             view,
             vec![
-                ("renders a row", 10, false, 1),
+                // Two: the `expect(...)` and the `getByText("hi")` inside it,
+                // which throws on its own. Rules ask whether a case asserts at
+                // all, so counting a nested throwing query twice over is
+                // harmless; missing it entirely was not.
+                ("renders a row", 10, false, 2),
                 ("only case", 15, false, 1),
                 ("skipped by property", 19, true, 1),
                 ("skipped by prefix", 23, true, 1),
@@ -397,6 +418,61 @@ it(() => {
                 // rule reports `<unnamed>` with nothing asserted rather than
                 // reading the name argument as a body.
                 ("<unnamed>", 0),
+            ]
+        );
+    }
+
+    /// Testing Library's `getBy*` / `findBy*` queries throw when nothing matches,
+    /// so a case whose only check is one of them is fully checked and asserts.
+    /// `queryBy*` returns null instead and checks nothing on its own.
+    #[test]
+    fn throwing_queries_assert_and_query_by_does_not() {
+        let src = r#"it("bare getBy", () => {
+  getByText("hi");
+});
+
+it("screen member", () => {
+  screen.getByRole("button");
+});
+
+it("within a scope", () => {
+  within(row).getAllByTestId("cell");
+});
+
+it("awaited find", async () => {
+  await findByText("hi");
+});
+
+it("awaited find all through screen", async () => {
+  await screen.findAllByText("hi");
+});
+
+it("query only", () => {
+  const found = queryByText("hi");
+  void found;
+});
+
+it("query all through screen only", () => {
+  screen.queryAllByText("hi");
+});
+
+it("waits on a throwing query", async () => {
+  await waitFor(() => screen.getByText("hi"));
+});
+"#;
+        let cases = extract(&parsed(src));
+        let view: Vec<(&str, u32)> = cases.iter().map(|c| (c.name.as_str(), c.assertions)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("bare getBy", 1),
+                ("screen member", 1),
+                ("within a scope", 1),
+                ("awaited find", 1),
+                ("awaited find all through screen", 1),
+                ("query only", 0),
+                ("query all through screen only", 0),
+                ("waits on a throwing query", 1),
             ]
         );
     }

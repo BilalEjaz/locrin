@@ -1,4 +1,4 @@
-import { render } from "./harness";
+import { render, queryByText } from "./harness";
 
 const Row = "row";
 
@@ -19,5 +19,9 @@ describe("row list", () => {
   it("keeps the row count", () => {
     const list = buildList();
     expect(list.count).toBe(1);
+  });
+
+  it("looks for a row with a non-throwing query", () => {
+    queryByText("row");
   });
 });

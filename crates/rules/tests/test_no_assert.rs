@@ -7,10 +7,20 @@ use locrin_rules::test_no_assert::TestNoAssert;
 #[test]
 fn flags_cases_that_run_code_without_asserting_anything() {
     let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "flag"), &rule_on("test-no-assert"));
-    assert_eq!(hits(&out), vec![("a.test.ts".into(), 10), ("a.test.ts".into(), 15)], "{out:?}");
+    assert_eq!(
+        hits(&out),
+        vec![("a.test.ts".into(), 10), ("a.test.ts".into(), 15), ("a.test.ts".into(), 24)],
+        "{out:?}"
+    );
     assert_eq!(
         out.iter().map(|f| f.evidence.as_str()).collect::<Vec<_>>(),
-        vec!["test \"mounts without throwing\" has no assertion", "test \"renders a row\" has no assertion"]
+        vec![
+            "test \"mounts without throwing\" has no assertion",
+            "test \"renders a row\" has no assertion",
+            // `queryByText` returns null rather than throwing, so unlike its
+            // `getByText` twin it checks nothing on its own.
+            "test \"looks for a row with a non-throwing query\" has no assertion"
+        ]
     );
     assert!(out.iter().all(|f| f.fix.starts_with("Assert on the outcome")), "{:?}", out[0].fix);
     assert!(
@@ -25,13 +35,14 @@ fn flags_cases_that_run_code_without_asserting_anything() {
         out.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
         vec![
             make_id("test-no-assert", "a.test.ts", "case\x1fmounts without throwing"),
-            make_id("test-no-assert", "a.test.ts", "case\x1frenders a row")
+            make_id("test-no-assert", "a.test.ts", "case\x1frenders a row"),
+            make_id("test-no-assert", "a.test.ts", "case\x1flooks for a row with a non-throwing query")
         ]
     );
 }
 
 #[test]
-fn helper_assertions_every_assertion_dialect_skips_and_non_test_files_are_clean() {
+fn helper_assertions_every_dialect_a_throwing_query_skips_and_non_test_files_are_clean() {
     let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "clean"), &rule_on("test-no-assert"));
     assert!(out.is_empty(), "{out:?}");
 }

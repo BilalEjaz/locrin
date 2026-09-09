@@ -30,4 +30,9 @@ describe("row", () => {
   });
 
   it.todo("covers the empty state");
+
+  it("checks the row with a throwing query", () => {
+    const { getByText } = render(<Row />);
+    getByText("row");
+  });
 });
