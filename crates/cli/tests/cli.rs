@@ -1001,6 +1001,33 @@ fn changed_reports_a_test_this_edit_skipped_and_not_one_the_index_already_knew()
     assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
 }
 
+/// A named path is a scope like `--changed`, and the file it names is usually
+/// unchanged: the developer is asking about a file, not reporting an edit. Such a
+/// file is parsed for the rules without being re-recorded, so the run has to take
+/// its previous version from the index anyway. Without that, every `check <path>`
+/// over a suite with a legacy skip reports it again, forever.
+#[test]
+fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(
+        &test_file,
+        "describe(\"rows\", () => {\n  it.skip(\"legacy\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
+    )
+    .unwrap();
+    // The whole-repository run that records the skip. It reports it once (the
+    // index had never seen the file), and the index remembers it from here on.
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    // Twice, because the first named-path run must not be the thing that teaches
+    // the index: the file is unchanged, so nothing about it moves between them.
+    for run in 1..=2 {
+        let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(newly_skipped(&v).is_empty(), "named-path run {run} reported a skip the index knew: {v}");
+    }
+}
+
 /// For a diff scope git overrides the index: the base commit is the "before" a
 /// pull request is judged against, and on a fresh CI clone it is the only one
 /// there is.

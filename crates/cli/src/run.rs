@@ -382,6 +382,16 @@ fn index_files(
             // absence is the safe state: a miss costs a parse, a stale hit
             // reports findings from a version nobody can see.
             cache::clear(ix, &parsed.rel)?;
+        } else if ix.file_hash(&parsed.rel)?.is_some() {
+            // An unchanged file that reached the parser is one a narrowed run
+            // named (or one a full run could not serve from the cache), and the
+            // rules are about to run over it. It is unchanged, so what the index
+            // holds for it is both its stored version and its previous one, and
+            // without an entry a rule that answers with a change reads it as
+            // having no history and reports every skip in it as new, on every
+            // run. The repair pass below captures the same thing for the same
+            // reason.
+            previous.skipped_tests.insert(parsed.rel.clone(), ix.skipped_tests(&parsed.rel)?);
         }
         reads.insert(parsed.rel.clone(), FileRead { hash, stat });
         files.push(parsed);

@@ -15,7 +15,12 @@
 //! - **The index.** An ordinary run captures what the index remembered about
 //!   each file it is about to re-record, before the record overwrites it. That
 //!   is the version the last run saw, so on a developer's machine "previous"
-//!   means "since I last ran locrin", which is the edit in front of them.
+//!   means "since I last ran locrin", which is the edit in front of them. A file
+//!   the run reads without re-recording, because it is unchanged and was named
+//!   on the command line or a full run could not serve it from the cache, is
+//!   captured the same way: what the index holds for it is its previous version
+//!   as well as its stored one, so a `check <path>` over an untouched file is
+//!   silent about the skips that file already carried.
 //! - **Git.** A `--base` or `--since` run overrides the index for every file in
 //!   the diff with what the file held at the base revision. That is the "before"
 //!   a pull request is actually judged against, and on a fresh CI clone it is the
