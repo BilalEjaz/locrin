@@ -76,6 +76,20 @@ struct Indexed {
     reads: HashMap<String, FileRead>,
 }
 
+/// How much of the repository one pass has to answer for, which is the one
+/// question `index_files` cannot answer for itself.
+struct Plan<'a> {
+    /// Every candidate is either parsed or served from the findings cache. Set
+    /// for a whole-repository check; clear for a run narrowed to a scope, which
+    /// leaves everything outside it unread.
+    report_all: bool,
+    /// The files the run reports for, or None when it reports for everything.
+    scope: Option<&'a HashSet<String>>,
+    /// Whether anything will read `Indexed::before`. Only a `--changed` run may,
+    /// so only a `--changed` run pays for the edge queries that build it.
+    capture_before: bool,
+}
+
 /// A candidate that has been read and judged, waiting to be parsed.
 struct Pending {
     path: PathBuf,
@@ -192,19 +206,18 @@ fn neighbours(ix: &Index, set: &HashSet<String>) -> anyhow::Result<HashSet<Strin
 /// skipped: a binary blob carrying a source extension is a repository quirk the
 /// engine tolerates, and the rest of the repository is still worth indexing.
 ///
-/// `capture_before` is what the caller knows and this function cannot: whether
-/// anything will read `Indexed::before`. Only a `--changed` run may, so only a
-/// `--changed` run pays for the edge queries that build it.
+/// The three fields of `Plan` are what the caller knows and this function
+/// cannot; they travel together because each one is an answer to the same
+/// question, how much of the repository this run has to answer for.
 fn index_files(
     root: &Path,
     candidates: &[PathBuf],
-    report_all: bool,
-    scope: Option<&HashSet<String>>,
-    capture_before: bool,
+    plan: &Plan,
     key: &CacheKey,
     resolver: &Resolver,
     ix: &mut Index,
 ) -> anyhow::Result<Indexed> {
+    let Plan { report_all, scope, capture_before } = *plan;
     // Only a run that has to answer for the whole repository ever serves a
     // cached row: every `serve` below sits behind `report_all`. Loading and
     // deserialising every row for a narrowed run (a hook's `--changed`, a named
@@ -467,8 +480,8 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // below and the widening at the end of this function. Every other run reads
     // neither, so it does not pay to build them.
     let scope_is_watermark = scope.is_none() && opts.changed_only;
-    let indexed =
-        index_files(root, &candidates, report_all, scope.as_ref(), scope_is_watermark, &key, &resolver, &mut ix)?;
+    let plan = Plan { report_all, scope: scope.as_ref(), capture_before: scope_is_watermark };
+    let indexed = index_files(root, &candidates, &plan, &key, &resolver, &mut ix)?;
 
     let entries = EntryPoints::detect(root, &config.entry_points)?;
     // The file rules go across the pool, a file at a time: five rules over a
