@@ -62,7 +62,10 @@ struct Indexed {
     /// re-recorded them. Dropping an import is what makes an export dead in the
     /// file that is no longer imported, and once the edge is gone that file is
     /// no longer a neighbour of anything: the link has to be captured while it
-    /// still exists or a narrowed run could never report the finding it caused.
+    /// still exists or a `--changed` run could never report the finding it
+    /// caused. "Changed" here means changed since the index's watermark, so only
+    /// a run whose scope is that watermark may widen itself with this set. See
+    /// the condition on `scope_is_watermark` in `pass`.
     before: HashSet<String>,
     /// The read behind every file in `files`, for the findings cache written
     /// once the rules have run.
@@ -402,9 +405,13 @@ fn write_cache(ix: &mut Index, indexed: &Indexed, fresh: &[Finding], key: &Cache
 /// what is parsed and what is reported, never what is indexed.
 ///
 /// Scope semantics: file-rule findings are reported for the scope exactly;
-/// graph-rule findings are reported for the scope plus the files its edges touch,
-/// before and after the re-indexing, because dropping an import from a scoped
-/// file is what makes an export dead in a file outside it (spec 3.2).
+/// graph-rule findings are reported for the scope plus the files its edges touch
+/// after the re-indexing, because an import from a scoped file is what keeps an
+/// export alive in a file outside it (spec 3.2). `--changed`, whose scope is the
+/// index's watermark, also reaches the targets those edges pointed at before the
+/// re-indexing: dropping an import is what makes an export dead, and the edge has
+/// to be captured before it is replaced. A scope that did not come from the
+/// watermark does not get that widening; see the comment at the `retain` below.
 fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
     let walked = source_files(root, &WalkOptions { excludes: config.excludes.clone() })?;
@@ -460,8 +467,10 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         write_cache(&mut ix, &indexed, &fresh, &key)?;
     }
 
-    // `--changed` takes the changed set as its scope.
-    if scope.is_none() && opts.changed_only {
+    // `--changed` takes the changed set as its scope. That scope IS the index's
+    // watermark, which is what licenses the widening below.
+    let scope_is_watermark = scope.is_none() && opts.changed_only;
+    if scope_is_watermark {
         scope = Some(indexed.changed.clone());
     }
     let files = candidates.len();
@@ -472,7 +481,28 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     if let Some(scope) = &scope {
         findings.retain(|f| scope.contains(&f.file));
         let mut wide = scope.clone();
-        wide.extend(indexed.before);
+        // `indexed.before` is derived from the index's watermark, not from this
+        // run's scope: it holds the old forward targets of every file the index
+        // considers changed or gone, wherever in the repository they are. Adding
+        // it is right only when the scope IS that watermark, which is `--changed`
+        // and nothing else. (A whole-repository run needs no widening at all:
+        // `scope` is None there and every graph finding is reported.)
+        //
+        // For a named path and for a `--base`/`--since` diff the scope comes from
+        // the command line or from git, so folding the watermark in would make
+        // the verdict a function of run history: `check --base HEAD` on a warm
+        // index would report a dead export caused by an uncommitted deletion, and
+        // the identical command run again would print PASS, the first run having
+        // consumed that deletion from the index. Those scopes therefore reach the
+        // scope plus its neighbours after re-indexing and nothing else, so the
+        // answer depends only on the tree and the ref.
+        //
+        // The trade: a pull request that deletes the last importer of an export
+        // does not see that dead export in its own view. The next whole-repository
+        // check reports it.
+        if scope_is_watermark {
+            wide.extend(indexed.before);
+        }
         wide.extend(neighbours(&ix, scope)?);
         graph.retain(|f| wide.contains(&f.file));
     }

@@ -745,3 +745,78 @@ fn named_paths_and_a_diff_scope_are_a_usage_error() {
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("cannot be used with '--since"), "{err}");
 }
+
+/// The four files the two tests below share: `two.ts` is the only consumer of
+/// `dropped`, so deleting it makes that export dead in `lib.ts`, a file nothing
+/// else in the run touches.
+fn deletion_shaped_repo(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/one.ts"), "import { kept } from \"./lib\";\nexport const a = kept();\n").unwrap();
+    std::fs::write(dir.join("src/two.ts"), "import { dropped } from \"./lib\";\nexport const b = dropped();\n")
+        .unwrap();
+    std::fs::write(
+        dir.join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { a } from \"./one\";\nexport const total = ok() + bad() + a;\n",
+    )
+    .unwrap();
+}
+
+/// A diff scope's verdict is a function of the tree and the ref, and of nothing
+/// else. The index's watermark moves the moment a run consumes a deletion, so a
+/// `--base` scope that widened itself with that watermark would report a dead
+/// export on the first run and pass on an identical second one: the same command
+/// on the same tree against the same ref, two different answers.
+#[test]
+fn a_diff_scope_gives_the_same_verdict_twice() {
+    let dir = copy_fixture();
+    deletion_shaped_repo(dir.path());
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    // Warm the index while two.ts is still on disk, so the first --base run
+    // below is the one that sees it go.
+    locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+
+    std::fs::remove_file(dir.path().join("src/two.ts")).unwrap();
+    let findings = |dir: &std::path::Path| -> serde_json::Value {
+        let out = locrin(dir).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["findings"].clone()
+    };
+    let first = findings(dir.path());
+    let second = findings(dir.path());
+    assert_eq!(first, second, "the same --base run twice must answer the same");
+    // The deletion is not in the diff scope (the file is gone from the working
+    // tree), so neither run reports the export it killed.
+    assert_eq!(first.as_array().unwrap().len(), 0, "{first}");
+}
+
+/// `--since` is the deployment gate: it answers for the commits in the range and
+/// for what their edges reach. An uncommitted deletion is outside that range, so
+/// nothing it causes may appear, however recently the index learned about it.
+#[test]
+fn since_reports_nothing_from_an_uncommitted_deletion() {
+    let dir = copy_fixture();
+    deletion_shaped_repo(dir.path());
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let base = git(dir.path(), &["rev-parse", "HEAD"]);
+    locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+
+    // One commit in the range, on a file whose edges never reach lib.ts.
+    std::fs::write(dir.path().join("src/clean.ts"), "// touched\nexport function ok(): number {\n  return 1;\n}\n")
+        .unwrap();
+    git(dir.path(), &["commit", "-qam", "edit"]);
+    std::fs::remove_file(dir.path().join("src/two.ts")).unwrap();
+
+    let out = locrin(dir.path()).args(["check", "--since", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert!(!files.contains(&"src/lib.ts"), "{v}");
+    assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "dead-export"), "{v}");
+}
