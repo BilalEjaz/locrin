@@ -149,10 +149,17 @@ struct Explicit {
 /// when nothing was named. A directory expands to the walked files beneath it,
 /// so the config's excludes still apply inside it; a file is taken as named,
 /// excluded or not, because naming a file is an instruction.
+///
+/// A directory also names the lockfile when the lockfile lies beneath it, which
+/// the walk cannot say because the lockfile is not a source file and is in no
+/// walk. Without this `check .` would answer for every file in the repository
+/// except the one `vulnerable-dependency` reads, which is not what naming the
+/// root means.
 fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow::Result<Option<Explicit>> {
     if paths.is_empty() {
         return Ok(None);
     }
+    let lockfile = locrin_core::lockfile::locate(root).map(|rel| root.join(rel));
     let mut files = Vec::new();
     let mut raw = Vec::new();
     for p in paths {
@@ -171,6 +178,9 @@ fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow:
             let under: Vec<PathBuf> = walked.iter().filter(|f| f.starts_with(&canon)).cloned().collect();
             raw.extend(under.iter().cloned());
             files.extend(under);
+            if let Some(lock) = lockfile.as_ref().filter(|lock| lock.starts_with(&canon)) {
+                raw.push(lock.clone());
+            }
         } else {
             raw.push(canon.clone());
             if Language::from_path(&canon).is_some() {

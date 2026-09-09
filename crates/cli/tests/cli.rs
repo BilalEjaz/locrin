@@ -1202,4 +1202,13 @@ fn a_scoped_run_reads_the_lockfile_only_when_the_scope_names_it() {
     // A diff scope can: git lists every changed file, not only the parsed ones.
     let err = stderr(&["check", "--base", "HEAD", "--offline"]);
     assert!(err.contains(SKIPPED), "the lockfile is in the diff, so the rule runs: {err}");
+
+    // A directory names everything under it, lockfile included: `check .` has to
+    // answer for the lockfile exactly as a whole-repository check does.
+    let err = stderr(&["check", ".", "--offline"]);
+    assert!(err.contains(SKIPPED), "the repository root contains the lockfile: {err}");
+
+    // A directory that does not contain the lockfile still does not name it.
+    let err = stderr(&["check", "src", "--offline"]);
+    assert!(!err.contains(SKIPPED), "the lockfile is not under src: {err}");
 }
