@@ -1,0 +1,525 @@
+//! The OSV advisory client: the engine's only network call, and its on-disk
+//! snapshot.
+//!
+//! Everything the network does here is optional. [`check`] asks osv.dev which of
+//! a lockfile's packages have advisories, but it writes every answer into the
+//! index first, so the next run can produce the same findings with the network
+//! unplugged. Under `--offline`, or when a request fails for any reason at all,
+//! the snapshot is used instead and the run says so in a warning. There is no
+//! path through this module that turns a network problem into a failed run
+//! (spec 9): the worst case is an empty result and one warning.
+//!
+//! The snapshot is keyed by the lockfile's content hash, so editing the lockfile
+//! invalidates it, which is exactly when the answer can change.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::Context;
+use rusqlite::{params, OptionalExtension};
+use serde_json::{json, Value};
+
+use crate::index::Index;
+use crate::lockfile::{Lockfile, Package};
+
+/// The batch endpoint: many packages in, advisory ids out.
+pub const BATCH_URL: &str = "https://api.osv.dev/v1/querybatch";
+/// The detail endpoint, an advisory id appended.
+pub const VULN_URL: &str = "https://api.osv.dev/v1/vulns/";
+
+/// osv.dev caps a batch query at 1000 entries.
+const CHUNK: usize = 1000;
+const DAY: u64 = 86_400;
+/// How long a cached advisory detail is used without asking again. Summaries and
+/// fixed versions are edited rarely, and a month-old one is still accurate
+/// enough to act on.
+const VULN_MAX_AGE_DAYS: u64 = 30;
+/// The whole request, connect included, gives up after this. A quality gate that
+/// blocks on a slow registry is worse than one that reports from its snapshot.
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What an advisory says about one package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advisory {
+    pub id: String,
+    pub summary: String,
+    /// `CRITICAL`, `HIGH`, `MODERATE`, `LOW`, or `UNKNOWN` when the advisory does
+    /// not rate itself.
+    pub severity: String,
+    /// The first version the advisory says is fixed, when it names one.
+    pub fixed: Option<String>,
+    pub aliases: Vec<String>,
+}
+
+/// One installed package matched to one advisory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub package: Package,
+    pub advisory: Advisory,
+}
+
+/// The result of a check: what was found, what the reader should know about how
+/// it was found, and how old the data behind it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub hits: Vec<Hit>,
+    pub warnings: Vec<String>,
+    /// The age of the snapshot the hits came from, zero when it was just fetched
+    /// and `None` when there was no snapshot at all.
+    pub snapshot_age_days: Option<u64>,
+}
+
+/// The advisories affecting `lock`, from the network when it is allowed and
+/// answers, and from the index's snapshot otherwise.
+pub fn check(
+    ix: &Index,
+    lock: &Lockfile,
+    offline: bool,
+    fetch: &dyn Fn(&str, Option<&str>) -> anyhow::Result<String>,
+) -> anyhow::Result<Outcome> {
+    let mut warnings = Vec::new();
+    if lock.packages.is_empty() {
+        return Ok(Outcome { hits: Vec::new(), warnings, snapshot_age_days: None });
+    }
+    let now = now_secs();
+
+    let mut batch = None;
+    let mut snapshot_age_days = None;
+    if !offline {
+        match fetch_batch(lock, fetch) {
+            Ok(json) => {
+                store_batch(ix, &lock.hash, now, &json)?;
+                batch = Some(json);
+                snapshot_age_days = Some(0);
+            }
+            Err(e) => warnings.push(format!("advisory lookup failed ({e}); falling back to the cached snapshot")),
+        }
+    }
+    if batch.is_none() {
+        match cached_batch(ix, &lock.hash)? {
+            Some((fetched_at, json)) => {
+                let age = age_in_days(now, fetched_at);
+                if age >= 1 {
+                    warnings.push(format!("using cached advisory snapshot from {age} days ago"));
+                }
+                snapshot_age_days = Some(age);
+                batch = Some(json);
+            }
+            None => {
+                warnings.push("no cached advisory snapshot; vulnerable-dependency skipped".to_string());
+                return Ok(Outcome { hits: Vec::new(), warnings, snapshot_age_days: None });
+            }
+        }
+    }
+
+    // The snapshot is keyed by the lockfile hash, so a cached response was
+    // produced for this exact package list in this exact order and its results
+    // line up with it positionally.
+    let per_package = parse_batch(batch.as_deref().unwrap_or_default(), lock.packages.len());
+    let ids: BTreeSet<String> = per_package.iter().flatten().cloned().collect();
+    let mut details: BTreeMap<String, Value> = BTreeMap::new();
+    let mut unavailable = 0usize;
+    for id in ids {
+        match vuln_detail(ix, &id, offline, fetch, now)? {
+            Some(detail) => {
+                details.insert(id, detail);
+            }
+            None => unavailable += 1,
+        }
+    }
+    if unavailable > 0 {
+        // The batch answer already establishes that the package is affected, so
+        // the finding is still reported; only its wording is thinner.
+        warnings.push(format!("advisory details unavailable for {unavailable} of the advisories found"));
+    }
+
+    let mut hits = Vec::new();
+    for (package, ids) in lock.packages.iter().zip(per_package) {
+        for id in ids {
+            let advisory = match details.get(&id) {
+                Some(detail) => advisory_from(&id, detail, &package.name),
+                None => Advisory {
+                    id: id.clone(),
+                    summary: String::new(),
+                    severity: "UNKNOWN".to_string(),
+                    fixed: None,
+                    aliases: Vec::new(),
+                },
+            };
+            hits.push(Hit { package: package.clone(), advisory });
+        }
+    }
+    Ok(Outcome { hits, warnings, snapshot_age_days })
+}
+
+/// The one place in the engine that opens a socket.
+///
+/// `body` present means a JSON POST, absent means a GET.
+pub fn http_fetch(url: &str, body: Option<&str>) -> anyhow::Result<String> {
+    let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).user_agent("locrin").build();
+    let response = match body {
+        Some(body) => agent.post(url).set("Content-Type", "application/json").send_string(body),
+        None => agent.get(url).call(),
+    }
+    .with_context(|| format!("requesting {url}"))?;
+    response.into_string().with_context(|| format!("reading the response from {url}"))
+}
+
+/// Queries every package in chunks and splices the chunks back into one response
+/// so the snapshot is a single row shaped exactly like a one-chunk answer.
+fn fetch_batch(
+    lock: &Lockfile,
+    fetch: &dyn Fn(&str, Option<&str>) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    let mut results: Vec<Value> = Vec::with_capacity(lock.packages.len());
+    for chunk in lock.packages.chunks(CHUNK) {
+        let queries: Vec<Value> = chunk
+            .iter()
+            .map(|p| json!({ "package": { "name": p.name, "ecosystem": "npm" }, "version": p.version }))
+            .collect();
+        let text = fetch(BATCH_URL, Some(&json!({ "queries": queries }).to_string()))?;
+        let parsed: Value = serde_json::from_str(&text).context("parsing the OSV batch response")?;
+        let answered = parsed.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        // A response that does not answer every query cannot be lined up with the
+        // package list, and guessing would attach an advisory to the wrong
+        // package. Failing here falls back to the snapshot.
+        anyhow::ensure!(
+            answered.len() == chunk.len(),
+            "the OSV batch response has {} results for {} queries",
+            answered.len(),
+            chunk.len()
+        );
+        results.extend(answered);
+    }
+    Ok(json!({ "results": results }).to_string())
+}
+
+/// The advisory ids for each package, in the package list's order.
+fn parse_batch(json: &str, packages: usize) -> Vec<Vec<String>> {
+    let mut out = vec![Vec::new(); packages];
+    let Ok(parsed) = serde_json::from_str::<Value>(json) else { return out };
+    let Some(results) = parsed.get("results").and_then(|r| r.as_array()) else { return out };
+    for (slot, result) in out.iter_mut().zip(results) {
+        let mut ids: Vec<String> = result
+            .get("vulns")
+            .and_then(|v| v.as_array())
+            .map(|vulns| vulns.iter().filter_map(|v| v.get("id")).filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        ids.sort();
+        ids.dedup();
+        *slot = ids;
+    }
+    out
+}
+
+/// The advisory's detail document, refreshed when it is stale and the run may
+/// use the network, and read from the snapshot otherwise.
+fn vuln_detail(
+    ix: &Index,
+    id: &str,
+    offline: bool,
+    fetch: &dyn Fn(&str, Option<&str>) -> anyhow::Result<String>,
+    now: u64,
+) -> anyhow::Result<Option<Value>> {
+    let cached = cached_vuln(ix, id)?;
+    let stale = cached.as_ref().map(|(at, _)| age_in_days(now, *at) >= VULN_MAX_AGE_DAYS).unwrap_or(true);
+    if !offline && stale && is_safe_id(id) {
+        if let Ok(text) = fetch(&format!("{VULN_URL}{id}"), None) {
+            if let Ok(detail) = serde_json::from_str::<Value>(&text) {
+                store_vuln(ix, id, now, &text)?;
+                return Ok(Some(detail));
+            }
+        }
+    }
+    Ok(cached.and_then(|(_, json)| serde_json::from_str::<Value>(&json).ok()))
+}
+
+/// Whether an id can be pasted into a URL path as it stands. Advisory ids are
+/// `GHSA-...`, `CVE-...` and the like; anything else came from a response that
+/// should not be steering a request.
+fn is_safe_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn advisory_from(id: &str, detail: &Value, package: &str) -> Advisory {
+    let severity = detail
+        .get("database_specific")
+        .and_then(|d| d.get("severity"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    Advisory {
+        id: id.to_string(),
+        summary: detail.get("summary").and_then(Value::as_str).unwrap_or_default().to_string(),
+        severity,
+        fixed: first_fixed(detail, package),
+        aliases: detail
+            .get("aliases")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// The first version the advisory declares fixed for this package.
+///
+/// An advisory can carry ranges for several ecosystems and several packages, so
+/// the entry has to be matched by name; within the matching entry the first
+/// `fixed` event is the version to upgrade to.
+fn first_fixed(detail: &Value, package: &str) -> Option<String> {
+    for affected in detail.get("affected").and_then(Value::as_array).into_iter().flatten() {
+        if affected.get("package").and_then(|p| p.get("name")).and_then(Value::as_str) != Some(package) {
+            continue;
+        }
+        for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
+            for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(fixed) = event.get("fixed").and_then(Value::as_str) {
+                    return Some(fixed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn store_batch(ix: &Index, lock_hash: &str, now: u64, json: &str) -> anyhow::Result<()> {
+    ix.conn()
+        .execute(
+            "INSERT OR REPLACE INTO osv_batch(lock_hash, fetched_at, json) VALUES (?1, ?2, ?3)",
+            params![lock_hash, now as i64, json],
+        )
+        .context("caching the OSV batch response")?;
+    Ok(())
+}
+
+fn cached_batch(ix: &Index, lock_hash: &str) -> anyhow::Result<Option<(i64, String)>> {
+    ix.conn()
+        .query_row("SELECT fetched_at, json FROM osv_batch WHERE lock_hash = ?1", params![lock_hash], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .context("reading the cached OSV batch response")
+}
+
+fn store_vuln(ix: &Index, id: &str, now: u64, json: &str) -> anyhow::Result<()> {
+    ix.conn()
+        .execute(
+            "INSERT OR REPLACE INTO osv_vulns(id, fetched_at, json) VALUES (?1, ?2, ?3)",
+            params![id, now as i64, json],
+        )
+        .context("caching an OSV advisory")?;
+    Ok(())
+}
+
+fn cached_vuln(ix: &Index, id: &str) -> anyhow::Result<Option<(i64, String)>> {
+    ix.conn()
+        .query_row("SELECT fetched_at, json FROM osv_vulns WHERE id = ?1", params![id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .context("reading a cached OSV advisory")
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Whole days between a stored timestamp and now. A clock that has moved
+/// backwards reads as age zero rather than as an enormous age.
+fn age_in_days(now: u64, fetched_at: i64) -> u64 {
+    now.saturating_sub(fetched_at.max(0) as u64) / DAY
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::lockfile;
+
+    const VULN_ID: &str = "GHSA-p6mc-m468-83gg";
+
+    const BATCH: &str =
+        r#"{"results":[{},{},{},{"vulns":[{"id":"GHSA-p6mc-m468-83gg","modified":"2021-05-10T00:00:00Z"}]}]}"#;
+
+    const DETAIL: &str = r#"{
+      "id": "GHSA-p6mc-m468-83gg",
+      "summary": "Prototype Pollution in lodash",
+      "aliases": ["CVE-2020-8203"],
+      "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N"}],
+      "database_specific": {"severity": "high"},
+      "affected": [
+        {
+          "package": {"name": "left-pad", "ecosystem": "npm"},
+          "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.9.9"}]}]
+        },
+        {
+          "package": {"name": "lodash", "ecosystem": "npm"},
+          "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.20"}]}]
+        }
+      ]
+    }"#;
+
+    /// Answers the two osv.dev endpoints from canned documents. No test in this
+    /// module reaches the network.
+    fn canned(url: &str, body: Option<&str>) -> anyhow::Result<String> {
+        if url == BATCH_URL {
+            let body = body.expect("the batch endpoint is a POST");
+            assert!(body.contains(r#""name":"lodash""#), "every package is queried: {body}");
+            assert!(body.contains(r#""ecosystem":"npm""#), "the ecosystem is npm: {body}");
+            return Ok(BATCH.to_string());
+        }
+        if url == format!("{VULN_URL}{VULN_ID}") {
+            assert!(body.is_none(), "the detail endpoint is a GET");
+            return Ok(DETAIL.to_string());
+        }
+        anyhow::bail!("unexpected request to {url}")
+    }
+
+    fn refuse(_url: &str, _body: Option<&str>) -> anyhow::Result<String> {
+        anyhow::bail!("connection refused")
+    }
+
+    fn fixture_lock() -> Lockfile {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lockfiles");
+        lockfile::read(&dir).unwrap().expect("the fixture directory has a lockfile")
+    }
+
+    fn backdate_batch(ix: &Index, days: u64) {
+        ix.conn().execute("UPDATE osv_batch SET fetched_at = fetched_at - ?1", params![(days * DAY) as i64]).unwrap();
+    }
+
+    fn only_hit(outcome: &Outcome) -> &Hit {
+        assert_eq!(outcome.hits.len(), 1, "one advisory in the canned batch: {:?}", outcome.hits);
+        &outcome.hits[0]
+    }
+
+    #[test]
+    fn an_online_check_reports_the_advisory_and_writes_a_snapshot() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+
+        let outcome = check(&ix, &lock, false, &canned).unwrap();
+
+        assert_eq!(outcome.warnings, Vec::<String>::new());
+        assert_eq!(outcome.snapshot_age_days, Some(0));
+        let hit = only_hit(&outcome);
+        assert_eq!(hit.package.name, "lodash");
+        assert_eq!(hit.package.version, "4.17.15");
+        assert_eq!(hit.package.line, 32);
+        assert_eq!(hit.advisory.id, VULN_ID);
+        assert_eq!(hit.advisory.summary, "Prototype Pollution in lodash");
+        assert_eq!(hit.advisory.severity, "HIGH");
+        assert_eq!(hit.advisory.fixed.as_deref(), Some("4.17.20"), "the fix comes from the lodash entry");
+        assert_eq!(hit.advisory.aliases, vec!["CVE-2020-8203"]);
+
+        let batches: i64 = ix.conn().query_row("SELECT count(*) FROM osv_batch", [], |r| r.get(0)).unwrap();
+        let vulns: i64 = ix.conn().query_row("SELECT count(*) FROM osv_vulns", [], |r| r.get(0)).unwrap();
+        assert_eq!((batches, vulns), (1, 1), "both halves of the answer are cached");
+    }
+
+    #[test]
+    fn an_offline_check_uses_the_snapshot_and_names_its_age() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+        backdate_batch(&ix, 3);
+
+        let outcome = check(&ix, &lock, true, &refuse).unwrap();
+
+        assert_eq!(outcome.warnings, vec!["using cached advisory snapshot from 3 days ago"]);
+        assert_eq!(outcome.snapshot_age_days, Some(3));
+        assert_eq!(only_hit(&outcome).advisory.id, VULN_ID);
+    }
+
+    #[test]
+    fn an_offline_check_without_a_snapshot_skips_the_rule() {
+        let ix = Index::open_in_memory().unwrap();
+
+        let outcome = check(&ix, &fixture_lock(), true, &refuse).unwrap();
+
+        assert!(outcome.hits.is_empty());
+        assert_eq!(outcome.warnings, vec!["no cached advisory snapshot; vulnerable-dependency skipped"]);
+        assert_eq!(outcome.snapshot_age_days, None);
+    }
+
+    #[test]
+    fn a_failed_request_falls_back_to_the_snapshot_rather_than_failing_the_run() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+
+        let outcome = check(&ix, &lock, false, &refuse).unwrap();
+
+        assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+        assert!(outcome.warnings[0].starts_with("advisory lookup failed"), "{:?}", outcome.warnings);
+        assert_eq!(outcome.snapshot_age_days, Some(0), "the snapshot was written moments ago");
+        assert_eq!(only_hit(&outcome).advisory.id, VULN_ID);
+    }
+
+    #[test]
+    fn a_fresh_snapshot_is_used_without_an_age_warning() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+
+        let outcome = check(&ix, &lock, true, &refuse).unwrap();
+
+        assert_eq!(outcome.warnings, Vec::<String>::new());
+        assert_eq!(outcome.snapshot_age_days, Some(0));
+    }
+
+    #[test]
+    fn an_advisory_without_a_rating_is_unknown_and_a_foreign_package_has_no_fix() {
+        let detail: Value = serde_json::from_str(DETAIL).unwrap();
+        let bare = json!({"id": "GHSA-x", "affected": []});
+
+        assert_eq!(advisory_from("GHSA-x", &bare, "lodash").severity, "UNKNOWN");
+        assert_eq!(advisory_from("GHSA-x", &bare, "lodash").fixed, None);
+        assert_eq!(advisory_from(VULN_ID, &detail, "left-pad").fixed.as_deref(), Some("9.9.9"));
+        assert_eq!(advisory_from(VULN_ID, &detail, "not-in-the-advisory").fixed, None);
+    }
+
+    #[test]
+    fn a_batch_response_that_does_not_answer_every_query_is_rejected() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        let short = |url: &str, _body: Option<&str>| -> anyhow::Result<String> {
+            assert_eq!(url, BATCH_URL);
+            Ok(r#"{"results":[{}]}"#.to_string())
+        };
+
+        let outcome = check(&ix, &lock, false, &short).unwrap();
+
+        assert!(outcome.hits.is_empty(), "a response that cannot be lined up is not guessed at");
+        assert_eq!(outcome.warnings.len(), 2, "{:?}", outcome.warnings);
+        assert!(outcome.warnings[0].contains("1 results for 4 queries"), "{:?}", outcome.warnings);
+    }
+
+    #[test]
+    fn a_lockfile_with_no_packages_asks_nothing() {
+        let ix = Index::open_in_memory().unwrap();
+        let empty = Lockfile { rel: "yarn.lock".into(), hash: "abc".into(), packages: Vec::new() };
+
+        let outcome = check(&ix, &empty, false, &refuse).unwrap();
+
+        assert_eq!(outcome, Outcome { hits: Vec::new(), warnings: Vec::new(), snapshot_age_days: None });
+    }
+
+    #[test]
+    fn an_id_that_is_not_url_safe_is_never_put_in_a_request() {
+        assert!(is_safe_id("GHSA-p6mc-m468-83gg"));
+        assert!(is_safe_id("CVE-2020-8203"));
+        assert!(!is_safe_id(""));
+        assert!(!is_safe_id("../../etc/passwd"));
+        assert!(!is_safe_id("GHSA x"));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_reads_as_no_age() {
+        assert_eq!(age_in_days(1_000 * DAY, (1_002 * DAY) as i64), 0);
+        assert_eq!(age_in_days(1_000 * DAY, (997 * DAY) as i64), 3);
+        assert_eq!(age_in_days(1_000 * DAY, -5), 1_000);
+    }
+}
