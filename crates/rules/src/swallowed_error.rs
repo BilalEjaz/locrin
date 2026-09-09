@@ -308,18 +308,20 @@ impl Rule for SwallowedError {
         Confidence::High
     }
 
-    /// Off by default after two measurements on the five corpus repositories
+    /// Off by default after three measurements on the five corpus repositories
     /// (see
     /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
-    /// The first found 100 findings, 0 of 20 sampled worth acting on, 89 of them
-    /// comment-only catches; those are exempt now and form 1 finds nothing at all
-    /// on 2674 files, because not one catch empty of everything exists there. The
-    /// second labelled all 11 that remain and none is true either: form 2 reads
-    /// `await f()`, `void f()` and `f().finally(g)` as callers using a result
-    /// that a `Promise<void>` function never returns, and form 3's five are
-    /// effect-scoped `load()` calls whose whole body is a try/catch, so the
-    /// promise cannot reject. Both are contained fixes with a corpus behind them
-    /// and neither is made yet. A repository that wants the rule as a review aid
+    /// 100 findings with 0 of 20 sampled worth acting on, then 11 with 0 of 11,
+    /// then 5 with 0 of 5. Two of the three forms now find nothing at all on 2674
+    /// indexed files: no catch there is empty of everything, and no caller uses a
+    /// log-only function's result in a way that reads a value back. What is left
+    /// is form 3, and all five are the same React effect: an `async function
+    /// load()` whose whole body is one try/catch, called as a statement, so the
+    /// promise nobody holds is a promise that cannot reject. Seeing that needs the
+    /// callee's body read as well as its call site, which this rule does not do
+    /// and which is not a contained fix the way the first two were. Nothing the
+    /// rule has said on 2674 real files was worth acting on, so it stays opt-in.
+    /// A repository that wants the rule as a review aid
     /// turns it on with
     ///
     /// ```toml

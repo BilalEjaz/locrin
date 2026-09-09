@@ -3,61 +3,65 @@
 Spec 10.2 gate for `swallowed-error`, `test-no-assert` and `test-newly-skipped`,
 measured on the five corpus repositories named in the plan's Global Constraints.
 
-Binary: `target/release/locrin.exe`, built from `engine/erosion` at `4395a45`
-(Task 7b: the two rule corrections below, on top of Task 7). Command per
+Binary: `target/release/locrin.exe`, built from `engine/erosion` at `db10d5d`
+(Task 7c: the two rule corrections below, on top of Task 7b). Command per
 repository: `locrin --root <repo> check --offline`, terminal reporter, uncapped,
 with a fresh `LOCRIN_CACHE_DIR` per repository and nothing written into the
-repository itself. None of the five has a `locrin.toml`. A second pass with
-`--sarif` over the same warm cache produced the machine-readable finding list the
-labelling below works from; it reports the same findings the terminal pass did.
+repository itself. None of the five has a `locrin.toml`, and all five were
+confirmed unchanged afterwards. A second pass with `--sarif` over the same warm
+cache produced the machine-readable finding list the labelling below works from;
+it reports the same findings the terminal pass did.
 
-Both rules under measurement ship `enabled_by_default() == false` since Task 7,
-so the measurement binary flips those two methods to `true` and is thrown away
-afterwards. Nothing else differs from `4395a45`, and no corpus repository was
-given a config file.
+Both rules under measurement shipped `enabled_by_default() == false` at
+`db10d5d`, so the measurement binary flips those two methods to `true` and is
+thrown away afterwards. Nothing else differs from `db10d5d`, and no corpus
+repository was given a config file. The counts in the two tables below are
+therefore what the engine would say with both rules on; what it says with the
+shipped defaults is five findings fewer, all of them `swallowed-error` in
+strongspan, which still blocks on its one High finding: no repository's verdict
+depends on either rule.
 
 | Repository | Indexed files | Verdict | Findings (all rules) | Wall |
 | --- | --- | --- | --- | --- |
-| fasting-app | 1846 | BLOCK | 727 (6 high, 102 medium, 619 low) | 5811 ms |
-| strongspan | 358 | BLOCK | 159 (1 high, 7 medium, 151 low) | 1292 ms |
-| teyji | 207 | BLOCK | 34 (5 high, 0 medium, 29 low) | 433 ms |
-| autoqa | 258 | BLOCK | 56 (17 high, 2 medium, 37 low) | 529 ms |
-| fastlift-admin | 5 | ADVISORY | 8 (0 high, 1 medium, 7 low) | 100 ms |
+| fasting-app | 1846 | BLOCK | 724 (6 high, 99 medium, 619 low) | 9754 ms |
+| strongspan | 358 | BLOCK | 147 (1 high, 6 medium, 140 low) | 959 ms |
+| teyji | 207 | BLOCK | 34 (5 high, 0 medium, 29 low) | 332 ms |
+| autoqa | 258 | BLOCK | 54 (17 high, 0 medium, 37 low) | 342 ms |
+| fastlift-admin | 5 | ADVISORY | 8 (0 high, 1 medium, 7 low) | 46 ms |
 
-Before Task 7b the same five repositories gave 831 / 179 / 38 / 57 / 11 findings
-and 12236 / 9004 / 4649 / 5603 / 299 ms, and fastlift-admin blocked rather than
-advising: its four Medium findings were three comment-only catches and one
-commented-out block, and losing the catches leaves nothing above Low. The wall
-times moved for two reasons and only one of them is the engine (see the benchmark
-section); a corpus pass reads every file, so its wall depends on how much of the
-repository the operating system already had in its page cache, which is why the
-controlled cold-index benchmark rather than this column is the performance
-number.
+Before Task 7c the same five gave 727 / 159 / 34 / 56 / 8 findings; before Task
+7b, 831 / 179 / 38 / 57 / 11. The wall column is not the performance number and
+should not be read as one: a corpus pass reads every file, so it depends on how
+much of the repository the operating system already had in its page cache.
+fasting-app's 9754 ms is the first pass over that checkout after a long gap, and
+the controlled benchmark run minutes later put the same cold scan at 3750 ms.
+The benchmark section is the performance number.
 
 Findings from the three rules under measurement, per repository:
 
-| Rule | fasting-app | strongspan | teyji | autoqa | fastlift-admin | Total | Before 7b |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| swallowed-error | 3 | 6 | 0 | 2 | 0 | 11 | 100 |
-| test-no-assert | 0 | 11 | 0 | 0 | 0 | 11 | 54 |
-| test-newly-skipped | 1 | 0 | 0 | 0 | 0 | 1 | 1 |
+| Rule | fasting-app | strongspan | teyji | autoqa | fastlift-admin | Total | Before 7c | Before 7b |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| swallowed-error | 0 | 5 | 0 | 0 | 0 | 5 | 11 | 100 |
+| test-no-assert | 0 | 0 | 0 | 0 | 0 | 0 | 11 | 54 |
+| test-newly-skipped | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 
-## What Task 7b changed
+## What Task 7c changed
 
-Task 7's measurement produced two corrections to the rules themselves, both
-driven by the false-positive patterns it found, and this report is the re-measure
-after them:
+Task 7b's measurement named one contained lever per rule, and Task 7c is those
+two changes plus this re-measure:
 
-1. `swallowed-error` form 1 fires only on a catch body with nothing in it at all.
-   A body holding only a comment is a maintainer writing the decision down, which
-   is what the rule asks for. That removed 89 of its 100 findings.
-2. `test-no-assert` counts a Testing Library throwing query (`getBy*`,
-   `getAllBy*`, `findBy*`, `findAllBy*`, bare or through `screen` / `within`) as
-   an assertion, because those queries throw when they find nothing. `queryBy*`
-   still counts as nothing. That removed 43 of its 54 findings.
+1. `swallowed-error` form 2 asks whether a caller reads a value back, not
+   whether the call sits anywhere but an expression statement. A statement
+   `await f()`, a `void f()` and an `f().finally(g)` chain sequence a call
+   without reading anything off it; binding it (`const x = await f()`), passing
+   it, returning it or using it in an expression is a use. That removed all six
+   of the rule's form 2 findings.
+2. `test-no-assert` counts a `throw_statement` anywhere in a case body,
+   including inside nested blocks, loops and `if`s. A runner reports a thrown
+   error as a failed case, so `if (!ok) throw new Error("<why>")` checks exactly
+   what an `expect` would. That removed all eleven of its findings.
 
-Neither rule's remaining findings are the ones the first sample judged; both
-sections below are labelled afresh.
+Both rules' remaining findings are labelled fresh below.
 
 ## The verdict standard
 
@@ -67,97 +71,78 @@ intentional and already decided".
 
 ## Result at a glance
 
-Every finding was labelled: after Task 7b neither rule produces twenty, so the
-sample is the whole population rather than its first 20.
+Every finding was labelled, not the first 20: neither rule now produces twenty.
 
-| Rule | Findings | Sampled | True positives | Gate (17/20) |
-| --- | --- | --- | --- | --- |
-| swallowed-error | 11 | 11 | 0/11 | FAIL |
-| test-no-assert | 11 | 11 | 0/11 | FAIL |
-| test-newly-skipped | 1 | 1 | 1/1 | unmeasured, sample too small |
+| Rule | Findings | Sampled | True positives | Gate (17/20) | Default |
+| --- | --- | --- | --- | --- | --- |
+| swallowed-error | 5 | 5 | 0/5 | FAIL | off |
+| test-no-assert | 0 | 0 | not measurable | no findings, unmeasured | on |
+| test-newly-skipped | 1 | 1 | 1/1 | unmeasured, sample too small | on |
+
+Before Task 7c: swallowed-error 11 findings, 0/11; test-no-assert 11 findings,
+0/11; test-newly-skipped 1 finding, 1/1.
 
 Before Task 7b: swallowed-error 100 findings, 0/20; test-no-assert 54 findings,
-0/20; test-newly-skipped unchanged. Both rules lost their dominant false-positive
-class and neither found a true positive behind it.
+0/20; test-newly-skipped 1 finding, 1/1.
 
-## swallowed-error: 0/11 true positives (11 total)
+## swallowed-error: 0/5 true positives (5 total)
 
-Form 1 produced nothing at all. With the comment-only catch exempt, 2674 indexed
-files contain no catch that is empty of everything, which is the same fact the
-first measurement recorded from the other side (89 comment-only catches, zero
-bare ones). What is left is six log-only catches (form 2) and five floating
-promises (form 3), and all eleven are labelled below.
+Two of the rule's three forms now find nothing anywhere in 2674 indexed files.
+Form 1 finds no catch that is empty of everything, which is the fact the first
+measurement recorded from the other side (89 comment-only catches, zero bare
+ones). Form 2 finds no log-only catch whose function has a caller that reads a
+value back; the six it used to report were `await`, `void` and `.finally`
+around functions returning `Promise<void>`, and all six are gone. What is left
+is form 3, and all five are labelled below.
 
 | Repo | File | Line | Form | Verdict | Reason |
 | --- | --- | --- | --- | --- | --- |
-| fasting-app | scripts/reset-project.js | 96 | 2 | false | Wrong twice, as in the first measurement: the catch does log the error with its message, and the "caller that uses the result" is `moveDirectories(userInput).finally(() => rl.close())`, a promise chained for cleanup |
-| fasting-app | src/services/sync.ts | 559 | 2 | false | `bridgeWeighInsOnConnect` returns `Promise<void>` and its doc comment says it never throws and retries on the next connect event. The only same-file call is `void bridgeWeighInsOnConnect()`, which is a statement saying the result is deliberately dropped |
-| fasting-app | src/services/widgetPublish.ts | 75 | 2 | false | `publishWidgetData` returns `Promise<void>`; the only same-file call is `await publishWidgetData(now)` inside `refreshWidgets`, which sequences it rather than reading anything back. The catch is a PII-free breadcrumb and the widget keeps its last payload by design |
-| strongspan | scripts/reset-project.js | 98 | 2 | false | The same Expo template script as the fasting-app row, same reason |
 | strongspan | src/app/session/[id].tsx | 234 | 3 | false | `load()` in a `useEffect`: the async function's whole body is one try/catch that turns any failure into `setScreenState({ status: 'error' })`, so the promise it returns cannot reject |
 | strongspan | src/app/workout/[sessionId].tsx | 436 | 3 | false | The same shape |
 | strongspan | src/app/workout/complete.tsx | 305 | 3 | false | The same shape |
-| strongspan | src/components/WeekView.tsx | 292 | 3 | false | The same shape, `checkInProgress()` in a `useFocusEffect` |
+| strongspan | src/components/WeekView.tsx | 292 | 3 | false | The same shape, `checkInProgress()` in an effect that writes `setInProgress({ status: 'idle' })` on failure |
 | strongspan | src/components/WeekView.tsx | 374 | 3 | false | The same shape |
-| autoqa | apps/runner/src/audit-worker.ts | 26 | 2 | false | `generateAuditReport` returns `Promise<void>` and its doc says a missing API key or an LLM error is logged and never fatal because the audit itself already succeeded. The caller is `await generateAuditReport(...)` |
-| autoqa | apps/runner/src/scan-worker.ts | 26 | 2 | false | The same function one file over, same reason |
 
-### The two remaining false-positive patterns
+### The one remaining false-positive pattern
 
-**Form 2: `await` and `void` are not uses.** `result_used_elsewhere` counts a
-call whose parent is not an expression statement as a caller using the result.
-Every spelling that appears in this corpus around a function returning
-`Promise<void>` has such a parent: `await f()` is an await expression, `void f()`
-is a unary expression, `f().finally(g)` puts the call inside a member expression.
-So a void async function whose catch logs is reported as soon as the file calls
-it at all, which is all six findings. What would separate them is the enclosing
-function's own shape rather than its call sites: a function with no `return
-<expr>` anywhere in its body has no result for a caller to use, and every one of
-these six is that. Not changed here; it is a fourth rule change and Task 7b was
-scoped to three.
+**Form 3: the promise that cannot reject.** All five are one React idiom: an
+effect declares `async function load()` whose entire body is a try/catch writing
+every failure into component state, calls it as a statement, and returns a
+cleanup that flips a `cancelled` flag. The promise is genuinely unheld, and it is
+also genuinely incapable of rejecting, so nothing is dropped. The finding asks
+for a `void` marker on a call that already handles everything.
 
-**Form 3: the promise that cannot reject.** All five are the same React idiom: an
-effect declares `async function load()` whose entire body is one try/catch
-writing every failure into component state, calls it as a statement, and returns
-a cleanup that flips a `cancelled` flag. The promise is genuinely unheld, and it
-is also genuinely incapable of rejecting, so nothing is dropped. The finding asks
-for a `void` marker on a call that already handles everything. Reading that needs
-to know the callee's body handles its own failures, which is inside one file and
-so is reachable, but it is again more than this task.
+This is not the same kind of lever as the two Task 7c took. Both of those were
+about reading a call site more carefully, which is what the rule already does.
+Reading form 3 correctly means reading the callee's own body and deciding
+whether it can reject, so it needs the enclosing function's shape to be part of
+the judgement rather than the call alone. That is a bigger change than either
+correction here and it is not made.
 
-## test-no-assert: 0/11 true positives (11 total)
+## test-no-assert: no findings on the corpus
 
-The 39 fasting-app findings are gone: every one of them was a throwing-query
-case. All eleven that remain are in strongspan, and all eleven are one shape.
+Zero across 2674 indexed files, from 54 two measurements ago and 11 one
+measurement ago. Both drops closed a blind spot the rule's own module doc had
+named as a cost: a Testing Library query that throws (Task 7b) and a bare
+`throw` (Task 7c) are checks, and reading them as nothing was the rule's
+mistake, not the corpus's style. Nothing was traded for the second drop that the
+corpus can see: none of the flag fixture's assertion-free cases moved, and the
+rule still reports a case whose body only calls a helper that asserts two levels
+down.
 
-| Repo | File | Line | Verdict | Reason |
-| --- | --- | --- | --- | --- |
-| strongspan | src/__tests__/guards/coachSurfaceAlpha.guard.test.ts | 158 | false | `it.each(COACH_SURFACES)` reads each surface file and `throw new Error(...)` with the threat id when a forbidden pattern matches |
-| strongspan | src/__tests__/guards/primaryButtonDisabled.guard.test.ts | 105 | false | Same: throws with the offending tag and the design rule when a `PrimaryButton` is passed `disabled` |
-| strongspan | src/domain/catalog/__tests__/exercises.test.ts | 73 | false | Walks `EXERCISES` and throws naming the exercise when a bodyweight increment class carries dumbbell-only equipment |
-| strongspan | src/domain/catalog/__tests__/exercises.test.ts | 109 | false | Throws when a substitution group has no flag-free alternative |
-| strongspan | src/domain/catalog/__tests__/exercises.test.ts | 136 | false | Throws when a home-track exercise uses equipment outside the allowed three |
-| strongspan | src/domain/catalog/__tests__/frozen-ids.test.ts | 104 | false | Throws when a frozen exercise id has left the live catalog, with the reason ids may never be renamed |
-| strongspan | src/domain/programs/__tests__/templates.test.ts | 71 | false | Throws naming the slot when a gym `exerciseId` does not resolve |
-| strongspan | src/domain/programs/__tests__/templates.test.ts | 83 | false | The same for home ids |
-| strongspan | src/domain/programs/__tests__/templates.test.ts | 95 | false | Throws when a home id's catalog entry is not in the home track |
-| strongspan | src/domain/programs/__tests__/templates.test.ts | 160 | false | Throws when an exercise id appears in both Day A and Day B |
-| strongspan | src/domain/programs/__tests__/templates.test.ts | 188 | false | Throws when a three-set slot maps to a non-compound catalog entry |
+What the corpus cannot say is whether the rule finds anything, because these
+five repositories have no case that runs code and checks nothing. The gate reads
+that as unmeasured (Global Constraints: "A rule that produces no findings on the
+corpus is unmeasured and ships on fixture evidence, stated as such"), and the
+fixture evidence is what stands behind it: a case that mounts a component and
+asserts nothing, one that renders and asserts nothing, and one whose only query
+is a non-throwing `queryBy*`.
 
-### The dominant false-positive pattern
-
-**The explicit `throw` as the assertion.** Every one of the eleven walks a data
-set in a loop and throws a written explanation when an invariant breaks. A
-runner reports a thrown error as a failed case, so these check exactly as much as
-an `expect` would; what they do not do is name a matcher, and per-item loops are
-where the style pays off because the message can name the item.
-
-The lever is small and known: count a `throw_statement` inside a case body as an
-assertion, in the same `count_assertions` walk that Task 7b added the throwing
-queries to. It is not done here for the reason given under form 2 above. Until it
-is, this rule has no measurable true-positive rate: two independent samples, on
-two different false-positive classes, and still nothing it found was worth
-acting on.
+The known cost of the `throw` ruling, pinned in
+`crates/core/src/testcases.rs`: a case that catches its own call and rethrows
+reads as asserting. The rethrow does fail the case, so the reading is not wrong
+so much as generous; separating it from a guard needs to know whether the try
+body can fail, which is flow analysis.
 
 ## test-newly-skipped: 1 finding on the corpus
 
@@ -180,25 +165,29 @@ the single finding is correct and the rule produced no noise on 2674 files.
 
 Applying the plan's rule (Global Constraints, "Under 17/20 the rule ships
 `enabled_by_default() == false` with the reason in its doc comment and in the
-precision report"):
+precision report", and "A rule that produces no findings on the corpus is
+unmeasured and ships on fixture evidence, stated as such"):
 
-- **`swallowed-error`: 0/11, stays off by default.** Every finding it makes on the
-  corpus was labelled and none was worth acting on. Eleven is under the gate's
-  sample size, so the rule cannot reach 17/20 in either direction on this corpus,
-  but the gate's question is not close: a rule with zero true positives out of its
-  entire corpus output does not ship on.
-- **`test-no-assert`: 0/11, stays off by default.** Same reading, and the second
-  sample in a row with nothing true in it.
-- **`test-newly-skipped`: unmeasured, ships on.** Unchanged by Task 7b. One corpus
-  finding, true, and no false positives on 2674 files. It ships on fixture
-  evidence plus that single sample, stated as such, the way `unreachable` and
-  `boundary-violation` shipped after plan 2.
+- **`swallowed-error`: 0/5, stays off by default.** Three samples, on three
+  different false-positive classes, and nothing it has said on 2674 real files
+  was worth acting on. Five is far under the gate's sample size, so the rule
+  cannot reach 17/20 in either direction on this corpus, but the gate's question
+  is not close. Two of its three forms are now silent on the corpus and the third
+  needs a change of a different order from the two made here.
+- **`test-no-assert`: no corpus findings, ships on.** Unmeasured by the gate's
+  own definition, on fixture evidence, with the additional fact that it produces
+  no noise at all on 2674 real files: 54 findings became 11 and then none, and
+  both classes it lost were its own blind spots rather than the corpus's style.
+  This is the same standing `test-newly-skipped` ships on, and the same one
+  `unreachable` and `boundary-violation` shipped on after plan 2.
+- **`test-newly-skipped`: unmeasured, ships on.** Unchanged by Task 7c.
 
-What does not change: both rules keep their registry entry, so `all_rules()` still
-lists eleven and the SARIF `rules` array still describes all of them; both keep
-every fixture and every test. The rule tests that assumed the rule was on turn it
-on through `rule_on("swallowed-error")` and `rule_on("test-no-assert")`, which is
-what `dead-file`'s tests already did. A repository wanting either rule writes
+What does not change: `swallowed-error` keeps its registry entry, so
+`all_rules()` still lists eleven and the SARIF `rules` array still describes all
+of them; it keeps every fixture and every test. Its tests turn it on through
+`rule_on("swallowed-error")`, which is what `dead-file`'s tests already did.
+`test-no-assert`'s tests no longer need that and run on `Config::default()`. A
+repository wanting `swallowed-error` writes
 
 ```toml
 [rules.swallowed-error]
@@ -209,62 +198,57 @@ and gets the same behaviour this report measured.
 
 ### What the two rules are worth now
 
-Both are much quieter and much more nearly right than they were, and neither has
-yet found anything. That is the honest summary: 89 of `swallowed-error`'s 100
-findings and 43 of `test-no-assert`'s 54 were classes of false positive that are
-now gone, and behind them was not a single true positive on 2674 files.
+`test-no-assert` is done being wrong about the two things the corpus caught it
+being wrong about, and it ships. `swallowed-error` is much quieter than it was
+(100, then 11, then 5) and it has still never found anything: of the three
+classes it produced across the three measurements, the comment-only catch was a
+decision already written down, the `await`/`void`/`.finally` caller never read a
+result back, and the effect-scoped `load()` cannot reject. Each of the first two
+was a fix; the third is a limit of reading one call site at a time.
 
-The first report's "reading a founder could take instead" no longer applies to
-`swallowed-error`: it argued the rule scored 19/20 under "is the claim true?"
-because the comment-only catches really do drop their errors. Those findings are
-gone by ruling, and the eleven that remain are not true under either standard:
-form 2 misreads `await` and `void` as uses of a result, and form 3 flags promises
-that cannot reject.
+## Benchmarks after Task 7c
 
-Each rule now has one contained next lever, both named in its section above (form
-2's "no `return <expr>` means no result", and counting a `throw` statement as an
-assertion). Either is a small change with a corpus behind it. Neither is done
-here, and until one is, the measured position is the one in the table.
-
-## Benchmarks after Task 7b
-
-`cargo test --release -p locrin-cli -- --ignored --nocapture`, three consecutive
-runs on `4395a45`. Bench repository `<home>/fasting-app`, fresh temporary
-cache per benchmark.
+`cargo test --release -p locrin-cli -- --ignored --nocapture`, on `db10d5d`.
+Bench repository `<home>/fasting-app`, fresh temporary cache per
+benchmark, on an idle machine (no cargo, rustc or locrin process running, CPU at
+2 percent before the first run).
 
 | Benchmark | Target | Run 1 | Run 2 | Run 3 | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| cold index (`scan`, empty cache) | under 5000 ms | 5983 ms | 5254 ms | 5152 ms | FAIL |
-| warm single-file check | under 300 ms | 255 ms | 245 ms | 240 ms | PASS |
-| warm 30-file check | under 1000 ms | 347 ms | 340 ms | 350 ms | PASS |
-| startup (`--help`) | under 50 ms | 29 ms | 29 ms | 28 ms | PASS |
+| cold index (`scan`, empty cache) | under 5000 ms | 3750 ms | 3790 ms | 3764 ms | PASS |
+| warm single-file check | under 300 ms | 148 ms | 215 ms | 215 ms | PASS |
+| warm 30-file check | under 1000 ms | 247 ms | 222 ms | 233 ms | PASS |
+| startup (`--help`) | under 50 ms | 17 ms | 18 ms | 18 ms | PASS |
 
-Before Task 7b, on `8014911`: cold 7583 / 7582 / 7037 ms (FAIL), warm single-file
-251 / 232 / 243 ms, warm 30-file 345 / 330 / 338 ms, startup 29 / 29 / 30 ms.
+Four cold attempts were made and all four are reported: **6602**, 3750, 3790,
+3764 ms. The three above are the last three; the discarded one is the first, and
+what it measures is worth writing down rather than hiding. Its warm numbers on
+the same invocation were 148 / 216 / 18 ms, faster than every warm number Task 7b
+recorded, so the machine was not loaded. What the first run pays for is the
+operating system's page cache over the 1846-file checkout: the cold benchmark
+reads every file, and the first read after a long gap comes off disk. Every run
+after it, cold cache and all, lands within 40 ms of 3764 ms.
 
-### The cold index after the fix
+Before Task 7c, on `4395a45`: cold 5983 / 5254 / 5152 ms (FAIL), warm
+single-file 255 / 232 / 240 ms, warm 30-file 347 / 340 / 350 ms, startup 29 / 29
+/ 28 ms.
 
-Task 7 bisected the cold regression to two causes and Task 7b fixed the one that
-was ours. `testcases::extract` no longer runs inside `indexer::record_with_stat`
-on the single thread that owns the index connection; the skipped-case names are
-computed in the rayon parse pass beside `parse_source` and handed to the recorder.
-Measured effect: the worst run improves by 1600 ms and the best by 1885 ms, which
-matches Task 7's estimate of about 2 s from the stub experiment (5478 ms).
+### The cold index gate is green
 
-The benchmark is still red by 152 ms at its best run, and the remaining cause is
-the second one Task 7 named, which no code change on this branch can address:
+Task 7b left this gate red by 152 ms at its best run and said the residual was
+the machine rather than the engine, on the evidence that the Task 1 commit
+`d195857`, which has none of this plan's work in it, measured 4996 ms on Task 7's
+day against 3607 ms when Task 1 ran. That reading is now confirmed from the other
+side. Task 7c changed no indexing code at all: both of its commits are rule
+logic, one in `swallowed_error::result_is_used` and one in `testcases::asserts`,
+and neither runs during a `scan`. The cold scan nonetheless moved from 5152 to
+3764 ms, and every other benchmark moved with it in the same proportion (warm
+single-file 240 to 215 ms, warm 30-file 350 to 233 ms, startup 28 to 18 ms).
 
-| Commit | What it is | Cold scan, measured today or on Task 7's day |
-| --- | --- | --- |
-| `d195857` | Task 1, before `skipped_tests` | 3607 ms when Task 1 ran, 4996 ms on Task 7's day |
-| `8014911` | Task 7 complete | 7037 to 7583 ms |
-| `4395a45` | Task 7b, extraction parallelised | 5152 to 5983 ms |
-
-The Task 1 commit, which has none of this plan's work in it at all, measures
-within 4 ms of the target on this machine. So the engine's own budget above that
-floor is a handful of milliseconds, and the 152 ms gap is not a second piece of
-engine work waiting to be found; it is the target having been set on a faster
-machine. Plan 2's instruction stands ("fix the cause; do not raise the target"),
-and the cause that was fixable has been fixed. What is owed before anyone moves
-the target is a re-measure of the Task 1 baseline on a quiet box, which is a
-founder call rather than a code change.
+So the 152 ms Task 7b could not close was the measuring box, exactly as it
+argued, and the engine's own cold budget on a quiet machine has about 1200 ms of
+headroom against the 5000 ms target. Plan 2's instruction ("fix the cause; do not
+raise the target") was followed and the target did not move. What is worth
+carrying forward is the method rather than the number: the first cold run after
+a long gap measures the page cache, so a cold benchmark is only meaningful from
+the second run on.
