@@ -85,7 +85,7 @@ Every finding carries: rule id, category (erosion or security), OWASP 2021 categ
 Erosion pack, free:
 - `already-exists`: moved to release two, see 4.2
 - `dead-export`: exported symbol imported nowhere. Entry points from package.json (`main`, `exports`, `bin`), framework conventions (Next.js `app/` and `pages/`, Expo Router `app/`), and config.
-- `dead-file`: file imported nowhere and not an entry point.
+- `dead-file`: file imported nowhere and not an entry point. Ships disabled by default (6/9 precision on the corpus substitute, 2026-09-08); a repository enables it with `[rules.dead-file]` `enabled = true` once its entry points are curated.
 - `unreachable`: code after unconditional return, throw, break, continue.
 - `unused-import`.
 - `swallowed-error`: empty catch, catch that only logs and returns undefined where the caller uses the result, promise created without await, then, or catch.
