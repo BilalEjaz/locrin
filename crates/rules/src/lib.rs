@@ -1,6 +1,7 @@
 pub mod boundary;
 pub mod dead_export;
 pub mod dead_file;
+pub mod html_injection;
 pub mod injection_sink;
 pub mod leftover_commented;
 pub mod leftover_debug;
@@ -275,6 +276,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(secrets::SecretExposed),
         Box::new(weak_crypto::WeakCrypto),
         Box::new(injection_sink::InjectionSink),
+        Box::new(html_injection::HtmlInjection),
     ]
 }
 
@@ -616,11 +618,12 @@ mod tests {
                 "test-newly-skipped",
                 "secret-exposed",
                 "weak-crypto",
-                "injection-sink"
+                "injection-sink",
+                "html-injection"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 11, "eleven file rules and three graph rules");
+        assert_eq!(file_rules().len(), 12, "twelve file rules and three graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
             vec!["dead-export", "dead-file", "boundary-violation"]
