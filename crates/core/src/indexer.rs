@@ -8,7 +8,6 @@ use crate::index::Index;
 use crate::parse::ParsedFile;
 use crate::resolve::Resolver;
 use crate::symbols;
-use crate::testcases;
 use crate::ALLOW_MARK;
 
 /// Every import the file has, syntactic ones first. A file whose tree came back
@@ -35,8 +34,17 @@ fn file_imports(file: &ParsedFile) -> Vec<imports::Import> {
 /// against, so that run reads and hashes the file rather than skipping it.
 /// Callers that took the file's size and modification time before reading it
 /// pass them to [`record_with_stat`] instead.
-pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver) -> anyhow::Result<()> {
-    record_with_stat(ix, file, hash, resolver, (0, 0))
+///
+/// `skipped` is what [`crate::testcases::skipped_names`] says about `file`, which the
+/// caller computes for the reason `record_with_stat` gives.
+pub fn record(
+    ix: &mut Index,
+    file: &ParsedFile,
+    hash: &str,
+    resolver: &Resolver,
+    skipped: &[String],
+) -> anyhow::Result<()> {
+    record_with_stat(ix, file, hash, resolver, (0, 0), skipped)
 }
 
 /// Records `file` under `hash` and `stat`. The `files` row is written last on
@@ -54,12 +62,21 @@ pub fn record(ix: &mut Index, file: &ParsedFile, hash: &str, resolver: &Resolver
 ///
 /// Zero for either value is "no stat", which never matches, so the file is
 /// simply always read and hashed.
+///
+/// `skipped` is the set of test cases this version of the file skips, which the
+/// caller computes with [`crate::testcases::skipped_names`] and hands over rather than
+/// having it extracted here. Extracting it here walked the tree a second time on
+/// the single thread that owns the index connection, which is the one part of a
+/// run that cannot overlap with anything: on a heavily tested repository that
+/// cost about two seconds of a cold index. Every caller already holds the parsed
+/// file in a pass that can do the walk in parallel.
 pub fn record_with_stat(
     ix: &mut Index,
     file: &ParsedFile,
     hash: &str,
     resolver: &Resolver,
     stat: (i64, i64),
+    skipped: &[String],
 ) -> anyhow::Result<()> {
     let syms = symbols::extract(file);
     symbols::store(ix, file, &syms)?;
@@ -69,16 +86,11 @@ pub fn record_with_stat(
         file.source.lines().enumerate().filter(|(_, l)| l.contains(ALLOW_MARK)).map(|(i, _)| i as u32 + 1).collect();
     ix.replace_allow_lines(&file.rel, &allow)?;
     // What this version of the file skips, so the next run can tell a test
-    // skipped in that change from one that was already skipped. Non-test files
-    // are replaced with nothing rather than left alone: a file that stops being
-    // a test file (renamed out of `__tests__`, say) must not keep the set the
-    // version before it stored.
-    let skipped: Vec<String> = if testcases::is_test_file(&file.rel) {
-        testcases::extract(file).into_iter().filter(|c| c.skipped).map(|c| c.name).collect()
-    } else {
-        Vec::new()
-    };
-    ix.replace_skipped_tests(&file.rel, &skipped)?;
+    // skipped in that change from one that was already skipped. A file with
+    // nothing to say is replaced with nothing rather than left alone: a file
+    // that stops being a test file (renamed out of `__tests__`, say) must not
+    // keep the set the version before it stored.
+    ix.replace_skipped_tests(&file.rel, skipped)?;
     let status = if file.has_error { "error" } else { "ok" };
     ix.upsert_file_stat(&file.rel, file.language.as_str(), hash, status, stat.0, stat.1)
 }
@@ -133,7 +145,7 @@ mod tests {
         let mut ix = Index::open_in_memory().unwrap();
         let mut file = parse_file(&root, &root.join("src/index.ts")).unwrap().unwrap();
         file.source.push_str("// locrin:allow\n");
-        record(&mut ix, &file, &content_hash(&file.source), &resolver).unwrap();
+        record(&mut ix, &file, &content_hash(&file.source), &resolver, &[]).unwrap();
 
         assert_eq!(ix.parse_status("src/index.ts").unwrap().as_deref(), Some("ok"));
         assert_eq!(symbols::exported(&ix).unwrap().len(), 1);
@@ -143,7 +155,7 @@ mod tests {
         // Break the symbols table: record must fail before it stamps the file row.
         let mut broken = Index::open_in_memory().unwrap();
         broken.conn().execute_batch("DROP TABLE symbols").unwrap();
-        assert!(record(&mut broken, &file, "h2", &resolver).is_err());
+        assert!(record(&mut broken, &file, "h2", &resolver, &[]).is_err());
         assert_eq!(broken.parse_status("src/index.ts").unwrap(), None, "a failed record must not look indexed");
     }
 
@@ -151,6 +163,9 @@ mod tests {
     /// skip from an old one. A file that is not a test file has nothing to
     /// remember, and recording it must say so rather than leaving whatever an
     /// earlier version stored.
+    ///
+    /// The set comes from the caller, so this walks the pair the way a run does:
+    /// `testcases::skipped_names` on the parsed file, then `record`.
     #[test]
     fn record_remembers_what_a_test_file_skips_and_nothing_for_other_files() {
         use crate::parse::parse_source;
@@ -161,7 +176,8 @@ mod tests {
 
         let source = "it.skip(\"one\", () => {});\nit(\"two\", () => {});\nxit(\"three\", () => {});\n".to_string();
         let test_file = parse_source(Path::new("src/a.test.ts"), "src/a.test.ts", source).unwrap();
-        record(&mut ix, &test_file, &content_hash(&test_file.source), &resolver).unwrap();
+        let skipped = crate::testcases::skipped_names(&test_file);
+        record(&mut ix, &test_file, &content_hash(&test_file.source), &resolver, &skipped).unwrap();
         assert_eq!(
             ix.skipped_tests("src/a.test.ts").unwrap(),
             HashSet::from(["one".to_string(), "three".to_string()]),
@@ -170,13 +186,16 @@ mod tests {
 
         // The same source under a name that is not a test file: nothing is stored.
         let plain = parse_source(Path::new("src/a.ts"), "src/a.ts", test_file.source.clone()).unwrap();
-        record(&mut ix, &plain, &content_hash(&plain.source), &resolver).unwrap();
+        let none = crate::testcases::skipped_names(&plain);
+        assert!(none.is_empty(), "a file that is not a test file skips nothing, whatever its source says");
+        record(&mut ix, &plain, &content_hash(&plain.source), &resolver, &none).unwrap();
         assert!(ix.skipped_tests("src/a.ts").unwrap().is_empty(), "only test files carry a skipped set");
 
         // Un-skipping is a change like any other: the old name has to go.
         let fixed =
             parse_source(Path::new("src/a.test.ts"), "src/a.test.ts", "it(\"one\", () => {});\n".to_string()).unwrap();
-        record(&mut ix, &fixed, &content_hash(&fixed.source), &resolver).unwrap();
+        record(&mut ix, &fixed, &content_hash(&fixed.source), &resolver, &crate::testcases::skipped_names(&fixed))
+            .unwrap();
         assert!(ix.skipped_tests("src/a.test.ts").unwrap().is_empty(), "re-recording replaces the whole set");
     }
 
@@ -199,7 +218,7 @@ mod tests {
 
         let mut ix = Index::open_in_memory().unwrap();
         let hash = content_hash(&file.source);
-        record_with_stat(&mut ix, &file, &hash, &resolver, taken_before_the_read).unwrap();
+        record_with_stat(&mut ix, &file, &hash, &resolver, taken_before_the_read, &[]).unwrap();
         assert!(ix.unchanged_by_stat("src/index.ts", taken_before_the_read.0, taken_before_the_read.1).unwrap());
         assert!(
             !ix.unchanged_by_stat("src/index.ts", on_disk.0, on_disk.1).unwrap(),
@@ -207,7 +226,7 @@ mod tests {
         );
 
         let mut plain = Index::open_in_memory().unwrap();
-        record(&mut plain, &file, &hash, &resolver).unwrap();
+        record(&mut plain, &file, &hash, &resolver, &[]).unwrap();
         assert!(
             !plain.unchanged_by_stat("src/index.ts", on_disk.0, on_disk.1).unwrap(),
             "a caller with no stat to offer records none, so the file is always read again"
@@ -229,8 +248,8 @@ mod tests {
         let committed = scratch_db("indexer-commit");
         let mut ix = Index::open_at(&committed).unwrap();
         ix.begin().unwrap();
-        record(&mut ix, &a, &content_hash(&a.source), &resolver).unwrap();
-        record(&mut ix, &b, &content_hash(&b.source), &resolver).unwrap();
+        record(&mut ix, &a, &content_hash(&a.source), &resolver, &[]).unwrap();
+        record(&mut ix, &b, &content_hash(&b.source), &resolver, &[]).unwrap();
         ix.commit().unwrap();
         drop(ix);
         let ix = Index::open_at(&committed).unwrap();
@@ -240,7 +259,7 @@ mod tests {
         let abandoned = scratch_db("indexer-abandoned");
         let mut ix = Index::open_at(&abandoned).unwrap();
         ix.begin().unwrap();
-        record(&mut ix, &a, &content_hash(&a.source), &resolver).unwrap();
+        record(&mut ix, &a, &content_hash(&a.source), &resolver, &[]).unwrap();
         drop(ix);
         let ix = Index::open_at(&abandoned).unwrap();
         assert!(ix.all_files().unwrap().is_empty(), "a run that never committed must leave no trace");

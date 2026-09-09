@@ -34,6 +34,21 @@ pub fn is_test_file(rel: &str) -> bool {
     name.contains(".test.") || name.contains(".spec.") || rel.split('/').any(|seg| seg == "__tests__")
 }
 
+/// The names of the cases `file` skips, or nothing at all when `file` is not a
+/// test file.
+///
+/// This is what the index stores per file so a later run can tell a newly
+/// skipped case from one that was already skipped. It lives here, beside the
+/// extractor, because it is a tree walk: callers run it in whatever parallel
+/// pass already holds the parsed file rather than on the thread that owns the
+/// index connection. See [`crate::indexer::record_with_stat`].
+pub fn skipped_names(file: &ParsedFile) -> Vec<String> {
+    if !is_test_file(&file.rel) {
+        return Vec::new();
+    }
+    extract(file).into_iter().filter(|c| c.skipped).map(|c| c.name).collect()
+}
+
 /// Every test case in `file`, in source order.
 pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
     let src = &file.source;

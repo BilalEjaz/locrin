@@ -127,6 +127,10 @@ struct Parsed {
     is_changed: bool,
     stat: (i64, i64),
     file: Option<ParsedFile>,
+    /// The cases this version of the file skips, empty for anything that is not
+    /// a test file. Computed here rather than in the indexer because it is a
+    /// tree walk and the indexer runs on the single index-connection thread.
+    skipped: Vec<String>,
 }
 
 /// The files named on the command line, canonical and inside the root, or None
@@ -349,15 +353,20 @@ fn index_files(
     // Parsing is the single largest cost of a cold run and needs nothing but the
     // source text, so it runs across the pool. `collect` keeps candidate order,
     // which is what the recording pass below and the returned `files` rely on.
+    //
+    // The skipped-case walk goes here for the same reason: the recording pass
+    // below owns the index connection and runs on one thread, so a tree walk it
+    // did would be serial time nothing else can overlap.
     let parsed: Vec<Parsed> = pending
         .into_par_iter()
         .map(|p| {
             let Pending { path, rel, hash, is_changed, source, stat } = p;
             let file = parse_source(&path, &rel, source);
-            Parsed { hash, is_changed, stat, file }
+            let skipped = file.as_ref().map(locrin_core::testcases::skipped_names).unwrap_or_default();
+            Parsed { hash, is_changed, stat, file, skipped }
         })
         .collect();
-    for Parsed { hash, is_changed, stat, file } in parsed {
+    for Parsed { hash, is_changed, stat, file, skipped } in parsed {
         let Some(parsed) = file else { continue };
         if parsed.has_error {
             eprintln!("warning: parse errors in {}; excluded from rules", parsed.rel);
@@ -376,7 +385,7 @@ fn index_files(
                 let was = ix.skipped_tests(&parsed.rel)?;
                 previous.skipped_tests.insert(parsed.rel.clone(), was);
             }
-            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat, &skipped)?;
             // Whatever the cache holds for this file describes bytes that are
             // gone. The rows this run writes replace them, and until it does the
             // absence is the safe state: a miss costs a parse, a stale hit
@@ -419,7 +428,8 @@ fn index_files(
             // hand: reading and parsing it again would build the same tree.
             if let Some((file, read)) = files.iter().find(|f| f.rel == rel).zip(reads.get(&rel)) {
                 previous.skipped_tests.insert(rel.clone(), ix.skipped_tests(&rel)?);
-                indexer::record_with_stat(ix, file, &read.hash, resolver, read.stat)?;
+                let skipped = locrin_core::testcases::skipped_names(file);
+                indexer::record_with_stat(ix, file, &read.hash, resolver, read.stat, &skipped)?;
                 continue;
             }
             let Some(path) = by_rel.get(&rel) else { continue };
@@ -428,7 +438,8 @@ fn index_files(
             let Some((source, hash)) = read_source(path)? else { continue };
             let Some(parsed) = parse_source(path, &rel, source) else { continue };
             previous.skipped_tests.insert(rel.clone(), ix.skipped_tests(&rel)?);
-            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
+            let skipped = locrin_core::testcases::skipped_names(&parsed);
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat, &skipped)?;
             reads.insert(rel.clone(), FileRead { hash, stat });
             files.push(parsed);
         }

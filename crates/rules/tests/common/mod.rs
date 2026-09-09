@@ -44,7 +44,10 @@ pub fn index_dir(root: &Path, files: &[ParsedFile], config: &Config) -> (Index, 
     let resolver = Resolver::new(&root, indexed);
     let mut ix = Index::open_in_memory().unwrap();
     for f in files {
-        indexer::record(&mut ix, f, &content_hash(&f.source), &resolver).unwrap();
+        // The skipped set comes from the caller now, the way a run computes it
+        // in its parse pass. See `indexer::record_with_stat`.
+        let skipped = locrin_core::testcases::skipped_names(f);
+        indexer::record(&mut ix, f, &content_hash(&f.source), &resolver, &skipped).unwrap();
     }
     (ix, EntryPoints::detect(&root, &config.entry_points).unwrap())
 }
