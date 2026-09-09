@@ -13,9 +13,10 @@ use locrin_core::index::{content_hash, file_stat, Index};
 use locrin_core::indexer;
 use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
+use locrin_core::previous::Previous;
 use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
-use locrin_rules::{file_rules, graph_rules, run_file_rules, run_rules, RuleContext};
+use locrin_rules::{file_rules, graph_rules, rule_runs, run_file_rules, run_rules, RuleContext};
 use rayon::prelude::*;
 
 pub struct Options {
@@ -23,6 +24,10 @@ pub struct Options {
     pub paths: Vec<PathBuf>,
     pub changed_only: bool,
     pub json: bool,
+    /// Never touch the network. See spec 9: the run serves the cached advisory
+    /// snapshot or skips the rule that would have fetched, and never fails
+    /// because a network call could not be made.
+    pub offline: bool,
     /// The scope taken from git rather than from the command line: a pull
     /// request's working tree against its base, or the commits since a tag.
     pub diff: Option<crate::git::DiffScope>,
@@ -465,8 +470,7 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let mut ix = if record { Index::open(root)? } else { Index::open_in_memory()? };
 
     let rules = file_rules();
-    let enabled: Vec<&'static str> =
-        rules.iter().filter(|r| config.rule_enabled_or(r.id(), r.enabled_by_default())).map(|r| r.id()).collect();
+    let enabled: Vec<&'static str> = rules.iter().filter(|r| rule_runs(r.as_ref(), &config)).map(|r| r.id()).collect();
     let config_hash = cache::config_hash(&config);
     let key = CacheKey { config_hash: &config_hash, enabled: &enabled };
 
@@ -490,9 +494,19 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // over the whole index: they are SQL and a change anywhere can move their
     // answer. The borrow of `ix` ends inside this block, before the cache write
     // takes it mutably.
-    let fresh = run_file_rules(&rules, &indexed.files, &config, &entries)?;
+    let previous = Previous::default();
+    let base = RuleContext {
+        files: &indexed.files,
+        config: &config,
+        index: None,
+        entries: &entries,
+        root,
+        offline: opts.offline,
+        previous: &previous,
+    };
+    let fresh = run_file_rules(&rules, &indexed.files, &base)?;
     let graph = {
-        let ctx = RuleContext { files: &indexed.files, config: &config, index: Some(&ix), entries: &entries };
+        let ctx = RuleContext { index: Some(&ix), ..base };
         run_rules(&graph_rules(), &ctx)?
     };
     if record {
@@ -557,9 +571,9 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
 
 /// Indexes the repository and warms the findings cache, so the first `check`
 /// after it (a hook, say) pays for nothing but the files that changed since.
-pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
+pub fn scan(root: &Path, offline: bool) -> anyhow::Result<(usize, usize)> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
     let run = pass(&root, &opts, true)?;
     Ok((run.files, run.changed))
 }
@@ -568,7 +582,8 @@ pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
 /// baseline already holds: `create` is a fresh line in the sand, not a merge.
 pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
+    let opts =
+        Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: false, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::default();
     for f in &findings {
@@ -583,7 +598,8 @@ pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
 /// an entry that suppresses nothing.
 pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bool> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
+    let opts =
+        Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: false, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };

@@ -9,6 +9,7 @@ use locrin_core::finding::Finding;
 use locrin_core::index::{content_hash, Index};
 use locrin_core::indexer;
 use locrin_core::parse::{parse_file, ParsedFile};
+use locrin_core::previous::Previous;
 use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_root, source_files, WalkOptions};
 use locrin_rules::{run_rules, Rule, RuleContext};
@@ -48,10 +49,47 @@ pub fn index_dir(root: &Path, files: &[ParsedFile], config: &Config) -> (Index, 
     (ix, EntryPoints::detect(&root, &config.entry_points).unwrap())
 }
 
+/// An empty previous state, borrowed for the whole test run: a context needs a
+/// reference rather than a value.
+pub fn no_previous() -> &'static Previous {
+    static P: std::sync::OnceLock<Previous> = std::sync::OnceLock::new();
+    P.get_or_init(Previous::default)
+}
+
+/// A context over fixture files that are already parsed and indexed, for the
+/// tests that call a rule directly instead of going through `run_on`.
+pub fn ctx_for<'a>(
+    files: &'a [ParsedFile],
+    config: &'a Config,
+    index: &'a Index,
+    entries: &'a EntryPoints,
+    root: &'a Path,
+) -> RuleContext<'a> {
+    RuleContext { files, config, index: Some(index), entries, root, offline: true, previous: no_previous() }
+}
+
+/// Runs one rule over a fixture directory with nothing known about the previous
+/// version of it, which is what almost every rule's tests want.
 pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
-    let files = parse_dir(root);
-    let (ix, entries) = index_dir(root, &files, config);
-    let ctx = RuleContext { files: &files, config, index: Some(&ix), entries: &entries };
+    run_on_with(rule, root, config, &Previous::default())
+}
+
+/// The same, for the rules whose answer is a change: the caller says what the
+/// previous version of the fixture said. Fixture runs are always offline; no
+/// test may depend on a network call.
+pub fn run_on_with(rule: Box<dyn Rule>, root: &Path, config: &Config, previous: &Previous) -> Vec<Finding> {
+    let root = canonical_root(root);
+    let files = parse_dir(&root);
+    let (ix, entries) = index_dir(&root, &files, config);
+    let ctx = RuleContext {
+        files: &files,
+        config,
+        index: Some(&ix),
+        entries: &entries,
+        root: &root,
+        offline: true,
+        previous,
+    };
     run_rules(&[rule], &ctx).unwrap()
 }
 
