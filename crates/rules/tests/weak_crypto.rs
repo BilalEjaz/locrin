@@ -22,6 +22,7 @@ fn every_form_flags_its_two_lines_in_the_fixture() {
             ("a.ts".to_string(), 16),
             ("a.ts".to_string(), 21),
             ("a.ts".to_string(), 26),
+            ("a.ts".to_string(), 33),
         ]
     );
     let evidence: Vec<&str> = out.iter().map(|f| f.evidence.as_str()).collect();
@@ -34,10 +35,11 @@ fn every_form_flags_its_two_lines_in_the_fixture() {
             "Math.random() generates nonce",
             "static IV passed to createCipheriv",
             "static IV passed to createDecipheriv",
+            "static IV passed to createDecipheriv",
         ]
     );
     let fixes: Vec<&str> = out.iter().map(|f| f.fix.as_str()).collect();
-    assert_eq!(fixes, vec![HASH_FIX, HASH_FIX, RANDOM_FIX, RANDOM_FIX, IV_FIX, IV_FIX]);
+    assert_eq!(fixes, vec![HASH_FIX, HASH_FIX, RANDOM_FIX, RANDOM_FIX, IV_FIX, IV_FIX, IV_FIX]);
 }
 
 /// Spec 7.1 metadata: every finding is a High-severity Security finding under
@@ -57,7 +59,15 @@ fn every_finding_carries_the_security_metadata_for_its_form() {
     let cwes: Vec<Option<&str>> = out.iter().map(|f| f.cwe.as_deref()).collect();
     assert_eq!(
         cwes,
-        vec![Some("CWE-327"), Some("CWE-327"), Some("CWE-338"), Some("CWE-338"), Some("CWE-327"), Some("CWE-327"),]
+        vec![
+            Some("CWE-327"),
+            Some("CWE-327"),
+            Some("CWE-338"),
+            Some("CWE-338"),
+            Some("CWE-327"),
+            Some("CWE-327"),
+            Some("CWE-327"),
+        ]
     );
 }
 
@@ -69,7 +79,7 @@ fn findings_have_distinct_ids() {
     let mut ids: Vec<&str> = out.iter().map(|f| f.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), out.len(), "six findings, six ids");
+    assert_eq!(ids.len(), out.len(), "seven findings, seven ids");
 }
 
 #[test]
@@ -82,13 +92,18 @@ fn strong_algorithms_and_non_credential_randomness_are_left_alone() {
 /// no credential, so the finding stands at Medium: the algorithm is weak either
 /// way, but nothing here says a credential is at stake. `sessionId` is a
 /// credential-shaped name even though the function around it is `render`, so
-/// the assignment target carries the confidence, not the enclosing symbol.
+/// the assignment target carries the confidence, not the enclosing symbol. The
+/// class field on line 13 is the third: the context a hash is judged by is the
+/// field it initialises, not every name in the class around it, so the unused
+/// `password` field below it does not raise the etag hash to High.
 #[test]
 fn confidence_follows_the_credential_context_not_the_enclosing_function() {
     let out = run_on(Box::new(WeakCrypto), &fixture("weak_crypto", "edge"), &Config::default());
-    assert_eq!(hits(&out), vec![("c.ts".to_string(), 4), ("c.ts".to_string(), 8)]);
+    assert_eq!(hits(&out), vec![("c.ts".to_string(), 4), ("c.ts".to_string(), 8), ("c.ts".to_string(), 13)]);
     assert_eq!(out[0].confidence, Confidence::Medium, "{}", out[0].evidence);
     assert_eq!(out[0].evidence, "md5 used to hash etagFor");
     assert_eq!(out[1].confidence, Confidence::High, "{}", out[1].evidence);
     assert_eq!(out[1].evidence, "Math.random() generates sessionId");
+    assert_eq!(out[2].confidence, Confidence::Medium, "{}", out[2].evidence);
+    assert_eq!(out[2].evidence, "md5 used to hash ResponseCache");
 }

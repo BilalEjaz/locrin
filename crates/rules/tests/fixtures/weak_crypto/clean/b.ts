@@ -26,3 +26,8 @@ export function encryptMessage(key: Buffer, plain: string): Buffer {
 export function newRequestId(): string {
   return randomUUID();
 }
+
+export function encryptWithFill(key: Buffer, plain: string, fill: number): Buffer {
+  const cipher = createCipheriv("aes-256-gcm", key, Buffer.alloc(16, fill));
+  return Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+}

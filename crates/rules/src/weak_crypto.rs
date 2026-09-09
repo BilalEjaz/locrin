@@ -24,8 +24,9 @@
 //!   be unguessable. That is a deliberate under-report: a secret assigned to a
 //!   name that does not say so is invisible here.
 //! - **A static IV is read off the argument, not off the value.** A string
-//!   literal, `Buffer.from` of a literal, `Buffer.alloc(n)` (an all-zero IV) and
-//!   an array literal are all fixed bytes at the call site. An IV read from a
+//!   literal, `Buffer.from` of a literal, any single-argument `Buffer.alloc`
+//!   (an all-zero IV, whether the length is written as `16` or as `IV_LENGTH`)
+//!   and an array literal are all fixed bytes at the call site. An IV read from a
 //!   constant declared three lines up, or from a config file, is the same bug
 //!   and is not seen: resolving it needs the constant's value, which is release
 //!   two's cross-function work. `crypto.randomBytes(16)` and any other
@@ -54,8 +55,15 @@ const IV_FIX: &str =
     "Generate a fresh random IV per message with crypto.randomBytes and store it beside the ciphertext";
 
 /// A name that says the value beside it is a credential, which is what turns a
-/// weak digest from a performance choice into a vulnerability.
+/// weak digest from a performance choice into a vulnerability. Every part is
+/// required to stand as its own word, the same as `SECRET_NAME`; see `boundary`.
 const CREDENTIAL: &str = r"(?i)(password|passwd|pwd|credential|secret|token|session)";
+/// Identifiers whose credential-shaped first word names a browser store rather
+/// than a value. `sessionStorage.getItem(key)` sitting beside a cache-key hash
+/// is the one shape the word test cannot rule out on its own: `session` really
+/// does stand as its own word there, and the name still says nothing about a
+/// credential.
+const STORAGE_GLOBALS: [&str; 2] = ["sessionStorage", "localStorage"];
 /// A name that says the value being filled must be unguessable. Every part is
 /// required to stand as its own word in the identifier; see `boundary`.
 const SECRET_NAME: &str = r"(?i)(token|secret|nonce|session|otp|password|salt|iv|api[_-]?key)";
@@ -88,23 +96,44 @@ fn id_name() -> &'static Regex {
     RE.get_or_init(|| Regex::new(ID_NAME).expect("the id name pattern compiles"))
 }
 
-/// Whether a `SECRET_NAME` match stands as its own word inside the identifier:
-/// it begins the name, follows a separator, or begins a camel-case part, and it
-/// ends the name or runs up against one of those. A bare substring test reads
-/// the `iv` in `private`, `derive` and `activity` as an initialisation vector;
-/// on the corpus that is exactly what it did, flagging a test helper named
+/// Whether a word ends at `end`: the name ends there, a separator follows, or
+/// the next camel-case part begins.
+fn word_ends_at(b: &[u8], end: usize) -> bool {
+    end == b.len() || !b[end].is_ascii_alphanumeric() || b[end].is_ascii_uppercase() || b[end].is_ascii_digit()
+}
+
+/// Whether a match stands as its own word inside the identifier: it begins the
+/// name, follows a separator, or begins a camel-case part, and it ends the name
+/// or runs up against one of those. A bare substring test reads the `iv` in
+/// `private`, `derive` and `activity` as an initialisation vector; on the corpus
+/// that is exactly what it did, flagging a test helper named
 /// `sellerWithActiveListing` as a generator of IVs.
+///
+/// A trailing `s` ends the word too. A plural is the same word: `tokens`,
+/// `secrets`, `apiKeys` and `generateTokens` name exactly what their singulars
+/// name, and rejecting them made every collection of secrets in a repository
+/// invisible to the rule.
 fn boundary(name: &str, start: usize, end: usize) -> bool {
     let b = name.as_bytes();
     let starts_word = start == 0 || !b[start - 1].is_ascii_alphanumeric() || b[start].is_ascii_uppercase();
-    let ends_word =
-        end == b.len() || !b[end].is_ascii_alphanumeric() || b[end].is_ascii_uppercase() || b[end].is_ascii_digit();
+    let ends_word = word_ends_at(b, end) || (b[end] == b's' && word_ends_at(b, end + 1));
     starts_word && ends_word
 }
 
 /// Whether `name` names a secret: a `SECRET_NAME` part standing as its own word.
 fn names_a_secret(name: &str) -> bool {
     secret_name().find_iter(name).any(|m| boundary(name, m.start(), m.end()))
+}
+
+/// Whether `name` says a credential is in reach: a `CREDENTIAL` part standing
+/// as its own word. The word test is the same one `names_a_secret` uses, and it
+/// is what keeps `tokenize`, `tokenizer` and `tokenized` (a lexer, not a
+/// credential) from raising a cache-key hash to High.
+fn names_a_credential(name: &str) -> bool {
+    if STORAGE_GLOBALS.contains(&name) {
+        return false;
+    }
+    credential().find_iter(name).any(|m| boundary(name, m.start(), m.end()))
 }
 
 /// Whether `name` names an identifier that has to be unguessable.
@@ -170,11 +199,20 @@ fn literal_string<'a>(node: Node<'a>, src: &'a str) -> Option<String> {
 
 /// Every identifier in the statement the node sits in, which is the widest a
 /// single expression's context gets without leaving the line's own decision.
+///
+/// The initialiser of a class field and the value of an object key are
+/// statements in every sense that matters here, and neither is a `*_statement`
+/// node: without them the walk climbs past the field, past the class body and
+/// out to the `export` in front of the class, and then reads every name the
+/// class declares. One `private password` field then makes a cache-key hash
+/// four fields away read as a credential.
 fn statement_identifiers(node: Node, src: &str) -> Vec<String> {
     let mut current = Some(node);
     let mut stmt = node;
     while let Some(n) = current {
-        if n.kind().ends_with("_statement") || n.kind() == "variable_declarator" {
+        if n.kind().ends_with("_statement")
+            || matches!(n.kind(), "variable_declarator" | "public_field_definition" | "pair" | "class_body")
+        {
             stmt = n;
             break;
         }
@@ -254,7 +292,17 @@ fn static_iv(node: Node, src: &str) -> bool {
                 return first.is_some_and(|a| matches!(a.kind(), "array") || literal_string(a, src).is_some());
             }
             if is_member_call(node, src, "Buffer", "alloc") {
-                return first.is_some_and(|a| a.kind() == "number");
+                // `Buffer.alloc` zero-fills, so the length argument does not
+                // have to be readable for the bytes to be known: `alloc(16)`,
+                // `alloc(IV_LENGTH)` and `alloc(ivLen)` are the same all-zero
+                // IV. A fill argument is the only thing that can change that,
+                // and only when this file can read it.
+                let all = args(node);
+                return match all.len() {
+                    0 => false,
+                    1 => true,
+                    _ => all[1].kind() == "number" || literal_string(all[1], src).is_some(),
+                };
             }
             false
         }
@@ -287,8 +335,8 @@ fn weak_hash(call: Node, src: &str, file: &ParsedFile, at: u32) -> Option<Form> 
     // says more than `md5 used to hash hashPassword`.
     let credential = statement_identifiers(call, src)
         .into_iter()
-        .find(|i| credential().is_match(i))
-        .or_else(|| symbol.as_deref().filter(|s| credential().is_match(s)).map(|s| s.to_string()));
+        .find(|i| names_a_credential(i))
+        .or_else(|| symbol.as_deref().filter(|s| names_a_credential(s)).map(|s| s.to_string()));
     let (context, confidence) = match credential {
         Some(name) => (name, Confidence::High),
         None => (symbol.unwrap_or_else(|| "a value".to_string()), Confidence::Medium),
@@ -390,17 +438,43 @@ impl Rule for WeakCrypto {
 
 #[cfg(test)]
 mod tests {
-    use super::{names_a_secret, names_an_id};
+    use super::{names_a_credential, names_a_secret, names_an_id};
 
     /// The names the corpus run turned up, pinned so the tightening they forced
     /// cannot quietly come undone. See `boundary` and `ID_NAME`.
     #[test]
     fn a_secret_part_has_to_stand_as_its_own_word() {
-        for yes in ["iv", "IV", "iv_bytes", "sessionIv", "authToken", "otp", "api_key", "apiKey", "salt"] {
+        for yes in [
+            "iv",
+            "IV",
+            "iv_bytes",
+            "sessionIv",
+            "authToken",
+            "otp",
+            "api_key",
+            "apiKey",
+            "salt",
+            "tokens",
+            "apiKeys",
+            "generateSecrets",
+        ] {
             assert!(names_a_secret(yes), "{yes}");
         }
         for no in ["private", "privateKey", "derive", "driver", "activity", "sellerWithActiveListing", "archive"] {
             assert!(!names_a_secret(no), "{no}");
+        }
+    }
+
+    /// The credential context is read the same way, so a name that only
+    /// contains a credential word as a fragment of a longer one does not raise
+    /// a cache-key hash to High.
+    #[test]
+    fn a_credential_context_has_to_stand_as_its_own_word() {
+        for yes in ["hashPassword", "password", "authToken", "tokens", "sessionSecret"] {
+            assert!(names_a_credential(yes), "{yes}");
+        }
+        for no in ["tokenize", "tokenizer", "sessionStorage", "tokenized"] {
+            assert!(!names_a_credential(no), "{no}");
         }
     }
 

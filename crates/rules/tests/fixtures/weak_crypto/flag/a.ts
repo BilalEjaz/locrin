@@ -26,3 +26,10 @@ export function decrypt(key: Buffer, blob: Buffer): Buffer {
   const decipher = createDecipheriv("aes-256-cbc", key, Buffer.alloc(16));
   return Buffer.concat([decipher.update(blob), decipher.final()]);
 }
+
+const IV_LEN = 16;
+
+export function decryptWithNamedLength(key: Buffer, blob: Buffer): Buffer {
+  const decipher = createDecipheriv("aes-256-cbc", key, Buffer.alloc(IV_LEN));
+  return Buffer.concat([decipher.update(blob), decipher.final()]);
+}
