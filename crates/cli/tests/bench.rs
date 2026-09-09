@@ -94,14 +94,30 @@ fn warm_thirty_file_check_under_one_second() {
     let cache = tempfile::tempdir().unwrap();
     locrin(cache.path()).arg("scan").assert().success();
     let dir = repo().join("app");
-    let mut files: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().map(|x| x == "tsx" || x == "ts").unwrap_or(false))
-        .map(|p| format!("app/{}", p.file_name().unwrap().to_string_lossy()))
-        .collect();
-    files.sort();
+    // The spec's pull request is thirty files, and the top level of `app/` holds
+    // only eleven, so the listing goes one directory level down: the top-level
+    // files first, then the files in each immediate subdirectory, each group
+    // sorted. That is also the shape of a real pull request, a screen and the
+    // handful of files beside it rather than a flat slice of one directory.
+    fn ts_files(dir: &std::path::Path, prefix: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut out: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().map(|x| x == "tsx" || x == "ts").unwrap_or(false))
+            .map(|p| format!("{prefix}{}", p.file_name().unwrap().to_string_lossy()))
+            .collect();
+        out.sort();
+        out
+    }
+    let mut subdirs: Vec<PathBuf> =
+        std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    subdirs.sort();
+    let mut files = ts_files(&dir, "app/");
+    for sub in &subdirs {
+        let name = sub.file_name().unwrap().to_string_lossy().to_string();
+        files.extend(ts_files(sub, &format!("app/{name}/")));
+    }
     files.truncate(30);
     assert!(files.len() >= 10, "bench repo has too few files under app/ to stand in for a PR: {}", files.len());
     let t = Instant::now();
