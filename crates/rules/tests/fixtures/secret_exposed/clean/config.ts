@@ -213,6 +213,11 @@ export const stripped = pem.replace("-----BEGIN PRIVATE KEY-----", "");
 export const looksLikeAKey = key.startsWith("-----BEGIN RSA PRIVATE KEY-----");
 export const basicAuthHeader = `Basic ${btoa(user + ":" + secret)}`;
 export const bearerHeader = { Authorization: `Bearer ${accessToken}` };
+// A header holding a test double rather than a token, which the header shape
+// cannot tell apart on its own.
+export const mockHeaders = { Authorization: "Bearer mockAccessTokenForTheSuite" };
+// And a header holding a provider sandbox key, which says so in the value.
+export const sandboxHeaders = { Authorization: "Bearer sk_test_A1b2C3d4E5f6G7h8I9j0K1l2M3n4" };
 
 // Written values, not generated ones: the entropy gate.
 export const password = "password1234";

@@ -29,6 +29,16 @@ fn every_pattern_in_the_table_flags_its_line_in_the_fixture() {
     let missing: Vec<&str> = PATTERNS.iter().map(|p| p.provider).filter(|p| !found.contains(p)).collect();
     assert!(missing.is_empty(), "no fixture line for: {missing:?}");
     assert!(PATTERNS.len() >= 100, "the table is the rule: {} patterns", PATTERNS.len());
+    // `keys.ts` is one line per entry in the table and nothing else, so the
+    // count of findings in it is the count of entries exactly. One more means an
+    // entry fired on another entry's line, which is the failure mode a set of
+    // provider names cannot see: a new pattern that also matches the line above
+    // it looks like coverage and is a second finding on somebody's build.
+    let on_keys: Vec<&str> =
+        out.iter().filter(|f| f.file == "keys.ts").map(|f| provider(&f.evidence)).collect::<Vec<_>>();
+    let mut crossed: Vec<&&str> = on_keys.iter().filter(|p| on_keys.iter().filter(|q| q == p).count() > 1).collect();
+    crossed.dedup();
+    assert_eq!(on_keys.len(), PATTERNS.len(), "an entry fired twice or on another entry's line: {crossed:?}");
     // Every finding carries the security metadata spec 7.1 asks for, at the
     // severity and confidence the plan fixes for this rule.
     assert!(
@@ -90,13 +100,9 @@ fn a_structural_token_beside_a_key_does_not_excuse_the_key() {
     seen.sort();
     assert_eq!(
         seen,
-        vec![
-            (7, "API key assignment"),
-            (7, "Google API key"),
-            (11, "Stripe secret key"),
-            (16, "Google API key"),
-            (20, "Google API key"),
-        ]
+        // One line, one key, one finding: the named provider claims the value
+        // and the generic `apiKey =` entry steps aside on line 7.
+        vec![(7, "Google API key"), (11, "Stripe secret key"), (16, "Google API key"), (20, "Google API key")]
     );
 }
 
@@ -106,7 +112,8 @@ fn a_structural_token_beside_a_key_does_not_excuse_the_key() {
 #[test]
 fn two_private_keys_in_one_file_are_two_findings_with_two_ids() {
     let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
-    let keys: Vec<&Finding> = out.iter().filter(|f| provider(&f.evidence) == "Private key block").collect();
+    let keys: Vec<&Finding> =
+        out.iter().filter(|f| f.file == "decisions.ts" && provider(&f.evidence) == "Private key block").collect();
     assert_eq!(keys.len(), 2, "{keys:?}");
     assert_ne!(keys[0].id, keys[1].id, "two keys, one id");
     // The evidence masks the material, not the header every key block shares.

@@ -34,8 +34,10 @@
 //!   postgres:postgres@localhost:54322` is in every Supabase repository on
 //!   earth. A URI whose host is local, or whose password equals its username,
 //!   or whose password is one of the dozen dev defaults, is not reported.
-//! - **The three generic entries stand behind an entropy gate.** See
-//!   [`entropy::looks_random`].
+//! - **The generic entries stand behind an entropy gate**, see
+//!   [`entropy::looks_random`], **and behind the named ones**: a generic entry
+//!   does not report a value a provider entry already claimed on that line, so
+//!   one committed key is one finding rather than two.
 //!
 //! **What it never prints.** Evidence is the provider and a mask: the first
 //! four characters, an ellipsis, and the length. The finding's anchor carries
@@ -292,6 +294,14 @@ fn scan(rule: &SecretExposed, file: &ParsedFile) -> Vec<Finding> {
         if line.len() > MAX_LINE || !compiled.set.is_match(line) {
             continue;
         }
+        // What a named provider has already claimed on this line. A generic
+        // entry that would report the same characters steps aside: `apiKey =
+        // "AIza..."` is one committed key and one decision, and reporting it as
+        // both a Google API key and an API key assignment puts two locked High
+        // findings on somebody's build for it. The named entries all sit ahead
+        // of the generic ones in the table and `matches` yields them in table
+        // order, so the claim is always made before it is checked.
+        let mut claimed: Vec<&str> = Vec::new();
         for idx in compiled.set.matches(line) {
             let pattern = &patterns::PATTERNS[idx];
             for caps in compiled.regexes[idx].captures_iter(line) {
@@ -308,8 +318,15 @@ fn scan(rule: &SecretExposed, file: &ParsedFile) -> Vec<Finding> {
                 if value.is_empty() || !reported(pattern.provider, value, line, start) {
                     continue;
                 }
+                let generic = patterns::GENERIC.contains(&pattern.provider);
+                if generic && claimed.iter().any(|c| c.contains(value) || value.contains(c)) {
+                    continue;
+                }
                 if !seen.insert((lineno, pattern.provider)) {
                     continue;
+                }
+                if !generic {
+                    claimed.push(value);
                 }
                 let anchor = format!("{}\x1f{}", pattern.provider, &blake3::hash(value.as_bytes()).to_hex()[..8]);
                 let evidence = format!("{} credential: {}", pattern.provider, mask(value));

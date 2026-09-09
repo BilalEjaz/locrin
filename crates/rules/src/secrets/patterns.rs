@@ -14,8 +14,9 @@
 //! - **A shape no ordinary string can take, or a name.** A pattern with neither
 //!   (thirty-two hex digits, a forty character base62 string) is not a pattern,
 //!   it is a guess, and a guess in a locked rule is a build somebody cannot
-//!   unblock. The three generic entries at the end are the exception and they
-//!   pay for it with the entropy gate in [`super::entropy::looks_random`].
+//!   unblock. The [`GENERIC`] entries at the end are the exception and they pay
+//!   for it with the entropy gate in [`super::entropy::looks_random`], and with
+//!   stepping aside for any named entry that claimed the same value first.
 //! - **Public identifiers are not credentials.** A Stripe publishable key, a
 //!   Twilio account SID on its own, a Supabase anon JWT, a Sentry DSN without
 //!   its secret half and a Mapbox `pk.` token are all meant to ship inside a
@@ -114,8 +115,11 @@ pub const BEARER: &str = "bearer token literal";
 /// value [`super`] reports for it is the key material that follows, not the
 /// header, which is the same string in every repository on earth.
 pub const PRIVATE_KEY: &str = "Private key block";
-/// The labels whose gate is [`super::entropy::looks_random`].
-pub const GENERIC: [&str; 3] = ["password assignment", "API key assignment", "secret assignment"];
+/// The labels whose gate is [`super::entropy::looks_random`]. The bearer entry
+/// is one of them because an `Authorization` header carries a repository's own
+/// test doubles (`Bearer mockAccessTokenForTheSuite`) as readily as it carries
+/// a real token, and the header shape says nothing about which it is.
+pub const GENERIC: [&str; 4] = ["password assignment", "API key assignment", "secret assignment", BEARER];
 
 /// The two entries that are allowed to name a value without [`DELIMITER`]
 /// before it, because neither is an assignment: a key inside a connection
@@ -248,7 +252,11 @@ pub const PATTERNS: &[Pattern] = &[
         provider: "Twilio auth token",
         regex: assigned!(r#"twilio[^"'\n]{0,25}(?:auth[_-]?token|secret)"#, r#"[0-9a-f]{32}"#),
     },
-    Pattern { provider: "Twilio API key secret", regex: r"\bSK[0-9a-f]{32}\b" },
+    // `SK` and thirty two hex digits is the API key SID: the identifier half of
+    // a Twilio API key, not the secret. It is still worth a finding, because a
+    // repository that has committed the SID has almost always committed the
+    // secret beside it, but the label has to say which half it found.
+    Pattern { provider: "Twilio API key SID", regex: r"\bSK[0-9a-f]{32}\b" },
     // Package registries.
     Pattern { provider: "npm access token", regex: r"\bnpm_[A-Za-z0-9]{36}\b" },
     Pattern { provider: "PyPI API token", regex: r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}\b" },
@@ -519,6 +527,20 @@ mod tests {
         for p in PATTERNS {
             assert!(seen.insert(p.provider), "duplicate provider {}", p.provider);
         }
+    }
+
+    /// The generic entries sit last.
+    ///
+    /// [`super::scan`] reads a line's matches in table order and lets a generic
+    /// entry step aside for a named one that has already claimed the value, so
+    /// one committed key is one finding rather than two. A generic entry moved
+    /// up the table would win that race and report `apiKey = "AIza..."` as an
+    /// API key assignment instead of a Google API key.
+    #[test]
+    fn the_generic_entries_are_last_in_the_table() {
+        let first = PATTERNS.iter().position(|p| GENERIC.contains(&p.provider)).expect("the generics are in the table");
+        let after: Vec<&str> = PATTERNS[first..].iter().map(|p| p.provider).filter(|p| !GENERIC.contains(p)).collect();
+        assert!(after.is_empty(), "a named entry sits after a generic one: {after:?}");
     }
 
     /// Every entry that names a value carries [`DELIMITER`] in front of it.
