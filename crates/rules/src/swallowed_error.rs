@@ -5,11 +5,17 @@
 //! Everything here is one file's syntax tree. That is deliberate, and it is
 //! where the blind spots are:
 //!
-//! - **A comment is not handling.** A catch body holding only `// ignore` is
-//!   reported as empty. The comment says a human decided to swallow the error;
-//!   it does not make the failure visible to anything at runtime. A repository
-//!   that means it puts `locrin:allow` on the catch line, which is a decision
-//!   written down where the next reader will see it.
+//! - **A commented catch is a decision, not a swallow.** Form 1 fires only on a
+//!   catch body with nothing in it at all, not even a comment. A body holding
+//!   `// ignore: the retry covers it` is left alone: the comment is a maintainer
+//!   saying what happens instead of handling, which is the answer this rule
+//!   exists to ask for, and reporting it asks the same question a second time.
+//!   Measured on the five corpus repositories, 89 of 100 findings were exactly
+//!   that shape and not one bare empty catch existed anywhere
+//!   (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+//!   The cost is that a catch commented with something that is not a reason
+//!   (`// TODO`, a commented-out line) is invisible to this rule; `leftover-marker`
+//!   and `leftover-commented` are the rules that see those.
 //! - **Form 2 reads calls, not types.** "Callers use the result" means the file
 //!   calls the enclosing function somewhere outside its own body in a position
 //!   whose parent is not an expression statement. How a caller spells that call
@@ -59,12 +65,13 @@ fn walk<'a>(node: Node<'a>, f: &mut impl FnMut(Node<'a>)) {
     }
 }
 
-/// The statements of a catch body, comments dropped. See the module doc on why
-/// dropping them is the point rather than a shortcut.
-fn catch_statements<'a>(clause: Node<'a>) -> Vec<Node<'a>> {
+/// Everything in a catch body, comments included, which is what form 1 asks
+/// about: a body with no children at all is the empty catch, and a comment is a
+/// child. See the module doc.
+fn catch_body_nodes<'a>(clause: Node<'a>) -> Vec<Node<'a>> {
     let Some(body) = clause.child_by_field_name("body") else { return vec![] };
     let mut cursor = body.walk();
-    body.named_children(&mut cursor).filter(|c| c.kind() != "comment").collect()
+    body.named_children(&mut cursor).collect()
 }
 
 /// Whether a statement is nothing but a `console.<anything>(...)` call.
@@ -208,11 +215,17 @@ fn scan(rule: &SwallowedError, file: &ParsedFile) -> Vec<Finding> {
     let mut out: Vec<Finding> = Vec::new();
     walk(root, &mut |n: Node| {
         if n.kind() == "catch_clause" {
-            let stmts = catch_statements(n);
+            let body = catch_body_nodes(n);
+            // Form 2 is about what the catch does, and a comment beside a
+            // `console.error` does not change that, so it judges the statements
+            // with the comments dropped. A body that is nothing but comments has
+            // no statements, and `all` over nothing is true, so it is excluded
+            // here rather than falling through as a log-only catch.
+            let stmts: Vec<Node> = body.iter().copied().filter(|c| c.kind() != "comment").collect();
             let at = line(n);
-            if stmts.is_empty() {
+            if body.is_empty() {
                 out.push(finding(rule, file, at, line_text(file, at), EMPTY_FIX));
-            } else if stmts.iter().all(|s| console_only(*s, src)) {
+            } else if !stmts.is_empty() && stmts.iter().all(|s| console_only(*s, src)) {
                 if let Some((owner, name)) = enclosing_function(n, src) {
                     if result_used_elsewhere(root, src, owner, &name) {
                         let evidence = format!("catch in {name} only logs; callers use its result");

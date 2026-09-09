@@ -45,8 +45,12 @@ fn rethrows_returned_failures_unused_results_and_handled_promises_are_clean() {
     assert!(out.is_empty(), "{out:?}");
 }
 
+/// The comment-only catch is the case this rule gets wrong most often on real
+/// code: a maintainer who writes down why the failure is not worth handling has
+/// made the decision the rule exists to ask for. Only a catch with nothing in it
+/// at all, not even a comment, is a swallow.
 #[test]
-fn comment_only_catch_and_async_arrow_call_with_the_allow_marker_honoured() {
+fn a_commented_catch_is_exempt_and_the_allow_marker_is_honoured() {
     let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "edge"), &rule_on("swallowed-error"));
-    assert_eq!(hits(&out), vec![("c.ts".into(), 12), ("c.ts".into(), 32), ("c.ts".into(), 39)], "{out:?}");
+    assert_eq!(hits(&out), vec![("c.ts".into(), 32), ("c.ts".into(), 39)], "{out:?}");
 }

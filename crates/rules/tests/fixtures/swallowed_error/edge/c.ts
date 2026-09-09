@@ -5,7 +5,7 @@ export function allowed(text: string): void {
   } catch (err) {} // locrin:allow
 }
 
-/** Pins: a comment is not handling, so a comment-only catch is still empty. */
+/** Pins: a comment-only catch is a deliberate ignore, not a swallow. */
 export function commented(text: string): void {
   try {
     JSON.parse(text);
@@ -38,4 +38,19 @@ export class Poller {
   start(): void {
     this.tick();
   }
+}
+
+/** Pins: a comment-only catch in a function whose callers use its result is not
+ * a log-only catch either; there is nothing in the body at all. */
+export function widthOf(text: string): number {
+  try {
+    return JSON.parse(text).width;
+  } catch (err) {
+    // best effort: an unparsable payload has no width
+  }
+  return 0;
+}
+
+export function boxWidth(): number {
+  return widthOf("{}") + 1;
 }
