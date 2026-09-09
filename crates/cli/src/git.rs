@@ -100,6 +100,10 @@ pub fn base_rev(root: &Path, scope: &DiffScope) -> anyhow::Result<String> {
 /// exist yet and must not be reported as one. A blob that is not valid UTF-8 is
 /// also None: it is not a file this engine can parse, so there is nothing to
 /// compare against.
+///
+/// `root` must be the canonical repository root, as `changed_files` requires:
+/// `top_level` returns a canonical path, and `rel_path` re-roots `root.join(rel)`
+/// against it, so a root that is not canonical yields a path git does not know.
 pub fn show_at(root: &Path, rev: &str, rel: &str) -> anyhow::Result<Option<String>> {
     if rev.starts_with('-') {
         anyhow::bail!("revision may not start with '-': {rev}");
