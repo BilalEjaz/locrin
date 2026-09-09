@@ -67,8 +67,9 @@ pub fn value_of<'t>(caps: &regex::Captures<'t>) -> &'t str {
 }
 
 /// The delimiter a context entry requires between a credential's name and the
-/// credential: an assignment or a colon, then an opening quote, and a closing
-/// quote on the far side of the value.
+/// credential: the quote that closes the name if it has one, an assignment or a
+/// colon, then an opening quote, and a closing quote on the far side of the
+/// value.
 ///
 /// This is the single most important string in the table, which is why it is
 /// written once here and reached only through [`assigned!`]. The looser
@@ -82,7 +83,16 @@ pub fn value_of<'t>(caps: &regex::Captures<'t>) -> &'t str {
 /// The closing quote matters as much as the opening one: without it a value
 /// class runs to the end of the line and the mask reports a length nobody can
 /// match against the key they are looking for.
-pub const DELIMITER: &str = r#"\s*[:=]\s*["'`]"#;
+///
+/// The optional quote in front of the separator is the JSON style name. Without
+/// it the separator had to sit against the last character of the name, and
+/// `"Authorization": "Bearer ..."`, `"aws_secret_access_key": "..."` and every
+/// other quoted key stopped matching: a headers object, a service account file
+/// pasted into a module, a config map. It cannot reopen the identifier hole,
+/// because it sits in front of the separator and the opening quote after the
+/// separator is still required, so `"expoToken": getExpoTokenFromSecureStore()`
+/// is a quoted name beside an identifier and not a finding.
+pub const DELIMITER: &str = r#"["']?\s*[:=]\s*["'`]"#;
 
 /// A context entry: the provider's own name, [`DELIMITER`], the value, and the
 /// closing quote. Every entry that needs context is built here, so a new
@@ -98,7 +108,7 @@ macro_rules! assigned {
         assigned!($context, "", $value)
     };
     ($context:literal, $in_quote:literal, $value:literal) => {
-        concat!("(?i)", $context, r#"\s*[:=]\s*["'`]"#, $in_quote, r#"(?P<v>"#, $value, r#")["'`]"#)
+        concat!("(?i)", $context, r#"["']?\s*[:=]\s*["'`]"#, $in_quote, r#"(?P<v>"#, $value, r#")["'`]"#)
     };
 }
 
@@ -320,6 +330,10 @@ pub const PATTERNS: &[Pattern] = &[
         regex: assigned!(r#"upstash[^"'\n]{0,30}token"#, r#"[A-Za-z0-9=_-]{40,}"#),
     },
     Pattern { provider: "Supabase personal access token", regex: r"\bsbp_[0-9a-f]{40}\b" },
+    // Supabase's newer key format. `sb_publishable_` is the half a browser is
+    // meant to hold and is not in this table; `sb_secret_` is the half that
+    // reaches the API with row level security out of the way.
+    Pattern { provider: "Supabase secret key", regex: r"\bsb_secret_[A-Za-z0-9_-]{20,}\b" },
     // The two JWT entries. Same shape, different gate: the first is flagged when
     // the payload names a privileged role, the second when the line assigns it to
     // a credential name. An anon or authenticated payload is neither.

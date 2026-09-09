@@ -16,3 +16,21 @@ export const signingPem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsynt
 export const deployPem = `-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEsynthetic0second0key0for0locrin0Zk4N
 -----END PRIVATE KEY-----`;
+
+// A quoted key is still a name. The delimiter that closed the identifier hole
+// asked for the separator immediately after the credential name, which dropped
+// every JSON style key: a header object, an AWS profile written as JSON, a
+// config map. The closing quote in front of the separator is optional, and the
+// opening quote after it is not, so the identifier hole stays shut.
+export const headers = { "Authorization": "Bearer Bd3Yh8Lc1Ws5Ej7Rn2Qz6Tp0" };
+export const awsProfile = { "aws_secret_access_key": "zQ8mNv3XpLd6RtY1sCe4fHj7GkBw2ZaU5nMq9Tr0" };
+
+// A legacy encrypted PEM. OpenSSL writes two headers between the BEGIN line and
+// the base64 body, so the material check that reads the next source line found
+// `Proc-Type:` there and called the whole block not a key.
+export const legacyPem = `-----BEGIN RSA PRIVATE KEY-----
+Proc-Type: 4,ENCRYPTED
+DEK-Info: DES-EDE3-CBC,8F3A2B1C4D5E6F70
+
+MIIEowIBAAKCAQEAsynthetic0third0key0for0locrin0only0Wm5Jt8Pq3Zr6
+-----END RSA PRIVATE KEY-----`;

@@ -213,8 +213,17 @@ fn decodes_to_a_pair(value: &str) -> bool {
 const SAME_LINE_MATERIAL: usize = 16;
 const NEXT_LINE_MATERIAL: usize = 40;
 
+/// The two headers OpenSSL writes between the `BEGIN` line of a legacy
+/// encrypted PEM and its base64 body. The body is three lines down rather than
+/// one, so a check that only reads the next source line finds one of these and
+/// would otherwise call an encrypted private key not a key at all. Either line
+/// is material: neither appears anywhere but in a PEM, and the `DEK-Info`
+/// initialisation vector is what tells two encrypted keys apart.
+const ENCRYPTED_PEM_HEADERS: [&str; 2] = ["Proc-Type:", "DEK-Info:"];
+
 /// The key material a private key header is followed by: the base64 run after a
-/// `\n` escape on the same line, or the run that opens the next source line.
+/// `\n` escape on the same line, the run that opens the next source line, or
+/// one of the two headers a legacy encrypted PEM writes in front of its body.
 ///
 /// The header on its own is not a key. It is the string a program compares
 /// against (`key.startsWith("-----BEGIN RSA PRIVATE KEY-----")`) or strips out
@@ -227,7 +236,12 @@ fn key_material<'a>(rest_of_line: &'a str, next_line: Option<&'a str>) -> Option
     if same.len() >= SAME_LINE_MATERIAL {
         return Some(same);
     }
-    let next = base64_run(next_line?);
+    let next_line = next_line?;
+    let header = next_line.trim_matches(|c: char| c.is_whitespace() || "\"'`,+".contains(c));
+    if ENCRYPTED_PEM_HEADERS.iter().any(|h| header.starts_with(h)) {
+        return Some(header);
+    }
+    let next = base64_run(next_line);
     (next.len() >= NEXT_LINE_MATERIAL).then_some(next)
 }
 
@@ -385,6 +399,9 @@ mod tests {
     #[test]
     fn key_material_is_what_follows_the_header_and_a_bare_header_is_not_a_key() {
         let body = "MIIEowIBAAKCAQEAsynthetic0fixture0material0for0locrin0only0A1b2";
+        // The separator is the two character `\n` escape a PEM is written with
+        // inside a source literal, not a real newline: a real one would only
+        // ever reach this function as the next source line.
         assert_eq!(key_material(&format!("\n{body}\n-----END"), None), Some(body), "after a written newline");
         assert_eq!(key_material("\";", Some(&format!("  \"{body}\","))), Some(body), "on the next source line");
         assert_eq!(key_material("\", \"\")", Some("export const looksLikeAKey = false;")), None, "stripped out");
@@ -395,5 +412,18 @@ mod tests {
         assert_eq!(key_material("\nMIIEowIBAAKCAQEA", None).map(str::len), Some(16));
         assert_eq!(key_material("\nMIIEowIBAAKCAQE", None), None, "fifteen characters is not a body");
         assert_eq!(key_material("\";", Some("someLongIdentifierName.method();")), None, "an identifier, not a body");
+        // A legacy encrypted PEM puts two headers of its own between the BEGIN
+        // line and the base64 body, so the next source line is one of them.
+        assert_eq!(
+            key_material("", Some("Proc-Type: 4,ENCRYPTED")),
+            Some("Proc-Type: 4,ENCRYPTED"),
+            "an encrypted PEM"
+        );
+        assert_eq!(
+            key_material("", Some("  \"DEK-Info: DES-EDE3-CBC,8F3A2B1C4D5E6F70\"")),
+            Some("DEK-Info: DES-EDE3-CBC,8F3A2B1C4D5E6F70"),
+            "the DEK-Info line, unquoted"
+        );
+        assert_eq!(key_material("", Some("// Proc-Type is what openssl writes")), None, "prose about the header");
     }
 }

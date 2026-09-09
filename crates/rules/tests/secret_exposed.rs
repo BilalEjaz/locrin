@@ -106,18 +106,58 @@ fn a_structural_token_beside_a_key_does_not_excuse_the_key() {
     );
 }
 
-/// Two private keys in one file are two decisions. Anchored on the header they
-/// were one, because the header is the same string in every repository; the
-/// anchor is the hash of the key material, so they are two.
+/// A JSON style key is still a credential name.
+///
+/// The delimiter that closed the identifier hole asked for the separator
+/// immediately after the name, so every quoted key stopped matching: an
+/// `Authorization` header inside a headers object, an AWS profile written as
+/// JSON, a config map. The closing quote in front of the separator is optional
+/// and the opening quote after it is not, so
+/// `"expoToken": getExpoTokenFromSecureStore()` in the clean fixture is still
+/// a name beside an identifier and still clean.
 #[test]
-fn two_private_keys_in_one_file_are_two_findings_with_two_ids() {
+fn a_quoted_credential_name_is_still_a_credential_name() {
+    let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
+    let mut seen: Vec<(u32, &str)> = out
+        .iter()
+        .filter(|f| f.file == "decisions.ts")
+        .filter(|f| matches!(provider(&f.evidence), "bearer token literal" | "AWS secret access key"))
+        .map(|f| (f.span.start_line, f.evidence.as_str()))
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (25, "bearer token literal credential: Bd3Y...(24 chars)"),
+            (26, "AWS secret access key credential: zQ8m...(40 chars)"),
+        ]
+    );
+}
+
+/// Private keys in one file are one decision each. Anchored on the header they
+/// were one decision for all of them, because the header is the same string in
+/// every repository; the anchor is the hash of the key material, so they are
+/// three. The third is a legacy encrypted PEM, whose base64 body sits four
+/// lines below the header behind the two headers OpenSSL writes for it, and
+/// whose material is therefore the `Proc-Type:` line rather than base64.
+#[test]
+fn private_keys_in_one_file_are_separate_findings_with_separate_ids() {
     let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
     let keys: Vec<&Finding> =
         out.iter().filter(|f| f.file == "decisions.ts" && provider(&f.evidence) == "Private key block").collect();
-    assert_eq!(keys.len(), 2, "{keys:?}");
-    assert_ne!(keys[0].id, keys[1].id, "two keys, one id");
     // The evidence masks the material, not the header every key block shares.
-    assert!(keys.iter().all(|f| f.evidence.contains("MIIE")), "{keys:?}");
+    let seen: Vec<(u32, &str)> = keys.iter().map(|f| (f.span.start_line, f.evidence.as_str())).collect();
+    assert_eq!(
+        seen,
+        vec![
+            (12, "Private key block credential: MIIE...(63 chars)"),
+            (16, "Private key block credential: MIIE...(63 chars)"),
+            (31, "Private key block credential: Proc...(22 chars)"),
+        ],
+        "{keys:?}"
+    );
+    let ids: BTreeSet<&str> = keys.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids.len(), keys.len(), "three keys, {} ids", ids.len());
 }
 
 /// The privileged role list is positive. `admin` and `superuser` are
@@ -126,8 +166,24 @@ fn two_private_keys_in_one_file_are_two_findings_with_two_ids() {
 #[test]
 fn a_privileged_role_is_a_credential_and_any_other_role_needs_a_credential_name() {
     let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
-    let jwts = out.iter().filter(|f| provider(&f.evidence) == "JSON Web Token").count();
-    assert_eq!(jwts, 3, "admin, superuser, and the viewer token on a credential name");
+    let mut jwts: Vec<(&str, u32, &str)> = out
+        .iter()
+        .filter(|f| provider(&f.evidence) == "JSON Web Token")
+        .map(|f| (f.file.as_str(), f.span.start_line, f.evidence.as_str()))
+        .collect();
+    jwts.sort();
+    assert_eq!(
+        jwts,
+        vec![
+            // The role is privileged on its own.
+            ("decisions.ts", 5, "JSON Web Token credential: eyJh...(176 chars)"),
+            // The role is not, and the name on the line says token.
+            ("decisions.ts", 8, "JSON Web Token credential: eyJh...(172 chars)"),
+            // The role is privileged on its own.
+            ("keys.ts", 93, "JSON Web Token credential: eyJh...(207 chars)"),
+        ],
+        "admin, superuser, and the viewer token on a credential name"
+    );
 }
 
 #[test]

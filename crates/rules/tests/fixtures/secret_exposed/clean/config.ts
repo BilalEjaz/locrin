@@ -119,6 +119,9 @@ export const planetscaleToken = "pscale_tkn_your_token";
 export const neonApiKey = "your_neon_api_key";
 export const upstashRedisRestToken = "your_upstash_rest_token";
 export const supabaseAccessToken = "sbp_your_personal_access_token";
+// Supabase's newer publishable key, the half a browser is meant to hold. The
+// secret half is spelled `sb_secret_`, and that is the one the table matches.
+export const supabasePublishableKey = "sb_publishable_A1b2C3d4E5f6G7h8I9j0K1l2";
 
 // Product and observability.
 export const airtableToken = "pat-your-airtable-token";
@@ -240,6 +243,10 @@ export const mockClientSecret = "mockSecretZk4Np7Qm2Rt9Vx6";
 // turns every one of these into a locked High finding on a build nobody can
 // unblock.
 export const expoToken = getExpoTokenFromSecureStore();
+// The same thing behind a quoted key. The closing quote in front of the
+// separator is optional; the opening quote after it is not, so a JSON style
+// name holding an identifier is still not a credential.
+export const secretsFromStore = { "expoToken": getExpoTokenFromSecureStore() };
 export const azureClientSecret = config.azure.credentials.clientSecret;
 export const pagerdutyApiKey = pagerDutyIntegrationKey;
 export const bitbucketAppPassword = credentials.bitbucketAppPassword;
