@@ -153,9 +153,15 @@ impl Config {
         self.rules.get(id).and_then(|r| r.enabled).unwrap_or(default)
     }
 
-    /// The configured severity for a rule, or the rule's own default.
-    pub fn severity_for(&self, id: &str, default: Severity) -> Severity {
-        self.rules.get(id).and_then(|r| r.severity).unwrap_or(default)
+    /// The severity this config sets for a rule, when it sets one.
+    ///
+    /// `None` means the config said nothing and the finding keeps the severity
+    /// it arrived with, which for almost every rule is its `default_severity`.
+    /// One rule (`vulnerable-dependency`) reads the severity of each finding off
+    /// the advisory it is reporting, and an absent override has to leave that
+    /// alone rather than flatten every advisory to one level.
+    pub fn severity_override(&self, id: &str) -> Option<Severity> {
+        self.rules.get(id).and_then(|r| r.severity)
     }
 }
 
@@ -195,7 +201,7 @@ mod tests {
         assert!(c.excludes.is_empty());
         assert!(c.debug_allowed.iter().any(|g| g.contains("scripts")));
         assert!(c.rule_enabled("leftover-debug"));
-        assert_eq!(c.severity_for("leftover-debug", Severity::High), Severity::High);
+        assert_eq!(c.severity_override("leftover-debug"), None);
     }
 
     #[test]
@@ -208,7 +214,7 @@ mod tests {
         .unwrap();
         let c = Config::load(path(&dir)).unwrap();
         assert_eq!(c.excludes, vec!["src/gen/**"]);
-        assert_eq!(c.severity_for("leftover-debug", Severity::High), Severity::Low);
+        assert_eq!(c.severity_override("leftover-debug"), Some(Severity::Low));
         assert!(!c.rule_enabled("leftover-agent-marker"));
         assert!(c.rule_enabled("leftover-commented-code"));
         assert!(!c.rule_enabled_or("leftover-agent-marker", true), "an explicit enabled beats the rule's default");

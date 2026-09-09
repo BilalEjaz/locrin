@@ -81,9 +81,28 @@ pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding>
 /// previous version of the fixture said. Fixture runs are always offline; no
 /// test may depend on a network call.
 pub fn run_on_with(rule: Box<dyn Rule>, root: &Path, config: &Config, previous: &Previous) -> Vec<Finding> {
+    run_on_seeded(rule, root, config, previous, |_ix, _root| {})
+}
+
+/// The same again, with a chance to write into the index between indexing the
+/// fixture and running the rule.
+///
+/// `vulnerable-dependency` reads a snapshot that an earlier online run wrote,
+/// and the rules crate may not make a network call to produce one. The seam
+/// takes that run's place: the test seeds the snapshot through `osv::check`
+/// with a canned fetch, and the rule then runs offline and answers from it,
+/// exactly as it does on a second run of a real repository.
+pub fn run_on_seeded(
+    rule: Box<dyn Rule>,
+    root: &Path,
+    config: &Config,
+    previous: &Previous,
+    seed: impl FnOnce(&Index, &Path),
+) -> Vec<Finding> {
     let root = canonical_root(root);
     let files = parse_dir(&root);
     let (ix, entries) = index_dir(&root, &files, config);
+    seed(&ix, &root);
     let ctx = RuleContext {
         files: &files,
         config,

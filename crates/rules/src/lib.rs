@@ -12,6 +12,7 @@ pub mod test_newly_skipped;
 pub mod test_no_assert;
 pub mod unreachable;
 pub mod unused_import;
+pub mod vulnerable_dependency;
 pub mod weak_crypto;
 
 use std::collections::HashMap;
@@ -199,16 +200,20 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
         if !rule_runs(rule.as_ref(), ctx.config) {
             continue;
         }
-        let severity = if rule.locked() {
-            rule.default_severity()
-        } else {
-            ctx.config.severity_for(rule.id(), rule.default_severity())
-        };
+        // A finding arrives carrying a severity: `finding_at` gives it the rule's
+        // own default, and one rule (`vulnerable-dependency`) then replaces it
+        // with the severity of the advisory that finding reports. So the runner
+        // overwrites only when it has something to say. A locked rule's severity
+        // is its own by definition, and the config may not lower it.
+        let severity =
+            if rule.locked() { Some(rule.default_severity()) } else { ctx.config.severity_override(rule.id()) };
         for mut f in rule.run(ctx)? {
             if dropped(&f)? {
                 continue;
             }
-            f.severity = severity;
+            if let Some(severity) = severity {
+                f.severity = severity;
+            }
             out.push(f);
         }
     }
@@ -277,6 +282,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(weak_crypto::WeakCrypto),
         Box::new(injection_sink::InjectionSink),
         Box::new(html_injection::HtmlInjection),
+        Box::new(vulnerable_dependency::VulnerableDependency),
     ]
 }
 
@@ -619,14 +625,15 @@ mod tests {
                 "secret-exposed",
                 "weak-crypto",
                 "injection-sink",
-                "html-injection"
+                "html-injection",
+                "vulnerable-dependency"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 12, "twelve file rules and three graph rules");
+        assert_eq!(file_rules().len(), 12, "twelve file rules and four graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
-            vec!["dead-export", "dead-file", "boundary-violation"]
+            vec!["dead-export", "dead-file", "boundary-violation", "vulnerable-dependency"]
         );
     }
 
