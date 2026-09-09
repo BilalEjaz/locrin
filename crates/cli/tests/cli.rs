@@ -956,8 +956,13 @@ const ACTIVE_TEST: &str =
     "describe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
 const SKIPPED_TEST: &str =
     "describe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
-const SKIPPED_TEST_EDITED: &str =
-    "// still skipped, and now edited again\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+/// Still skipped, edited again, and now carrying a `console.log`. The debug call
+/// is the positive control for every leg that asserts no newly-skipped finding:
+/// "no finding" is also what an empty scope produces, so a leg that only asserts
+/// the absence would pass if the file had silently dropped out of the run. The
+/// `leftover-debug` finding proves the file was in scope and the rule stayed
+/// quiet on purpose.
+const SKIPPED_TEST_EDITED: &str = "// still skipped, and now edited again\nconsole.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
 
 /// Every `test-newly-skipped` finding in a `--json` payload, as (file, evidence).
 fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
@@ -968,6 +973,12 @@ fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
         .filter(|f| f["rule"] == "test-newly-skipped")
         .map(|f| (f["file"].as_str().unwrap().to_string(), f["evidence"].as_str().unwrap().to_string()))
         .collect()
+}
+
+/// Whether the payload reports the planted `console.log` in `rel`. See
+/// [`SKIPPED_TEST_EDITED`].
+fn debug_reported(v: &serde_json::Value, rel: &str) -> bool {
+    v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "leftover-debug" && f["file"] == rel)
 }
 
 /// The index is the source of "previous" for an ordinary run: what it remembered
@@ -998,6 +1009,7 @@ fn changed_reports_a_test_this_edit_skipped_and_not_one_the_index_already_knew()
     std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
     let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
     assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
 }
 
@@ -1055,12 +1067,16 @@ fn base_reports_a_test_skipped_since_the_base_commit_and_not_one_the_base_alread
     git(dir.path(), &["commit", "-qm", "skip it"]);
     let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(newly_skipped(&v).is_empty(), "{v}");
+    // Nothing at all, not merely no skip: this leg is the one where the scope is
+    // genuinely empty, and asserting the whole payload says so is what keeps it
+    // from being confused with a leg that suppressed a finding.
+    assert!(v["findings"].as_array().unwrap().is_empty(), "an empty diff reports nothing: {v}");
 
     // And with the file back in the diff for an unrelated edit, the skip is
     // still not reported: it is in the base commit, so it is not this change's.
     std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
     let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
     assert!(newly_skipped(&v).is_empty(), "the base commit already skipped it: {v}");
 }
