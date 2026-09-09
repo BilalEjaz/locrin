@@ -191,6 +191,13 @@ export const perplexityApiKey = "pplx-your-perplexity-key";
 export const cohereApiKey = "your_cohere_api_key";
 export const mistralApiKey = "your_mistral_api_key";
 
+// A structural token inside the value: an interpolation where the password
+// goes, an angle bracket placeholder in a documented URI, an environment
+// reference built into a template. None of these is a credential.
+export const templateUri = `postgresql://appuser:${dbPassword}@db.prod.internal:5432/app`;
+export const documentedUri = "mongodb+srv://appuser:<password>@cluster0.abcde.mongodb.net/app";
+export const envUri = `postgresql://${process.env.PGUSER}:${process.env.PGPASSWORD}@db.prod.internal:5432/app`;
+
 // Key material and headers built at runtime rather than written down.
 export const publicKeyBlock = "-----BEGIN PUBLIC KEY-----";
 export const basicAuthHeader = `Basic ${btoa(user + ":" + secret)}`;
@@ -231,6 +238,7 @@ declare const config: Record<string, Record<string, Record<string, string>>>;
 declare const credentials: Record<string, string>;
 declare const purchasesConfiguration: Record<string, string>;
 declare const pagerDutyIntegrationKey: string;
+declare const dbPassword: string;
 declare function getExpoTokenFromSecureStore(): string;
 type ExpoAccessTokenConfiguration = string;
 type PagerDutyIntegrationKeyReference = string;

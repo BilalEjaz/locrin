@@ -77,6 +77,29 @@ fn the_finding_is_anchored_on_the_provider_and_a_hash_of_the_value_not_the_value
     assert_eq!(out[0].id, make_id("secret-exposed", "mixed.ts", &anchor));
 }
 
+/// The three structural placeholder tokens (`<...>`, `${`, `process.env`) say
+/// something about the value, not about the line. Read line-wide they hid a key
+/// in a tag's props, a key inside a `useState<string>(...)`, a key in a template
+/// literal that interpolates something else, and the fallback beside an
+/// environment reference, which is the value that actually ships.
+#[test]
+fn a_structural_token_beside_a_key_does_not_excuse_the_key() {
+    let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
+    let mut seen: Vec<(u32, &str)> =
+        out.iter().filter(|f| f.file == "inline.tsx").map(|f| (f.span.start_line, provider(&f.evidence))).collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            (7, "API key assignment"),
+            (7, "Google API key"),
+            (11, "Stripe secret key"),
+            (16, "Google API key"),
+            (20, "Google API key"),
+        ]
+    );
+}
+
 #[test]
 fn environment_references_placeholders_public_identifiers_and_dev_uris_are_clean() {
     let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "clean"), &Config::default());

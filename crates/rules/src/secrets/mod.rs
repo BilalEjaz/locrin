@@ -23,13 +23,13 @@
 //!   its secret half are all meant to ship to a browser. The table does not
 //!   match them, and the anon JWT, which shares its shape exactly with the
 //!   service role key, is separated by decoding the payload in [`jwt`].
-//! - **Placeholders are not credentials.** Anything with `example`, `sample`,
-//!   `placeholder`, `changeme`, `your_`, a run of `x`, an angle bracket
-//!   placeholder, a `${}` interpolation or a `process.env` reference anywhere
-//!   on the line is a template, and a value of one repeated character is a
-//!   filler. The check runs over the whole line rather than the match, which
-//!   costs the rule a real secret sharing a line with the word `example` and
-//!   is the right way round.
+//! - **Placeholders are not credentials.** A line carrying `example`,
+//!   `sample`, `placeholder`, `changeme`, `your_` or a run of `x` is
+//!   documenting a shape; a *value* carrying an angle bracket placeholder, a
+//!   `${}` interpolation, a `process.env` reference or a provider's own test
+//!   prefix is a template; and a value of one repeated character is filler. The
+//!   two halves are deliberately different scopes: see [`LINE_PLACEHOLDER`] and
+//!   [`VALUE_PLACEHOLDER`].
 //! - **A development connection string is not a credential.** `postgres://
 //!   postgres:postgres@localhost:54322` is in every Supabase repository on
 //!   earth. A URI whose host is local, or whose password equals its username,
@@ -70,9 +70,31 @@ pub struct SecretExposed;
 const FIX: &str =
     "Revoke the credential now, move it to an environment variable or secret store, and purge it from git history";
 
-/// Anything on the line that says the value is a template rather than a
-/// credential.
-const PLACEHOLDER: &str = r"(?i)(example|sample|placeholder|changeme|your[_-]|xxx+|<[^>]+>|\$\{|process\.env)";
+/// Words that make the whole line a template. A repository writes `example`,
+/// `your_token` or a run of `x` beside the shape it is documenting, and the
+/// word lands on the name as often as on the value, so this one is read over
+/// the line. It costs the rule a real key that shares a line with the word
+/// `sample`, and that is the right way round for a rule nobody can turn off.
+const LINE_PLACEHOLDER: &str = r"(?i)(example|sample|placeholder|changeme|your[_-]|xxx+)";
+
+/// Structure that makes the *value* a template: an angle bracket placeholder,
+/// a `${}` interpolation, an environment reference.
+///
+/// These three were read over the whole line too, which is a different claim
+/// and a wrong one: they are syntax that appears everywhere near a value
+/// without saying anything about it. Line-wide they hid a key in a tag's props
+/// (`<GoogleMap apiKey="AIza..." />`), a key behind a generic parameter
+/// (`useState<string>("AKIA...")`), a key in a template literal that
+/// interpolates something else, and the fallback in
+/// `process.env.KEY || "AIza..."`, which is the value that ships when the
+/// variable is unset. Read over the value, each one still excuses what it
+/// should: `mongodb://user:<password>@host` and
+/// `postgres://user:${PGPASSWORD}@host` are shapes, not credentials.
+///
+/// `sk_test_` and its neighbours live here rather than in the word list because
+/// a provider's own test prefix says the value is a sandbox key wherever it
+/// appears, and no line needs to mention it.
+const VALUE_PLACEHOLDER: &str = r"(?i)(<[^>]+>|\$\{|process\.env|sk_test_|pk_test_|_test_)";
 
 /// What the name half of an assignment has to look like for an otherwise
 /// unremarkable JWT to be read as a credential.
@@ -90,9 +112,14 @@ const DEV_PASSWORDS: [&str; 12] =
 
 const LOCAL_HOSTS: [&str; 6] = ["localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal", "db"];
 
-fn placeholder() -> &'static Regex {
+fn line_placeholder() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(PLACEHOLDER).expect("the placeholder pattern compiles"))
+    RE.get_or_init(|| Regex::new(LINE_PLACEHOLDER).expect("the line placeholder pattern compiles"))
+}
+
+fn value_placeholder() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(VALUE_PLACEHOLDER).expect("the value placeholder pattern compiles"))
 }
 
 fn credential_name() -> &'static Regex {
@@ -165,7 +192,7 @@ fn decodes_to_a_pair(value: &str) -> bool {
 /// The gates, in the order they cost least to run. `start` is where the whole
 /// match begins, so the JWT arm can ask what the value was assigned to.
 fn reported(provider: &str, value: &str, line: &str, start: usize) -> bool {
-    if is_filler(value) || placeholder().is_match(line) {
+    if is_filler(value) || line_placeholder().is_match(line) || value_placeholder().is_match(value) {
         return false;
     }
     if value.contains("://") && weak_uri_credential(value) {
