@@ -4,6 +4,7 @@ pub mod dead_file;
 pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
+pub mod secrets;
 pub mod swallowed_error;
 pub mod test_newly_skipped;
 pub mod test_no_assert;
@@ -269,6 +270,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(swallowed_error::SwallowedError),
         Box::new(test_no_assert::TestNoAssert),
         Box::new(test_newly_skipped::TestNewlySkipped),
+        Box::new(secrets::SecretExposed),
     ]
 }
 
@@ -607,11 +609,12 @@ mod tests {
                 "boundary-violation",
                 "swallowed-error",
                 "test-no-assert",
-                "test-newly-skipped"
+                "test-newly-skipped",
+                "secret-exposed"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 8, "eight file rules and three graph rules");
+        assert_eq!(file_rules().len(), 9, "nine file rules and three graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
             vec!["dead-export", "dead-file", "boundary-violation"]

@@ -21,6 +21,8 @@ toml = "0.8"
 dirs = "5"
 rayon = "1"
 clap = { version = "4", features = ["derive"] }
+regex = "1"
+base64 = "0.22"
 
 [profile.release]
 lto = "thin"

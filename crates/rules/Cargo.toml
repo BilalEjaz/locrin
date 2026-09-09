@@ -13,4 +13,8 @@ locrin-core = { path = "../core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 globset.workspace = true
+regex.workspace = true
+base64.workspace = true
+blake3.workspace = true
+serde_json.workspace = true
 rayon.workspace = true
