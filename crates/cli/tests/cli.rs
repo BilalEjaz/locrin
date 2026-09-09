@@ -860,4 +860,14 @@ fn conflicting_check_flags_are_a_usage_error() {
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("cannot be used with"), "{err}");
     assert!(err.contains("--base"), "{err}");
+
+    // Named paths and `--changed` are two answers to which files the run sees,
+    // exactly as named paths and a diff scope are. The paths used to win in
+    // silence, so a hook that named a file and asked for `--changed` got a
+    // narrower run than it read the flag as asking for.
+    let out = locrin(dir.path()).args(["check", "src/dirty.ts", "--changed"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(err.contains("--changed"), "{err}");
 }
