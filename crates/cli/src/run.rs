@@ -66,6 +66,10 @@ struct Indexed {
     /// caused. "Changed" here means changed since the index's watermark, so only
     /// a run whose scope is that watermark may widen itself with this set. See
     /// the condition on `scope_is_watermark` in `pass`.
+    ///
+    /// Empty on every other run: only `--changed` may read it, and building it
+    /// costs an edge query per changed file plus one per departed file. See
+    /// `capture_before`.
     before: HashSet<String>,
     /// The read behind every file in `files`, for the findings cache written
     /// once the rules have run.
@@ -187,11 +191,16 @@ fn neighbours(ix: &Index, set: &HashSet<String>) -> anyhow::Result<HashSet<Strin
 /// live code dead. A candidate that is not valid UTF-8 only warns and is
 /// skipped: a binary blob carrying a source extension is a repository quirk the
 /// engine tolerates, and the rest of the repository is still worth indexing.
+///
+/// `capture_before` is what the caller knows and this function cannot: whether
+/// anything will read `Indexed::before`. Only a `--changed` run may, so only a
+/// `--changed` run pays for the edge queries that build it.
 fn index_files(
     root: &Path,
     candidates: &[PathBuf],
     report_all: bool,
     scope: Option<&HashSet<String>>,
+    capture_before: bool,
     key: &CacheKey,
     resolver: &Resolver,
     ix: &mut Index,
@@ -252,7 +261,9 @@ fn index_files(
         if is_changed {
             // The edges this file has right now belong to the version about to
             // be replaced. See `Indexed::before`.
-            before.extend(edges::from_file(ix, &rel)?.into_iter().filter_map(|e| e.to_rel));
+            if capture_before {
+                before.extend(edges::from_file(ix, &rel)?.into_iter().filter_map(|e| e.to_rel));
+            }
         } else {
             // The file was touched but not edited: the stat disagreed and the
             // hash overruled it. Nothing is recorded for such a file, so the
@@ -337,12 +348,14 @@ fn index_files(
     // file's edges are the only record of that link, and `remove_missing` is
     // about to delete them, so its targets are captured here while they still
     // exist. See `Indexed::before`.
-    let kept: HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
-    for rel in ix.all_files()? {
-        if kept.contains(rel.as_str()) {
-            continue;
+    if capture_before {
+        let kept: HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
+        for rel in ix.all_files()? {
+            if kept.contains(rel.as_str()) {
+                continue;
+            }
+            before.extend(edges::from_file(ix, &rel)?.into_iter().filter_map(|e| e.to_rel));
         }
-        before.extend(edges::from_file(ix, &rel)?.into_iter().filter_map(|e| e.to_rel));
     }
     // The candidate list is the whole repository on every run, so pruning rows
     // for files that went away is always safe.
@@ -449,7 +462,13 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // for its scope and leaves the rest unread. A run filling a throwaway index
     // has no choice but to parse everything: no cache was ever written for it.
     let report_all = !record || (scope.is_none() && !opts.changed_only);
-    let indexed = index_files(root, &candidates, report_all, scope.as_ref(), &key, &resolver, &mut ix)?;
+    // `--changed` takes the changed set as its scope. That scope IS the index's
+    // watermark, which is what licenses both the capture of the pre-record edges
+    // below and the widening at the end of this function. Every other run reads
+    // neither, so it does not pay to build them.
+    let scope_is_watermark = scope.is_none() && opts.changed_only;
+    let indexed =
+        index_files(root, &candidates, report_all, scope.as_ref(), scope_is_watermark, &key, &resolver, &mut ix)?;
 
     let entries = EntryPoints::detect(root, &config.entry_points)?;
     // The file rules go across the pool, a file at a time: five rules over a
@@ -467,9 +486,6 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         write_cache(&mut ix, &indexed, &fresh, &key)?;
     }
 
-    // `--changed` takes the changed set as its scope. That scope IS the index's
-    // watermark, which is what licenses the widening below.
-    let scope_is_watermark = scope.is_none() && opts.changed_only;
     if scope_is_watermark {
         scope = Some(indexed.changed.clone());
     }
