@@ -911,8 +911,17 @@ mod git_src;
 /// A diff scope has to read the version of a file that is in the base commit,
 /// not the one on disk: on a fresh CI clone the index has no memory of any
 /// earlier version, and the base commit is the only "before" a pull request has.
+///
+/// The run happens under `LANG=de_DE.UTF-8` because the "path is not in that
+/// revision" answer is decided by matching git's stderr, and both messages
+/// matched are translated ones: `show_at` pins `LC_ALL=C` on every git process
+/// so a developer or CI runner with a localised environment still gets None
+/// rather than an aborted run. Git ships no message catalogs on this machine, so
+/// what this proves is that the pinning is harmless, not that it is sufficient;
+/// a machine with catalogs installed is what would prove the rest.
 #[test]
 fn show_at_reads_the_committed_text_and_says_nothing_for_a_path_that_was_not_there() {
+    std::env::set_var("LANG", "de_DE.UTF-8");
     let dir = copy_fixture();
     git(dir.path(), &["init", "-q"]);
     // Line endings are the repository's business, not this test's: without this a
@@ -939,4 +948,6 @@ fn show_at_reads_the_committed_text_and_says_nothing_for_a_path_that_was_not_the
     assert!(git_src::show_at(&root, "no-such-ref", "src/committed.ts").is_err());
     // A revision shaped like a git option never reaches git.
     assert!(git_src::show_at(&root, "--output=planted", "src/committed.ts").is_err());
+
+    std::env::remove_var("LANG");
 }

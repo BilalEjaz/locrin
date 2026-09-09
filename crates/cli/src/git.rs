@@ -16,12 +16,22 @@ pub enum DiffScope {
     Since(String),
 }
 
+/// Every git process this module runs, with its output pinned to English.
+///
+/// `show_at` decides whether a path was absent by reading git's stderr, and both
+/// messages it matches are translated ones: under a German or Japanese locale
+/// git prints the translation, the match fails, and a pull request that adds a
+/// file would abort the run instead of reporting the file as new. `LC_ALL=C`
+/// (with `LANGUAGE` removed, since it overrides `LC_ALL` for messages) makes
+/// every call here answer in the language the code reads.
+fn git_command(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.current_dir(dir).env("LC_ALL", "C").env_remove("LANGUAGE");
+    c
+}
+
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .context("running git; is it installed and on PATH?")?;
+    let out = git_command(dir).args(args).output().context("running git; is it installed and on PATH?")?;
     if !out.status.success() {
         anyhow::bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -97,15 +107,16 @@ pub fn show_at(root: &Path, rev: &str, rel: &str) -> anyhow::Result<Option<Strin
     let top = top_level(root)?;
     let from_top = rel_path(&top, &root.join(rel));
     let spec = format!("{rev}:{from_top}");
-    let out = Command::new("git")
+    let out = git_command(&top)
         .args(["show", "--end-of-options", &spec])
-        .current_dir(&top)
         .output()
         .context("running git; is it installed and on PATH?")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         // The two ways git says "that path is not in that revision". Anything
         // else (an unknown revision, a broken repository) is a real failure.
+        // Both messages are translated by git, which is why `git_command` pins
+        // the locale to C.
         if err.contains("does not exist") || err.contains("exists on disk, but not in") {
             return Ok(None);
         }
