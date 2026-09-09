@@ -543,9 +543,11 @@ fn changed_only_reports_graph_findings_on_neighbours() {
 }
 
 /// After a scan, a full check must not re-parse anything: the cache answers for
-/// every unchanged file. Observable through the index: `scan` then `check` leaves
-/// exactly one cache row per (file, file rule), and a `check` after an edit to
-/// one file rewrites only that file's rows.
+/// every unchanged file. Row counts alone would pass on an engine that ignored
+/// the cache and re-derived the same answers, so the proof is a probe: a finding
+/// planted in `clean.ts`'s cached row, which no rule could ever produce, appears
+/// in the verdict, and disappears the moment that row's content hash stops
+/// matching the file.
 #[test]
 fn full_check_serves_unchanged_files_from_the_cache() {
     let dir = copy_fixture();
@@ -555,6 +557,15 @@ fn full_check_serves_unchanged_files_from_the_cache() {
         let c = rusqlite::Connection::open(&db).unwrap();
         c.query_row(sql, [], |r| r.get(0)).unwrap()
     };
+    let execute = |sql: &str| {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(c.execute(sql, []).unwrap(), 1, "the probe must land on exactly one row: {sql}");
+    };
+    let evidence = |args: &[&str]| -> Vec<String> {
+        let out = locrin(dir.path()).args(args).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["findings"].as_array().unwrap().iter().map(|f| f["evidence"].as_str().unwrap().to_string()).collect()
+    };
     let per_file = count("SELECT count(DISTINCT rule) FROM findings_cache WHERE rel = 'src/clean.ts'");
     assert!(per_file >= 5, "scan warms every file rule, got {per_file}");
     let before = count("SELECT count(*) FROM findings_cache");
@@ -563,6 +574,23 @@ fn full_check_serves_unchanged_files_from_the_cache() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8(out.stdout).unwrap().starts_with("BLOCK  2 finding(s)"));
     assert_eq!(count("SELECT count(*) FROM findings_cache"), before, "a warm check adds no rows");
+
+    // `clean.ts` is clean, so nothing but the cache can put this in a verdict.
+    let planted = r#"[{"id":"planted000000001","rule":"leftover-debug","category":"erosion","severity":"high",
+        "confidence":"high","file":"src/clean.ts","span":{"start_line":1,"start_col":0,"end_line":1,"end_col":1},
+        "evidence":"planted","fix":"planted","related":[],"owasp":null,"cwe":null}]"#;
+    execute(&format!(
+        "UPDATE findings_cache SET findings = '{}' WHERE rel = 'src/clean.ts' AND rule = 'leftover-debug'",
+        planted.replace('\n', "").replace("        ", "")
+    ));
+    let found = evidence(&["check", "--json"]);
+    assert!(found.iter().any(|e| e == "planted"), "an unchanged file's findings come from the cache: {found:?}");
+
+    // A row whose hash no longer describes the file on disk is not that file's
+    // answer, so the file is read and the planted finding goes.
+    execute("UPDATE findings_cache SET content_hash = 'x' WHERE rel = 'src/clean.ts' AND rule = 'leftover-debug'");
+    let found = evidence(&["check", "--json"]);
+    assert!(!found.iter().any(|e| e == "planted"), "a stale row must never be served: {found:?}");
 
     std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  debugger;\n  return 1;\n}\n")
         .unwrap();
