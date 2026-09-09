@@ -85,3 +85,33 @@ fn startup_under_50ms() {
     );
     assert!(ms < 50, "startup took {ms} ms");
 }
+
+/// Spec 3.4: a warm diff check on a typical pull request (30 files) under 1 s.
+#[test]
+#[ignore]
+fn warm_thirty_file_check_under_one_second() {
+    let _serial = serial();
+    let cache = tempfile::tempdir().unwrap();
+    locrin(cache.path()).arg("scan").assert().success();
+    let dir = repo().join("app");
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().map(|x| x == "tsx" || x == "ts").unwrap_or(false))
+        .map(|p| format!("app/{}", p.file_name().unwrap().to_string_lossy()))
+        .collect();
+    files.sort();
+    files.truncate(30);
+    assert!(files.len() >= 10, "bench repo has too few files under app/ to stand in for a PR: {}", files.len());
+    let t = Instant::now();
+    let out = locrin(cache.path()).arg("check").args(&files).output().unwrap();
+    let ms = t.elapsed().as_millis();
+    println!("warm {}-file check: {ms} ms", files.len());
+    assert!(
+        out.status.code() != Some(2),
+        "check failed with exit 2, so the {ms} ms is not a real measurement: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ms < 1_000, "warm diff check took {ms} ms");
+}

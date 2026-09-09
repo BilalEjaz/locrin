@@ -496,3 +496,45 @@ The cold run is back inside the target with about 1650 ms of margin at its
 worst, and it now leaves a warm findings cache behind it, which the numbers
 before Task 16 did not. The warm check is unchanged by this task, as expected:
 it parses one file, so there is nothing for the pool to spread.
+
+## Benchmarks after Task 19
+
+Task 19 adds the fourth spec 3.4 benchmark, `warm_thirty_file_check_under_one_second`,
+which stands in for a typical pull request: a warm cache, then one `check` invocation
+over the source files at the top level of `app/` in the FastLift checkout, capped at
+30. Same command as the earlier tables (`cargo test --release -p locrin-cli --
+--ignored --nocapture`), same checkout, same machine, three runs back to back. All
+four benchmarks pass on all three runs.
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 3274 ms | 2962 ms | 3038 ms | PASS |
+| warm single-file check | under 300 ms | 144 ms | 147 ms | 145 ms | PASS |
+| warm multi-file check (11 files) | under 1000 ms | 164 ms | 173 ms | 166 ms | PASS |
+| startup (`--help`) | under 50 ms | 18 ms | 19 ms | 19 ms | PASS |
+
+The warm single-file check is faster than the part A number it is compared against
+(175 / 196 / 243 ms after the parallel walk, and 254 / 246 / 252 ms before the review
+fixes): 144 to 147 ms here, a spread of 3 ms across three runs rather than 68 ms.
+That is the findings cache doing what Task 16 built it for. A warm run no longer
+re-parses and re-evaluates the whole repository, so the cost of a narrowed check is
+dominated by the walk and the cache reads rather than by work proportional to
+repository size.
+
+The multi-file number is the point of the new benchmark. Eleven files cost 164 to
+173 ms against a single file's 144 to 147 ms, so ten extra files add roughly 20 ms
+in total, about 2 ms each, against a per-invocation floor of about 145 ms. The
+target is 1000 ms, and the measured worst run uses 17 percent of it. Extrapolating
+the marginal cost, a full 30-file pull request would land near 185 to 200 ms, still
+about a fifth of the target. The floor, not the per-file cost, is what a future
+optimisation would have to attack.
+
+One caveat on the benchmark itself. The FastLift checkout holds 11 `.ts` and `.tsx`
+files at the top level of `app/`, not 30, so the truncation to 30 never binds and
+the benchmark measures an 11-file pull request. The task brief set the floor at 10
+files and said to widen the listing one directory down only below that floor, so the
+listing is left as written; the printed line names the real count
+(`warm 11-file check: 166 ms`) so no reader mistakes it for a 30-file measurement.
+If the bench corpus later needs a true 30-file scope, widening to `app/**` one
+directory down is the change, and on the marginal cost measured here it would not
+threaten the target.
