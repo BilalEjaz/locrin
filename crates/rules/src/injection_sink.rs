@@ -1,0 +1,501 @@
+//! Flags three families of sink where a value that was built rather than
+//! written reaches an interpreter: a code evaluator, a shell, and a SQL driver.
+//!
+//! The rule reads one file's syntax tree, so it sees the shape of the argument
+//! at the call and never where the value came from. That is the whole of its
+//! judgement, and it is where the blind spots are:
+//!
+//! - **Nothing here is taint tracking.** A template with a substitution in it
+//!   reaching `db.query` is a finding whether the substitution is a request
+//!   parameter or a constant declared two modules away. The reverse is worse: a
+//!   query assembled in a helper and passed in as a parameter is invisible,
+//!   because the shape at the call is a plain identifier from another function.
+//!   Cross-function flow is release two's work; this rule reports the shape.
+//! - **A bare identifier is resolved exactly one step, in the same file.** For a
+//!   SQL sink the rule looks for the identifier's own `const`/`let` declaration
+//!   and reads its value: a template with substitutions or a concatenation is
+//!   the same finding as writing it inline, so it is High. Anything else is
+//!   Medium, which is the honest answer for `db.query(q)` where `q` came from a
+//!   parameter. It does not chase the declaration's own operands, and it does
+//!   not follow reassignment, so a query built in two steps reads as the first.
+//! - **Callee names are matched, imports are not resolved.** `exec` and
+//!   `execSync` count bare or under an object that names the child-process
+//!   module (`child_process`, `cp`, `shell`, `sh`), and no other object. That
+//!   restriction is the rule's defence against the two commonest false
+//!   positives in application code: `RegExp.prototype.exec`, where
+//!   `pattern.exec(line)` would otherwise read as a shell command, and
+//!   `db.exec`, which is SQL. The cost is a wrapper module named anything else
+//!   (`runner.exec`) going unseen.
+//! - **A constant is not a finding, however it is spelled.** `"ls " + "-la"` and
+//!   a template with no substitution are fixed strings, so they are literals
+//!   here even though the syntax is an expression. Only a non-literal operand
+//!   makes a concatenation a finding.
+//! - **A tagged template is safe by construction and is skipped.** `` sql`...` ``
+//!   parses as a call whose `arguments` field is the template itself rather than
+//!   an argument list, and a tag that parameterises is the fix this rule
+//!   recommends. A tag that concatenates instead is therefore invisible.
+//! - **`setTimeout` asks a question the others do not.** Its first argument is
+//!   almost always a function, so a bare identifier there is only a finding when
+//!   the same file declares it as a string. `eval` and `new Function` take no
+//!   such care: their argument is code whatever its type, so any non-literal is
+//!   High.
+
+use std::collections::HashMap;
+
+use locrin_core::finding::{Category, Confidence, Finding, Severity};
+use locrin_core::parse::ParsedFile;
+use locrin_core::tree::{line, text};
+use tree_sitter::Node;
+
+use crate::{anchor_for, clean_files, finding_at, line_span, Rule, RuleContext, Scope};
+
+pub struct InjectionSink;
+
+const CODE_FIX: &str = "Do not build code from data; use a lookup table or JSON.parse";
+const COMMAND_FIX: &str =
+    "Pass arguments as an array to execFile or spawn without a shell, and validate or allow-list every piece";
+const SQL_FIX: &str =
+    "Use parameter placeholders ($1, ?) or a tagged template that parameterises, and pass values separately";
+
+/// Callees that hand their first argument to a shell, bare or as a property of
+/// the child-process module. See the module doc for why the object is checked.
+const SHELL_CALLEES: [&str; 2] = ["exec", "execSync"];
+/// Objects a shell callee may hang off. Anything else is another `exec`.
+const SHELL_OBJECTS: [&str; 5] = ["child_process", "childProcess", "cp", "shell", "sh"];
+/// Callees that take an argv array and reach a shell only when told to.
+const ARGV_CALLEES: [&str; 3] = ["spawn", "spawnSync", "execFile"];
+/// Properties that run their first argument as SQL. `$queryRaw` and
+/// `$executeRaw` are absent on purpose: they parameterise their template.
+const SQL_PROPERTIES: [&str; 7] = ["query", "raw", "execute", "exec", "$queryRawUnsafe", "$executeRawUnsafe", "unsafe"];
+
+/// How the argument was built, which is all the evidence a syntax tree offers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Variable,
+    Template,
+    Concatenation,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::Variable => "a variable",
+            Kind::Template => "a template with substitutions",
+            Kind::Concatenation => "a concatenation",
+        }
+    }
+}
+
+fn walk<'a>(node: Node<'a>, f: &mut impl FnMut(Node<'a>)) {
+    f(node);
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk(child, f);
+    }
+}
+
+/// The named arguments of a call or a `new`, comments dropped. A tagged
+/// template has a `template_string` where the argument list would be, and it
+/// answers with nothing: it has no argument list to read.
+fn args<'a>(call: Node<'a>) -> Vec<Node<'a>> {
+    let Some(list) = call.child_by_field_name("arguments").filter(|a| a.kind() == "arguments") else {
+        return vec![];
+    };
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor).filter(|n| n.kind() != "comment").collect()
+}
+
+/// Whether the call is a tagged template (`` sql`...` ``), which parameterises
+/// rather than concatenates and is the fix this rule recommends.
+fn is_tagged_template(call: Node) -> bool {
+    call.child_by_field_name("arguments").is_some_and(|a| a.kind() == "template_string")
+}
+
+/// Unwraps parentheses and the TypeScript casts that wrap an expression without
+/// changing what it is.
+fn unwrap<'a>(node: Node<'a>) -> Node<'a> {
+    match node.kind() {
+        "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression" => {
+            node.named_child(0).map(unwrap).unwrap_or(node)
+        }
+        _ => node,
+    }
+}
+
+fn is_addition(node: Node, src: &str) -> bool {
+    node.kind() == "binary_expression" && node.child_by_field_name("operator").is_some_and(|o| text(o, src) == "+")
+}
+
+/// Whether the node is a fixed value written here: a string, a number, a
+/// template with nothing interpolated, or an addition of those. A constant
+/// spelled as an expression is still a constant, so `"ls " + "-la"` is a
+/// literal and not a finding.
+fn is_literal(node: Node, src: &str) -> bool {
+    let node = unwrap(node);
+    match node.kind() {
+        "string" | "number" => true,
+        "template_string" => !has_substitution(node),
+        _ if is_addition(node, src) => {
+            let left = node.child_by_field_name("left");
+            let right = node.child_by_field_name("right");
+            match (left, right) {
+                (Some(l), Some(r)) => is_literal(l, src) && is_literal(r, src),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn has_substitution(node: Node) -> bool {
+    // The answer is bound before it is returned: the iterator borrows `cursor`,
+    // so it has to be dropped before `cursor` is.
+    let mut cursor = node.walk();
+    let found = node.named_children(&mut cursor).any(|c| c.kind() == "template_substitution");
+    found
+}
+
+/// The kind of a non-literal argument at a command or SQL sink: the three
+/// shapes the brief names, and nothing else. A member expression or a call
+/// reaching a sink is a real risk, but it is one the shape cannot judge, so it
+/// is left to the cross-function work rather than reported at a guess.
+fn sink_kind(node: Node, src: &str) -> Option<Kind> {
+    let node = unwrap(node);
+    if is_literal(node, src) {
+        return None;
+    }
+    match node.kind() {
+        "template_string" => Some(Kind::Template),
+        "identifier" => Some(Kind::Variable),
+        _ if is_addition(node, src) => Some(Kind::Concatenation),
+        _ => None,
+    }
+}
+
+/// The kind of a non-literal argument at a code sink, where anything that is
+/// not a fixed string is code built from data.
+fn code_kind(node: Node, src: &str) -> Option<Kind> {
+    let node = unwrap(node);
+    if is_literal(node, src) {
+        return None;
+    }
+    match node.kind() {
+        "template_string" => Some(Kind::Template),
+        _ if is_addition(node, src) => Some(Kind::Concatenation),
+        _ => Some(Kind::Variable),
+    }
+}
+
+/// Every `const`/`let`/`var` declaration in the file, by name. The first
+/// declaration of a name wins: a name declared twice in one file is two
+/// different values in two scopes, and picking either is a guess, so the rule
+/// picks the one a reader meets first.
+fn declarations<'a>(root: Node<'a>, src: &'a str) -> HashMap<&'a str, Node<'a>> {
+    let mut out: HashMap<&str, Node> = HashMap::new();
+    walk(root, &mut |n: Node<'a>| {
+        if n.kind() != "variable_declarator" {
+            return;
+        }
+        let (Some(name), Some(value)) = (n.child_by_field_name("name"), n.child_by_field_name("value")) else {
+            return;
+        };
+        if name.kind() == "identifier" {
+            out.entry(text(name, src)).or_insert(value);
+        }
+    });
+    out
+}
+
+/// Whether a declared value was itself built from data, which is what turns a
+/// bare identifier at a SQL sink from Medium into High.
+fn built_from_data(value: Node, src: &str) -> bool {
+    matches!(sink_kind(value, src), Some(Kind::Template | Kind::Concatenation))
+}
+
+/// Whether a value is a regular expression written here: a literal, or
+/// `new RegExp(...)`.
+fn is_regex_value(node: Node, src: &str) -> bool {
+    let node = unwrap(node);
+    match node.kind() {
+        "regex" => true,
+        "new_expression" => node.child_by_field_name("constructor").is_some_and(|c| text(c, src) == "RegExp"),
+        _ => false,
+    }
+}
+
+/// Whether the object a call hangs off is a regular expression, which makes an
+/// `exec` on it `RegExp.prototype.exec` and not a SQL driver. A literal and a
+/// `new RegExp` are read at the call; a name is resolved one step, in this file,
+/// the same way a query built above the call is. See the module doc: on the
+/// corpus this was the single largest class of false positives, because
+/// `pattern.exec(line)` is how JavaScript matches a string.
+fn is_regexp_receiver(call: Node, src: &str, decls: &HashMap<&str, Node>) -> bool {
+    let Some(f) = call.child_by_field_name("function").filter(|f| f.kind() == "member_expression") else {
+        return false;
+    };
+    let Some(object) = f.child_by_field_name("object").map(unwrap) else { return false };
+    if is_regex_value(object, src) {
+        return true;
+    }
+    object.kind() == "identifier" && decls.get(text(object, src)).is_some_and(|v| is_regex_value(*v, src))
+}
+
+/// Whether a declared value is a string, which is what makes a bare identifier
+/// at `setTimeout` code rather than the callback it almost always is.
+fn is_string_typed(value: Node, src: &str) -> bool {
+    let value = unwrap(value);
+    match value.kind() {
+        "string" | "template_string" => true,
+        _ if is_addition(value, src) => {
+            let left = value.child_by_field_name("left").map(|n| is_string_typed(n, src)).unwrap_or(false);
+            let right = value.child_by_field_name("right").map(|n| is_string_typed(n, src)).unwrap_or(false);
+            left || right
+        }
+        _ => false,
+    }
+}
+
+/// The callee as written, whitespace collapsed so a call broken across lines
+/// still reads as one name in the evidence.
+fn callee_text(call: Node, src: &str) -> String {
+    let Some(f) = call.child_by_field_name("function") else { return String::new() };
+    text(f, src).split_whitespace().collect::<Vec<_>>().join("")
+}
+
+/// The bare name of a call: the identifier, or the property of a member call.
+fn callee_name<'a>(call: Node<'a>, src: &'a str) -> Option<&'a str> {
+    let f = call.child_by_field_name("function")?;
+    match f.kind() {
+        "identifier" => Some(text(f, src)),
+        "member_expression" => Some(text(f.child_by_field_name("property")?, src)),
+        _ => None,
+    }
+}
+
+/// The object a member call hangs off, or `None` for a bare call.
+fn callee_object<'a>(call: Node<'a>, src: &'a str) -> Option<&'a str> {
+    let f = call.child_by_field_name("function")?;
+    if f.kind() != "member_expression" {
+        return None;
+    }
+    Some(text(f.child_by_field_name("object")?, src))
+}
+
+/// Whether any argument is an options object saying `shell: true`, which is
+/// what turns an argv call into a shell call.
+fn has_shell_option(call: Node, src: &str) -> bool {
+    args(call).into_iter().map(unwrap).filter(|a| a.kind() == "object").any(|obj| {
+        let mut cursor = obj.walk();
+        let pairs: Vec<Node> = obj.named_children(&mut cursor).filter(|c| c.kind() == "pair").collect();
+        pairs.into_iter().any(|pair| {
+            let key = pair.child_by_field_name("key").map(|k| text(k, src).trim_matches(['"', '\'']));
+            let value = pair.child_by_field_name("value").map(|v| text(v, src));
+            key == Some("shell") && value == Some("true")
+        })
+    })
+}
+
+/// The value of an object argument's `text:` property, which is how the `pg`
+/// client takes a query alongside its values.
+fn text_property<'a>(node: Node<'a>, src: &'a str) -> Option<Node<'a>> {
+    let node = unwrap(node);
+    if node.kind() != "object" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let pairs: Vec<Node> = node.named_children(&mut cursor).filter(|c| c.kind() == "pair").collect();
+    pairs.into_iter().find_map(|pair| {
+        let key = pair.child_by_field_name("key")?;
+        if text(key, src).trim_matches(['"', '\'']) != "text" {
+            return None;
+        }
+        pair.child_by_field_name("value")
+    })
+}
+
+/// What a finding says and which weakness it is filed under.
+struct Form {
+    evidence: String,
+    fix: &'static str,
+    cwe: &'static str,
+    confidence: Confidence,
+}
+
+/// `eval`, `new Function`, and a string passed to `setTimeout`/`setInterval`.
+fn code_sink(call: Node, src: &str, decls: &HashMap<&str, Node>) -> Option<Form> {
+    let (callee, argument) = if call.kind() == "new_expression" {
+        let constructor = call.child_by_field_name("constructor")?;
+        if constructor.kind() != "identifier" || text(constructor, src) != "Function" {
+            return None;
+        }
+        // The body is the last argument; everything before it names a parameter.
+        ("new Function".to_string(), *args(call).last()?)
+    } else {
+        let name = callee_name(call, src)?;
+        match name {
+            "eval" => ("eval".to_string(), *args(call).first()?),
+            "setTimeout" | "setInterval" => {
+                let first = *args(call).first()?;
+                // The argument here is a callback until it is shown to be a
+                // string: a function, a method reference and a `.bind` call are
+                // the overwhelming majority of what a timer is given. A bare
+                // identifier has to be declared a string in this file; anything
+                // else has to be one at the call. See the module doc.
+                let string_typed = match unwrap(first).kind() {
+                    "identifier" => decls.get(text(unwrap(first), src)).is_some_and(|d| is_string_typed(*d, src)),
+                    _ => is_string_typed(first, src),
+                };
+                if !string_typed {
+                    return None;
+                }
+                (name.to_string(), first)
+            }
+            _ => return None,
+        }
+    };
+    let kind = code_kind(argument, src)?;
+    Some(Form {
+        evidence: format!("{callee} receives {}", kind.as_str()),
+        fix: CODE_FIX,
+        cwe: "CWE-95",
+        confidence: Confidence::High,
+    })
+}
+
+/// A command string handed to a shell.
+fn command_sink(call: Node, src: &str) -> Option<Form> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let name = callee_name(call, src)?;
+    let object_allowed = match callee_object(call, src) {
+        Some(object) => SHELL_OBJECTS.contains(&object),
+        None => true,
+    };
+    let reaches_a_shell = if SHELL_CALLEES.contains(&name) {
+        object_allowed
+    } else if ARGV_CALLEES.contains(&name) {
+        object_allowed && has_shell_option(call, src)
+    } else {
+        false
+    };
+    if !reaches_a_shell {
+        return None;
+    }
+    let kind = sink_kind(*args(call).first()?, src)?;
+    // A variable is one step short of evidence: the shape says nothing was
+    // interpolated here, only that this file cannot see what was.
+    let confidence = if kind == Kind::Variable { Confidence::Medium } else { Confidence::High };
+    Some(Form {
+        evidence: format!("shell command built from {}", kind.as_str()),
+        fix: COMMAND_FIX,
+        cwe: "CWE-78",
+        confidence,
+    })
+}
+
+/// A query string handed to a driver.
+fn sql_sink(call: Node, src: &str, decls: &HashMap<&str, Node>) -> Option<Form> {
+    if call.kind() != "call_expression" || is_tagged_template(call) {
+        return None;
+    }
+    let f = call.child_by_field_name("function")?;
+    let named_a_sink = match f.kind() {
+        // A bare call is a sink only under the one name that means SQL and
+        // nothing else; a bare `query` or `execute` is any function at all.
+        "identifier" => text(f, src) == "sql",
+        "member_expression" => {
+            let property = text(f.child_by_field_name("property")?, src);
+            SQL_PROPERTIES.contains(&property)
+                // `db.exec` is SQL. `cp.exec` is a shell, which the command
+                // family has already claimed, and `pattern.exec` is a regular
+                // expression, which is nobody's sink.
+                && !(property == "exec"
+                    && (callee_object(call, src).is_some_and(|o| SHELL_OBJECTS.contains(&o))
+                        || is_regexp_receiver(call, src, decls)))
+        }
+        _ => false,
+    };
+    if !named_a_sink {
+        return None;
+    }
+    let first = *args(call).first()?;
+    let argument = text_property(first, src).unwrap_or(first);
+    let kind = sink_kind(argument, src)?;
+    let confidence = match kind {
+        Kind::Variable => {
+            // One step of resolution, in this file: a query built above and
+            // passed down by name is the same finding as one written inline.
+            let built = decls.get(text(unwrap(argument), src)).is_some_and(|d| built_from_data(*d, src));
+            if built {
+                Confidence::High
+            } else {
+                Confidence::Medium
+            }
+        }
+        _ => Confidence::High,
+    };
+    Some(Form {
+        evidence: format!("SQL built from {} reaches {}", kind.as_str(), callee_text(call, src)),
+        fix: SQL_FIX,
+        cwe: "CWE-89",
+        confidence,
+    })
+}
+
+fn scan(rule: &InjectionSink, file: &ParsedFile) -> Vec<Finding> {
+    let src = &file.source;
+    let root = file.tree.root_node();
+    let decls = declarations(root, src);
+    let mut out: Vec<Finding> = Vec::new();
+    walk(root, &mut |n: Node| {
+        if !matches!(n.kind(), "call_expression" | "new_expression") {
+            return;
+        }
+        let Some(form) =
+            code_sink(n, src, &decls).or_else(|| command_sink(n, src)).or_else(|| sql_sink(n, src, &decls))
+        else {
+            return;
+        };
+        // The evidence joins the symbol in the anchor so that two sinks in one
+        // function are two findings rather than one id written twice.
+        let at = line(n);
+        let anchor = format!("{}\x1f{}", anchor_for(file, at), form.evidence);
+        let mut finding = finding_at(rule, &file.rel, line_span(file, at), &anchor, &form.evidence, form.fix);
+        finding.confidence = form.confidence;
+        finding.owasp = Some("A03:2021".to_string());
+        finding.cwe = Some(form.cwe.to_string());
+        out.push(finding);
+    });
+    out.sort_by_key(|f| (f.span.start_line, f.span.start_col));
+    out
+}
+
+impl Rule for InjectionSink {
+    fn id(&self) -> &'static str {
+        "injection-sink"
+    }
+    fn description(&self) -> &'static str {
+        "A built string reaching an evaluator, a shell, or a SQL driver"
+    }
+    fn scope(&self) -> Scope {
+        Scope::File
+    }
+    fn category(&self) -> Category {
+        Category::Security
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    /// High is the rule's own answer, which every interpolated and concatenated
+    /// sink keeps. A bare identifier is lowered to Medium after construction:
+    /// the shape says a value reaches the sink, not that it was built from
+    /// data. See the module doc.
+    fn confidence(&self) -> Confidence {
+        Confidence::High
+    }
+
+    fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+        Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
+    }
+}
