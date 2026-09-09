@@ -103,6 +103,10 @@
 
 - **Task 13, the spec 3.4 benchmarks pass `--offline`.** `vulnerable-dependency` is a graph rule, so it runs on every `scan` and every `check`, and `crates/cli/tests/bench.rs` ran neither with `--offline`. Measured on the FastLift checkout the cold scan went from 4.9 s offline to 13.8 s online, almost all of it one batch request and eight advisory documents: the benchmark would have been timing osv.dev rather than the engine, and its number would have moved with the founder's connection. The rule's own target is a separate one the plan already states as warm and cached (under 50 ms), which is what every run after the first uses. Task 16 owns the verdict on the numbers themselves.
 
+- **Task 15, a cookie flag whose value is neither `true` nor `false` counts as set.** The task said `express-cookie-insecure` reports an options object "lacking `httpOnly: true`", which read literally reports `secure: process.env.NODE_ENV === "production"`: the commonest way a repository writes a cookie that is secure in production and readable over `http://localhost` in development. A flag is therefore missing when it is absent from the object or written `false`, and an options argument the file cannot read at all (`res.cookie(n, v, opts)`) is not an answer and not a finding. That is the same stance the CORS rule takes on `cors(corsOptions)`: the rules report the configuration they can quote. `a_computed_flag_and_an_unreadable_options_object_are_left_alone` pins it.
+
+- **Task 15, the evidence reads the method in upper case.** `{method}` in the task is the property as written (`get`), and the evidence says `GET /admin/users registered without requireAuth`. An HTTP method is upper case everywhere a reader meets one, in a log line and in the specification, and the finding is read by a person.
+
 ## File structure
 
 Part A:

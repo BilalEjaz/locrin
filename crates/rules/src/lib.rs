@@ -1,6 +1,7 @@
 pub mod boundary;
 pub mod dead_export;
 pub mod dead_file;
+pub mod express;
 pub mod html_injection;
 pub mod injection_sink;
 pub mod leftover_commented;
@@ -286,6 +287,9 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(vulnerable_dependency::VulnerableDependency),
         Box::new(supabase::service_role::SupabaseServiceRoleInClient),
         Box::new(supabase::rls::SupabaseTableWithoutRls),
+        Box::new(express::route_auth::ExpressRouteWithoutAuth),
+        Box::new(express::cors::ExpressCorsWildcardOnAuthenticated),
+        Box::new(express::cookie::ExpressCookieInsecure),
     ]
 }
 
@@ -631,11 +635,14 @@ mod tests {
                 "html-injection",
                 "vulnerable-dependency",
                 "supabase-service-role-in-client",
-                "supabase-table-without-rls"
+                "supabase-table-without-rls",
+                "express-route-without-auth",
+                "express-cors-wildcard-on-authenticated",
+                "express-cookie-insecure"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 13, "thirteen file rules and five graph rules");
+        assert_eq!(file_rules().len(), 16, "sixteen file rules and five graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
             vec![
