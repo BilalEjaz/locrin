@@ -399,18 +399,21 @@ mod tests {
     #[test]
     fn key_material_is_what_follows_the_header_and_a_bare_header_is_not_a_key() {
         let body = "MIIEowIBAAKCAQEAsynthetic0fixture0material0for0locrin0only0A1b2";
-        // The separator is the two character `\n` escape a PEM is written with
-        // inside a source literal, not a real newline: a real one would only
-        // ever reach this function as the next source line.
-        assert_eq!(key_material(&format!("\n{body}\n-----END"), None), Some(body), "after a written newline");
+        // The separator these cases pass is the two character `\n` escape, the
+        // way a PEM is written inside a source literal, so what they exercise is
+        // `base64_run` stepping over the escape. A real newline never reaches
+        // this function on the same line: the scan splits the file on it, and
+        // the material after one arrives as the next source line, which is the
+        // case below.
+        assert_eq!(key_material(&format!("\\n{body}\\n-----END"), None), Some(body), "after a written newline");
         assert_eq!(key_material("\";", Some(&format!("  \"{body}\","))), Some(body), "on the next source line");
         assert_eq!(key_material("\", \"\")", Some("export const looksLikeAKey = false;")), None, "stripped out");
         assert_eq!(key_material("\");", Some("declare const pem: string;")), None, "compared against");
         assert_eq!(key_material("", None), None, "the last line of a file");
         // Sixteen characters on the same line is material; a short identifier
         // opening the next line is not.
-        assert_eq!(key_material("\nMIIEowIBAAKCAQEA", None).map(str::len), Some(16));
-        assert_eq!(key_material("\nMIIEowIBAAKCAQE", None), None, "fifteen characters is not a body");
+        assert_eq!(key_material("\\nMIIEowIBAAKCAQEA", None).map(str::len), Some(16));
+        assert_eq!(key_material("\\nMIIEowIBAAKCAQE", None), None, "fifteen characters is not a body");
         assert_eq!(key_material("\";", Some("someLongIdentifierName.method();")), None, "an identifier, not a body");
         // A legacy encrypted PEM puts two headers of its own between the BEGIN
         // line and the base64 body, so the next source line is one of them.
