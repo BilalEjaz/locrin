@@ -251,13 +251,20 @@ fn literal_text(node: Node, src: &str) -> String {
 /// child-process module nor a regular expression is a database handle far more
 /// often than it is a shell wrapper, so SQL is the answer to fall back on. See
 /// the module doc.
+///
+/// Only the first word is asked. A statement is named by the verb it opens
+/// with, and a command line is too: `kubectl delete pod ${name}` and
+/// `git update-index --refresh` are commands whose second word happens to be a
+/// SQL keyword, and asking the whole string filed both under `CWE-89` with a
+/// fix about parameter placeholders. The first word answers `select ... where
+/// id = ${id}` exactly as well and answers those correctly too.
 fn carries_sql(node: Node, src: &str) -> bool {
     let carried = literal_text(node, src).to_ascii_lowercase();
-    let mut words = carried.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).peekable();
-    if words.peek().is_none() {
-        return true;
+    let mut words = carried.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty());
+    match words.next() {
+        None => true,
+        Some(first) => SQL_KEYWORDS.contains(&first),
     }
-    words.any(|w| SQL_KEYWORDS.contains(&w))
 }
 
 /// Whether a value is a regular expression written here: a literal, or
@@ -331,9 +338,13 @@ fn callee_object<'a>(call: Node<'a>, src: &'a str) -> Option<&'a str> {
 
 /// Whether any argument is an options object saying `shell: true` or naming a
 /// shell, which is what turns an argv call into a shell call. Node reads the
-/// option either way: `shell: "/bin/sh"` and `shell: process.env.SHELL` run the
-/// command line through a shell exactly as `shell: true` does, and a string is
-/// how the option is written whenever the shell has to be chosen.
+/// option either way: `shell: "/bin/sh"` runs the command line through a shell
+/// exactly as `shell: true` does, and a string is how the option is written
+/// whenever the shell has to be chosen.
+///
+/// The value has to be written here: `true`, a string literal, or a template
+/// literal. `shell: process.env.SHELL` reaches a shell just as surely, and this
+/// file cannot see that it does, so it is a blind spot rather than a match.
 fn has_shell_option(call: Node, src: &str) -> bool {
     args(call).into_iter().map(unwrap).filter(|a| a.kind() == "object").any(|obj| {
         let mut cursor = obj.walk();
@@ -563,5 +574,53 @@ impl Rule for InjectionSink {
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(source: &str) -> ParsedFile {
+        locrin_core::parse::parse_source(std::path::Path::new("src/a.ts"), "src/a.ts", source.into()).unwrap()
+    }
+
+    /// [`carries_sql`] over the value of `const x = ...`.
+    fn carried(argument: &str) -> bool {
+        let file = parsed(&format!("const x = {argument};\n"));
+        let mut answer = None;
+        walk(file.tree.root_node(), &mut |n: Node| {
+            if n.kind() == "variable_declarator" {
+                if let Some(value) = n.child_by_field_name("value") {
+                    answer = Some(carries_sql(value, &file.source));
+                }
+            }
+        });
+        answer.expect("the fixture declares one value")
+    }
+
+    /// A statement is named by the word it opens with. A command line whose
+    /// second word is a SQL keyword is still a command line.
+    #[test]
+    fn only_the_first_word_decides_whether_carried_text_is_sql() {
+        assert!(carried("`select * from users where id = ${id}`"));
+        assert!(carried("\"INSERT INTO t VALUES (\" + v + \")\""));
+        assert!(!carried("`kubectl delete pod ${name}`"), "a command whose second word is a keyword");
+        assert!(!carried("`git update-index --refresh ${path}`"));
+        assert!(!carried("`rm -rf ${path}`"));
+        assert!(carried("q"), "a value this file cannot read falls back to SQL");
+    }
+
+    /// The tie-break in place: an `exec` on an object this file cannot place is
+    /// filed by the word its command line opens with.
+    #[test]
+    fn an_unplaceable_exec_is_filed_by_the_first_word_it_carries() {
+        let out = scan(&InjectionSink, &parsed("runner.exec(`kubectl delete pod ${name}`);\n"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].cwe.as_deref(), Some("CWE-78"), "{:?}", out[0]);
+
+        let out = scan(&InjectionSink, &parsed("store.exec(`insert into t values (${v})`);\n"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].cwe.as_deref(), Some("CWE-89"), "{:?}", out[0]);
     }
 }
