@@ -34,8 +34,8 @@ fn allow_comment_suppresses_and_shadowed_console_is_still_flagged() {
 /// compile that config's list instead of serving the first one's.
 #[test]
 fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
-    use common::{index_dir, parse_dir};
-    use locrin_rules::{Rule, RuleContext};
+    use common::{ctx_for, index_dir, parse_dir};
+    use locrin_rules::Rule;
 
     let root = fixture("leftover_debug", "clean");
     let files = parse_dir(&root);
@@ -43,11 +43,11 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
 
     let allowed = Config::default();
     let (ix, entries) = index_dir(&root, &files, &allowed);
-    let ctx = RuleContext { files: &files, config: &allowed, index: Some(&ix), entries: &entries };
+    let ctx = ctx_for(&files, &allowed, &ix, &entries, &root);
     assert!(rule.run(&ctx).unwrap().is_empty(), "the default config allows **/scripts/**");
 
     let nothing_allowed = Config { debug_allowed: vec![], ..Config::default() };
-    let ctx = RuleContext { files: &files, config: &nothing_allowed, index: Some(&ix), entries: &entries };
+    let ctx = ctx_for(&files, &nothing_allowed, &ix, &entries, &root);
     let out = rule.run(&ctx).unwrap();
     assert_eq!(out.len(), 1, "with no allow list the script's debug line is a finding: {out:?}");
     assert_eq!(out[0].file, "scripts/build.ts");

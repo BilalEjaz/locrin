@@ -774,7 +774,7 @@ fn sarif_output_lists_every_rule_and_every_finding() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["version"], "2.1.0");
     let run = &doc["runs"][0];
-    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 8);
+    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 11);
     assert_eq!(run["results"].as_array().unwrap().len(), 2);
     assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
 }
@@ -898,4 +898,236 @@ fn conflicting_check_flags_are_a_usage_error() {
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("cannot be used with"), "{err}");
     assert!(err.contains("--changed"), "{err}");
+}
+
+/// The engine's copy of the module under test. A binary crate has no library for
+/// an integration test to link against, so the source is compiled a second time
+/// here; only `show_at` is exercised, and `base_rev` is covered through the
+/// `--base` and `--since` tests above, which run every diff through it.
+#[path = "../src/git.rs"]
+#[allow(dead_code)]
+mod git_src;
+
+/// A diff scope has to read the version of a file that is in the base commit,
+/// not the one on disk: on a fresh CI clone the index has no memory of any
+/// earlier version, and the base commit is the only "before" a pull request has.
+///
+/// The run happens under `LANG=de_DE.UTF-8` because the "path is not in that
+/// revision" answer is decided by matching git's stderr, and both messages
+/// matched are translated ones: `show_at` pins `LC_ALL=C` on every git process
+/// so a developer or CI runner with a localised environment still gets None
+/// rather than an aborted run. Git ships no message catalogs on this machine, so
+/// what this proves is that the pinning is harmless, not that it is sufficient;
+/// a machine with catalogs installed is what would prove the rest.
+#[test]
+fn show_at_reads_the_committed_text_and_says_nothing_for_a_path_that_was_not_there() {
+    std::env::set_var("LANG", "de_DE.UTF-8");
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    // Line endings are the repository's business, not this test's: without this a
+    // machine configured to rewrite them would commit different bytes than were
+    // written and the comparison below would be about newlines.
+    git(dir.path(), &["config", "core.autocrlf", "false"]);
+    let committed = "export const version = 1;\n";
+    std::fs::write(dir.path().join("src/committed.ts"), committed).unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let root = locrin_core::walk::canonical_root(dir.path());
+
+    // The working tree has moved on; the commit is what show_at answers with.
+    std::fs::write(dir.path().join("src/committed.ts"), "export const version = 2;\n").unwrap();
+    assert_eq!(git_src::show_at(&root, "HEAD", "src/committed.ts").unwrap().as_deref(), Some(committed));
+
+    // A file added since the commit was not there, which is not an error: it is
+    // how the caller learns everything in it is new.
+    std::fs::write(dir.path().join("src/added.ts"), "export const added = 1;\n").unwrap();
+    assert_eq!(git_src::show_at(&root, "HEAD", "src/added.ts").unwrap(), None);
+    assert_eq!(git_src::show_at(&root, "HEAD", "src/never-existed.ts").unwrap(), None);
+
+    // A revision that does not exist is a real failure, not a missing file.
+    assert!(git_src::show_at(&root, "no-such-ref", "src/committed.ts").is_err());
+    // A revision shaped like a git option never reaches git.
+    assert!(git_src::show_at(&root, "--output=planted", "src/committed.ts").is_err());
+
+    std::env::remove_var("LANG");
+}
+
+const ACTIVE_TEST: &str =
+    "describe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const SKIPPED_TEST: &str =
+    "describe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+/// Still skipped, edited again, and now carrying a `console.log`. The debug call
+/// is the positive control for every leg that asserts no newly-skipped finding:
+/// "no finding" is also what an empty scope produces, so a leg that only asserts
+/// the absence would pass if the file had silently dropped out of the run. The
+/// `leftover-debug` finding proves the file was in scope and the rule stayed
+/// quiet on purpose.
+const SKIPPED_TEST_EDITED: &str = "// still skipped, and now edited again\nconsole.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+/// The same two versions carrying the `console.log` from the start, for a leg
+/// whose every run needs the positive control rather than only its last one.
+const ACTIVE_TEST_WITH_DEBUG: &str = "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const SKIPPED_TEST_WITH_DEBUG: &str = "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+
+/// Every `test-newly-skipped` finding in a `--json` payload, as (file, evidence).
+fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
+    v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "test-newly-skipped")
+        .map(|f| (f["file"].as_str().unwrap().to_string(), f["evidence"].as_str().unwrap().to_string()))
+        .collect()
+}
+
+/// Whether the payload reports the planted `console.log` in `rel`. See
+/// [`SKIPPED_TEST_EDITED`].
+fn debug_reported(v: &serde_json::Value, rel: &str) -> bool {
+    v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "leftover-debug" && f["file"] == rel)
+}
+
+/// The index is the source of "previous" for an ordinary run: what it remembered
+/// about a file is the version the edit replaced. A test active at the last run
+/// and skipped now is the finding; once the skip is in the index, the next edit
+/// to the same file does not report it again.
+#[test]
+fn changed_reports_a_test_this_edit_skipped_and_not_one_the_index_already_knew() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(&test_file, ACTIVE_TEST).unwrap();
+    // The run that puts the active version into the index; it is the "previous"
+    // every later run in this test compares against.
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    std::fs::write(&test_file, SKIPPED_TEST).unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        newly_skipped(&v),
+        vec![("src/a.test.ts".to_string(), "test \"renders a row\" is skipped (newly)".to_string())],
+        "{v}"
+    );
+
+    // A second edit that keeps the skip. The file changed, so it is re-parsed
+    // rather than served from the cache, and the index now remembers the skip:
+    // the decision is no longer this change's, so the rule says nothing.
+    std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
+    assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
+}
+
+/// A named path is a scope like `--changed`, and the file it names is usually
+/// unchanged: the developer is asking about a file, not reporting an edit. Such a
+/// file is parsed for the rules without being re-recorded, so the run has to take
+/// its previous version from the index anyway. Without that, every `check <path>`
+/// over a suite with a legacy skip reports it again, forever.
+#[test]
+fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(
+        &test_file,
+        "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"legacy\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
+    )
+    .unwrap();
+    // The whole-repository run that records the skip. It reports it once (the
+    // index had never seen the file), and the index remembers it from here on.
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    // Twice, because the first named-path run must not be the thing that teaches
+    // the index: the file is unchanged, so nothing about it moves between them.
+    for run in 1..=2 {
+        let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        // The planted `console.log` is the positive control: "no newly-skipped
+        // finding" is also what an empty scope produces, so without it this leg
+        // would pass if the named path had never reached the file at all.
+        assert!(debug_reported(&v, "src/a.test.ts"), "named-path run {run} did not reach the file: {v}");
+        assert!(newly_skipped(&v).is_empty(), "named-path run {run} reported a skip the index knew: {v}");
+    }
+}
+
+/// The lifetime of a newly-skipped finding, which the rule's module doc
+/// describes and nothing else pins: reported once, then served from the findings
+/// cache until the file is next parsed, and gone from there on.
+///
+/// A named path is one of the three things that parse an unchanged file (an edit
+/// and a cache miss after a config change are the others), so it is what this
+/// leg uses to reach that point without editing the file: the named-path run
+/// re-runs the rules over the file, and this time the index's record of the skip
+/// is the file's previous version, so it writes cache rows with no finding in
+/// them and the whole-repository run after it serves those.
+#[test]
+fn a_newly_skipped_finding_is_served_from_the_cache_until_the_file_is_parsed_again() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(&test_file, ACTIVE_TEST_WITH_DEBUG).unwrap();
+    // The run that makes the active version the "previous" the next one compares
+    // against.
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    std::fs::write(&test_file, SKIPPED_TEST_WITH_DEBUG).unwrap();
+    let out = locrin(dir.path()).arg("check").args(["--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        newly_skipped(&v),
+        vec![("src/a.test.ts".to_string(), "test \"renders a row\" is skipped (newly)".to_string())],
+        "the whole-repository run that sees the edit reports the skip: {v}"
+    );
+
+    // The named path parses the unchanged file again. The skip is in the index
+    // now, so it is no longer new and the rows this run caches say so.
+    let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the named path has to reach the file: {v}");
+    assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
+
+    // And the whole-repository run after it serves those rows rather than the
+    // ones the reporting run wrote, so the finding does not come back.
+    let out = locrin(dir.path()).arg("check").args(["--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the file has to be answered for: {v}");
+    assert!(newly_skipped(&v).is_empty(), "the finding outlived the parse that retired it: {v}");
+}
+
+/// For a diff scope git overrides the index: the base commit is the "before" a
+/// pull request is judged against, and on a fresh CI clone it is the only one
+/// there is.
+#[test]
+fn base_reports_a_test_skipped_since_the_base_commit_and_not_one_the_base_already_skipped() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(&test_file, ACTIVE_TEST).unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+
+    std::fs::write(&test_file, SKIPPED_TEST).unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        newly_skipped(&v),
+        vec![("src/a.test.ts".to_string(), "test \"renders a row\" is skipped (newly)".to_string())],
+        "{v}"
+    );
+
+    // Committed: the working tree matches HEAD, so the diff is empty and there
+    // is nothing to answer for.
+    git(dir.path(), &["add", "src"]);
+    git(dir.path(), &["commit", "-qm", "skip it"]);
+    let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Nothing at all, not merely no skip: this leg is the one where the scope is
+    // genuinely empty, and asserting the whole payload says so is what keeps it
+    // from being confused with a leg that suppressed a finding.
+    assert!(v["findings"].as_array().unwrap().is_empty(), "an empty diff reports nothing: {v}");
+
+    // And with the file back in the diff for an unrelated edit, the skip is
+    // still not reported: it is in the base commit, so it is not this change's.
+    std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
+    assert!(newly_skipped(&v).is_empty(), "the base commit already skipped it: {v}");
 }

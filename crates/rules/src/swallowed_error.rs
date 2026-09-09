@@ -1,0 +1,341 @@
+//! Flags three ways a file drops an error on the floor: a catch that does
+//! nothing, a catch that only logs in a function whose callers read its result,
+//! and a call to a same-file `async` function whose promise nobody holds.
+//!
+//! Everything here is one file's syntax tree. That is deliberate, and it is
+//! where the blind spots are:
+//!
+//! - **A commented catch is a decision, not a swallow.** Form 1 fires only on a
+//!   catch body with nothing in it at all, not even a comment. A body holding
+//!   `// ignore: the retry covers it` is left alone: the comment is a maintainer
+//!   saying what happens instead of handling, which is the answer this rule
+//!   exists to ask for, and reporting it asks the same question a second time.
+//!   Measured on the five corpus repositories, 89 of 100 findings were exactly
+//!   that shape and not one bare empty catch existed anywhere
+//!   (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+//!   The cost is that a catch commented with something that is not a reason
+//!   (`// TODO`, a commented-out line) is invisible to this rule; `leftover-marker`
+//!   and `leftover-commented` are the rules that see those.
+//! - **Form 2 reads calls, not types.** "Callers use the result" means the file
+//!   calls the enclosing function somewhere outside its own body and the value
+//!   that call produces goes somewhere: bound to a name (`const x = f()`,
+//!   `const x = await f()`), passed as an argument, returned, or read by an
+//!   enclosing expression. Sequencing a call is not using it, so a statement
+//!   `await f()`, a `void f()` and an `f().finally(g)` chain are all
+//!   nothing-read-back. That distinction is a corpus result: all six of the
+//!   rule's form 2 findings across the five repositories were a function
+//!   returning `Promise<void>` whose only "user" was one of those three
+//!   spellings, and none of them was worth acting on
+//!   (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+//!   How a caller spells the call depends on the declaration: a function or a
+//!   named arrow is called bare, a method only through `this`, the one object a
+//!   single file can resolve. A caller in another file, a call through a
+//!   variable, a call on any other object, and a result read from a `.then`
+//!   callback rather than a binding are all invisible, so the form
+//!   under-reports rather than guesses. It is Medium confidence for that reason.
+//! - **Form 3 resolves only what one file can resolve.** A call is a floating
+//!   promise when it names an `async` function or arrow declared in the same
+//!   file, or reaches an `async` method of the same class through `this`. A
+//!   call through any other object is left alone, because one file's syntax
+//!   cannot say what that object is: `renderer.unmount()` is not the file's own
+//!   `async function unmount`, and matching on the property name alone flags it
+//!   as one. An imported promise-returning function and a non-`async` function
+//!   that returns a promise are left alone for the same reason: resolving them
+//!   needs the graph, and a rule that guessed would flag every void call in the
+//!   repository.
+//! - **No flow analysis anywhere.** A `throw` or `return` reached through a
+//!   helper called from the catch body reads as log-only, and a promise awaited
+//!   through a variable two statements later reads as floating. Both need the
+//!   cross-function analysis that release two adds.
+
+use std::collections::HashSet;
+
+use locrin_core::finding::{Category, Confidence, Finding, Severity};
+use locrin_core::parse::ParsedFile;
+use locrin_core::tree::{has_keyword, line, text};
+use tree_sitter::Node;
+
+use crate::{clean_files, finding, line_text, Rule, RuleContext, Scope};
+
+pub struct SwallowedError;
+
+const EMPTY_FIX: &str =
+    "Handle the error, rethrow it, or log it with enough context to act on; an empty catch hides failures";
+const LOG_ONLY_FIX: &str =
+    "Return a failure value or rethrow; a caller that receives undefined cannot tell an error from an empty result";
+const FLOATING_FIX: &str = "await it, or attach .catch, or mark it `void` if the result is deliberately dropped";
+
+fn walk<'a>(node: Node<'a>, f: &mut impl FnMut(Node<'a>)) {
+    f(node);
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk(child, f);
+    }
+}
+
+/// Everything in a catch body, comments included, which is what form 1 asks
+/// about: a body with no children at all is the empty catch, and a comment is a
+/// child. See the module doc.
+fn catch_body_nodes<'a>(clause: Node<'a>) -> Vec<Node<'a>> {
+    let Some(body) = clause.child_by_field_name("body") else { return vec![] };
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor).collect()
+}
+
+/// Whether a statement is nothing but a `console.<anything>(...)` call.
+fn console_only(stmt: Node, src: &str) -> bool {
+    if stmt.kind() != "expression_statement" {
+        return false;
+    }
+    let Some(call) = stmt.named_child(0).filter(|c| c.kind() == "call_expression") else { return false };
+    let Some(callee) = call.child_by_field_name("function").filter(|c| c.kind() == "member_expression") else {
+        return false;
+    };
+    callee.child_by_field_name("object").is_some_and(|o| text(o, src) == "console")
+}
+
+/// The name of the nearest enclosing function-like declaration, which is what a
+/// caller would have written to reach the catch.
+fn enclosing_function<'a>(node: Node<'a>, src: &str) -> Option<(Node<'a>, String)> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        let named = match n.kind() {
+            "function_declaration" | "generator_function_declaration" | "method_definition" => true,
+            "variable_declarator" => n
+                .child_by_field_name("value")
+                .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression")),
+            _ => false,
+        };
+        if named {
+            if let Some(name) = n.child_by_field_name("name") {
+                return Some((n, text(name, src).to_string()));
+            }
+        }
+        current = n.parent();
+    }
+    None
+}
+
+/// Whether the callee of `call` is the way a caller reaches `name` declared as
+/// `owner`. A `function_declaration` or a named arrow is reached bare, `name(…)`;
+/// a `method_definition` is reached through an object, and `this` is the one
+/// object a single file can resolve, so `this.name(…)` is what counts. Keeping
+/// them apart is what stops a method's catch being judged by the calls to a free
+/// function that happens to share its name, and what lets a method be judged at
+/// all: matched bare only, a method's own callers were invisible and its log-only
+/// catch never fired.
+fn reaches(call: Node, src: &str, owner: Node, name: &str) -> bool {
+    let Some(callee) = call.child_by_field_name("function") else { return false };
+    if owner.kind() == "method_definition" {
+        return callee.kind() == "member_expression"
+            && callee.child_by_field_name("object").is_some_and(|o| o.kind() == "this")
+            && callee.child_by_field_name("property").is_some_and(|p| text(p, src) == name);
+    }
+    callee.kind() == "identifier" && text(callee, src) == name
+}
+
+/// Whether a call's value goes anywhere: bound to a name, passed as an
+/// argument, returned, or read by any enclosing expression. The walk climbs the
+/// wrappers that read nothing back off the call (`await f()`, `void f()`,
+/// parentheses) and the chain a settled promise puts around it (`f().finally(g)`
+/// is a member of the call, then a call of the member), and asks what the
+/// outermost one of those sits in. An expression statement is the answer "the
+/// result went nowhere"; anything else is a use. See the module doc.
+fn result_is_used(call: Node) -> bool {
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        let transparent = match parent.kind() {
+            "expression_statement" => return false,
+            "await_expression" | "unary_expression" | "parenthesized_expression" => true,
+            "member_expression" => parent.child_by_field_name("object").is_some_and(|o| o.id() == node.id()),
+            "call_expression" => parent.child_by_field_name("function").is_some_and(|f| f.id() == node.id()),
+            _ => false,
+        };
+        if !transparent {
+            return true;
+        }
+        node = parent;
+    }
+    true
+}
+
+/// Whether `name` is called outside `owner`'s own body somewhere that uses what
+/// the call returns, which is the syntactic reading of "a caller does something
+/// with what this returns".
+fn result_used_elsewhere(root: Node, src: &str, owner: Node, name: &str) -> bool {
+    let mut used = false;
+    walk(root, &mut |n: Node| {
+        if used || n.kind() != "call_expression" {
+            return;
+        }
+        if n.start_byte() >= owner.start_byte() && n.end_byte() <= owner.end_byte() {
+            return;
+        }
+        if !reaches(n, src, owner, name) {
+            return;
+        }
+        used = result_is_used(n);
+    });
+    used
+}
+
+/// The `async` names a file declares, split by how a call could reach them: a
+/// function or arrow bound to a name is called directly, a method only through
+/// an object. Keeping them apart is what stops `renderer.unmount()` matching the
+/// file's own `async function unmount`.
+#[derive(Default)]
+struct Asyncs {
+    functions: HashSet<String>,
+    methods: HashSet<String>,
+}
+
+fn async_names(root: Node, src: &str) -> Asyncs {
+    let mut out = Asyncs::default();
+    walk(root, &mut |n: Node| {
+        let (holder, name, methods) = match n.kind() {
+            "function_declaration" => (n, n.child_by_field_name("name"), false),
+            "method_definition" => (n, n.child_by_field_name("name"), true),
+            "variable_declarator" => match n.child_by_field_name("value") {
+                Some(v) if matches!(v.kind(), "arrow_function" | "function_expression") => {
+                    (v, n.child_by_field_name("name"), false)
+                }
+                _ => return,
+            },
+            _ => return,
+        };
+        if let Some(name) = name.filter(|_| has_keyword(holder, "async")) {
+            let set = if methods { &mut out.methods } else { &mut out.functions };
+            set.insert(text(name, src).to_string());
+        }
+    });
+    out
+}
+
+/// What a bare call statement targets, as far as one file can tell.
+enum Callee<'a> {
+    /// `name(...)`, which reaches a function or arrow the file declares.
+    Bare(&'a str),
+    /// `this.name(...)`, the one object a single file can resolve.
+    ThisMethod(&'a str),
+}
+
+/// The target of a call standing alone as a statement, or `None` when the
+/// statement is not a bare call or the callee is not something the file can
+/// resolve.
+fn floating_callee<'a>(stmt: Node, src: &'a str) -> Option<Callee<'a>> {
+    if stmt.kind() != "expression_statement" {
+        return None;
+    }
+    // An `await`ed or `void`ed call is an `await_expression` or a
+    // `unary_expression`, so both fall out here rather than needing a check. So
+    // does a settled promise: the callee of `f().then(g)` is a member of a call
+    // expression, and a call expression is not `this`.
+    let call = stmt.named_child(0).filter(|c| c.kind() == "call_expression")?;
+    let callee = call.child_by_field_name("function")?;
+    match callee.kind() {
+        "identifier" => Some(Callee::Bare(text(callee, src))),
+        "member_expression" if callee.child_by_field_name("object")?.kind() == "this" => {
+            Some(Callee::ThisMethod(text(callee.child_by_field_name("property")?, src)))
+        }
+        _ => None,
+    }
+}
+
+fn scan(rule: &SwallowedError, file: &ParsedFile) -> Vec<Finding> {
+    let root = file.tree.root_node();
+    let src = &file.source;
+    let asyncs = async_names(root, src);
+    let mut out: Vec<Finding> = Vec::new();
+    walk(root, &mut |n: Node| {
+        if n.kind() == "catch_clause" {
+            let body = catch_body_nodes(n);
+            // Form 2 is about what the catch does, and a comment beside a
+            // `console.error` does not change that, so it judges the statements
+            // with the comments dropped. A body that is nothing but comments has
+            // no statements, and `all` over nothing is true, so it is excluded
+            // here rather than falling through as a log-only catch.
+            let stmts: Vec<Node> = body.iter().copied().filter(|c| c.kind() != "comment").collect();
+            let at = line(n);
+            if body.is_empty() {
+                out.push(finding(rule, file, at, line_text(file, at), EMPTY_FIX));
+            } else if !stmts.is_empty() && stmts.iter().all(|s| console_only(*s, src)) {
+                if let Some((owner, name)) = enclosing_function(n, src) {
+                    if result_used_elsewhere(root, src, owner, &name) {
+                        let evidence = format!("catch in {name} only logs; callers use its result");
+                        let mut f = finding(rule, file, at, &evidence, LOG_ONLY_FIX);
+                        f.confidence = Confidence::Medium;
+                        out.push(f);
+                    }
+                }
+            }
+            return;
+        }
+        let floating = match floating_callee(n, src) {
+            Some(Callee::Bare(name)) => asyncs.functions.contains(name),
+            Some(Callee::ThisMethod(name)) => asyncs.methods.contains(name),
+            None => false,
+        };
+        if floating {
+            let at = line(n);
+            out.push(finding(rule, file, at, line_text(file, at), FLOATING_FIX));
+        }
+    });
+    out.sort_by_key(|f| (f.span.start_line, f.span.start_col));
+    out
+}
+
+impl Rule for SwallowedError {
+    fn id(&self) -> &'static str {
+        "swallowed-error"
+    }
+    fn description(&self) -> &'static str {
+        "An error that nothing acts on: an empty catch, a log-only catch, or an unheld promise"
+    }
+    fn scope(&self) -> Scope {
+        Scope::File
+    }
+    fn category(&self) -> Category {
+        Category::Erosion
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    /// High is the rule's own answer, which an empty catch and a floating
+    /// promise keep. The log-only form lowers its findings to Medium after
+    /// construction, because "the caller uses the result" is read off call
+    /// sites in one file and not off types.
+    fn confidence(&self) -> Confidence {
+        Confidence::High
+    }
+
+    /// Off by default after three measurements on the five corpus repositories
+    /// (see
+    /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+    /// 100 findings with 0 of 20 sampled worth acting on, then 11 with 0 of 11,
+    /// then 5 with 0 of 5. Two of the three forms now find nothing at all on 2674
+    /// indexed files: no catch there is empty of everything, and no caller uses a
+    /// log-only function's result in a way that reads a value back. What is left
+    /// is form 3, and all five are the same React effect: an `async function
+    /// load()` whose whole body is one try/catch, called as a statement, so the
+    /// promise nobody holds is a promise that cannot reject. Seeing that needs the
+    /// callee's body read as well as its call site, which this rule does not do
+    /// and which is not a contained fix the way the first two were. Nothing the
+    /// rule has said on 2674 real files was worth acting on, so it stays opt-in.
+    /// A repository that wants the rule as a review aid
+    /// turns it on with
+    ///
+    /// ```toml
+    /// [rules.swallowed-error]
+    /// enabled = true
+    /// ```
+    ///
+    /// and baselines what it means to keep, or marks those catches
+    /// `locrin:allow` one at a time.
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+
+    fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+        Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
+    }
+}

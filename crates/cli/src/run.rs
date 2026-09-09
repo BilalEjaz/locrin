@@ -13,9 +13,10 @@ use locrin_core::index::{content_hash, file_stat, Index};
 use locrin_core::indexer;
 use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
+use locrin_core::previous::Previous;
 use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
-use locrin_rules::{file_rules, graph_rules, run_file_rules, run_rules, RuleContext};
+use locrin_rules::{file_rules, graph_rules, rule_runs, run_file_rules, run_rules, RuleContext};
 use rayon::prelude::*;
 
 pub struct Options {
@@ -23,6 +24,10 @@ pub struct Options {
     pub paths: Vec<PathBuf>,
     pub changed_only: bool,
     pub json: bool,
+    /// Never touch the network. See spec 9: the run serves the cached advisory
+    /// snapshot or skips the rule that would have fetched, and never fails
+    /// because a network call could not be made.
+    pub offline: bool,
     /// The scope taken from git rather than from the command line: a pull
     /// request's working tree against its base, or the commits since a tag.
     pub diff: Option<crate::git::DiffScope>,
@@ -33,6 +38,13 @@ struct Run {
     findings: Vec<Finding>,
     files: usize,
     changed: usize,
+    /// What the pass learned about the previous version of the files it reported
+    /// for. The CLI needs only the findings; this exists so a test can check the
+    /// capture without re-running the whole pipeline by hand, and so it is
+    /// compiled only into the test build rather than carrying a dead-code
+    /// suppression through production code.
+    #[cfg(test)]
+    previous: Previous,
 }
 
 /// The two things that decide whether a cached row may be served: the hash of
@@ -74,6 +86,11 @@ struct Indexed {
     /// The read behind every file in `files`, for the findings cache written
     /// once the rules have run.
     reads: HashMap<String, FileRead>,
+    /// What the index said about each changed file before this run overwrote it.
+    /// A file with an entry has a known previous version; a file without one
+    /// (never indexed, or unchanged and served from the cache) does not. See the
+    /// capture in the recording pass below.
+    previous: Previous,
 }
 
 /// How much of the repository one pass has to answer for, which is the one
@@ -110,6 +127,10 @@ struct Parsed {
     is_changed: bool,
     stat: (i64, i64),
     file: Option<ParsedFile>,
+    /// The cases this version of the file skips, empty for anything that is not
+    /// a test file. Computed here rather than in the indexer because it is a
+    /// tree walk and the indexer runs on the single index-connection thread.
+    skipped: Vec<String>,
 }
 
 /// The files named on the command line, canonical and inside the root, or None
@@ -166,6 +187,36 @@ fn serve(cached: &HashMap<String, CachedFile>, rel: &str, hash: &str, key: &Cach
         out.extend(entry.by_rule.get(*rule)?.iter().cloned());
     }
     Some(out)
+}
+
+/// The test cases `rel` skipped at `rev`, for the git-sourced half of the
+/// previous snapshot.
+///
+/// A file that was not there at that revision, or that will not parse, skipped
+/// nothing: everything in the version on disk is new, which is the answer a
+/// newly added test file needs.
+///
+/// Only test files are read. The snapshot holds nothing else yet, and a `--base`
+/// run against a large pull request would otherwise fetch and parse every changed
+/// file a second time (they are all parsed at HEAD already) to learn nothing. A
+/// later field that needs the whole previous file widens this.
+///
+/// None means "this revision has nothing trustworthy to say about the file", and
+/// the caller records no entry for it rather than a wrong one. That is what a
+/// base version with parse errors gives: tree-sitter recovers from a syntax
+/// error by dropping nodes, so an `it.skip` that was there can be missing from
+/// the extraction, and asserting the empty set from a recovered tree would call
+/// an old skip a new one and would also overwrite whatever the index knew.
+fn skipped_at(root: &Path, rev: &str, rel: &str) -> anyhow::Result<Option<HashSet<String>>> {
+    if !locrin_core::testcases::is_test_file(rel) {
+        return Ok(Some(HashSet::new()));
+    }
+    let Some(source) = crate::git::show_at(root, rev, rel)? else { return Ok(Some(HashSet::new())) };
+    let Some(file) = parse_source(&root.join(rel), rel, source) else { return Ok(Some(HashSet::new())) };
+    if file.has_error {
+        return Ok(None);
+    }
+    Ok(Some(locrin_core::testcases::extract(&file).into_iter().filter(|c| c.skipped).map(|c| c.name).collect()))
 }
 
 /// The files whose edges touch any file in `set`, in either direction, in the
@@ -230,6 +281,7 @@ fn index_files(
     let mut changed: HashSet<String> = HashSet::new();
     let mut before: HashSet<String> = HashSet::new();
     let mut reads: HashMap<String, FileRead> = HashMap::new();
+    let mut previous = Previous::default();
     let mut present: Vec<String> = Vec::with_capacity(candidates.len());
     let mut any_new = false;
     ix.begin()?;
@@ -301,28 +353,54 @@ fn index_files(
     // Parsing is the single largest cost of a cold run and needs nothing but the
     // source text, so it runs across the pool. `collect` keeps candidate order,
     // which is what the recording pass below and the returned `files` rely on.
+    //
+    // The skipped-case walk goes here for the same reason: the recording pass
+    // below owns the index connection and runs on one thread, so a tree walk it
+    // did would be serial time nothing else can overlap.
     let parsed: Vec<Parsed> = pending
         .into_par_iter()
         .map(|p| {
             let Pending { path, rel, hash, is_changed, source, stat } = p;
             let file = parse_source(&path, &rel, source);
-            Parsed { hash, is_changed, stat, file }
+            let skipped = file.as_ref().map(locrin_core::testcases::skipped_names).unwrap_or_default();
+            Parsed { hash, is_changed, stat, file, skipped }
         })
         .collect();
-    for Parsed { hash, is_changed, stat, file } in parsed {
+    for Parsed { hash, is_changed, stat, file, skipped } in parsed {
         let Some(parsed) = file else { continue };
         if parsed.has_error {
             eprintln!("warning: parse errors in {}; excluded from rules", parsed.rel);
         }
         if is_changed {
             changed.insert(parsed.rel.clone());
-            any_new |= ix.file_hash(&parsed.rel)?.is_none();
-            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
+            // What the index holds right now describes the version this run is
+            // about to replace, so it is the previous version and it has to be
+            // read before the record below overwrites it. A file with no `files`
+            // row has no previous version at all, which is not the same as one
+            // whose previous version skipped nothing: no entry is recorded for
+            // it, and a rule reads that as "everything here is new".
+            let known = ix.file_hash(&parsed.rel)?.is_some();
+            any_new |= !known;
+            if known {
+                let was = ix.skipped_tests(&parsed.rel)?;
+                previous.skipped_tests.insert(parsed.rel.clone(), was);
+            }
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat, &skipped)?;
             // Whatever the cache holds for this file describes bytes that are
             // gone. The rows this run writes replace them, and until it does the
             // absence is the safe state: a miss costs a parse, a stale hit
             // reports findings from a version nobody can see.
             cache::clear(ix, &parsed.rel)?;
+        } else if ix.file_hash(&parsed.rel)?.is_some() {
+            // An unchanged file that reached the parser is one a narrowed run
+            // named (or one a full run could not serve from the cache), and the
+            // rules are about to run over it. It is unchanged, so what the index
+            // holds for it is both its stored version and its previous one, and
+            // without an entry a rule that answers with a change reads it as
+            // having no history and reports every skip in it as new, on every
+            // run. The repair pass below captures the same thing for the same
+            // reason.
+            previous.skipped_tests.insert(parsed.rel.clone(), ix.skipped_tests(&parsed.rel)?);
         }
         reads.insert(parsed.rel.clone(), FileRead { hash, stat });
         files.push(parsed);
@@ -333,6 +411,13 @@ fn index_files(
     // comes back the edges would stay unresolved and the graph rules would call
     // the returned file dead. So whenever a run records a file the index had not
     // seen before, re-record the importers that still hold an unresolved edge.
+    //
+    // Every file this pass touches is unchanged, so what the index holds for it
+    // is both its stored version and its previous one, and it has to be captured
+    // here: the repair puts the file into `files`, the rules then run over it,
+    // and without an entry a rule that answers with a change would read an
+    // untouched file as having no known previous version and report every skip
+    // in it as new.
     if any_new {
         let by_rel: HashMap<String, &PathBuf> = candidates.iter().map(|p| (rel_path(root, p), p)).collect();
         for rel in ix.files_with_unresolved_edges()? {
@@ -342,7 +427,9 @@ fn index_files(
             // An importer this run already parsed is re-recorded from what is in
             // hand: reading and parsing it again would build the same tree.
             if let Some((file, read)) = files.iter().find(|f| f.rel == rel).zip(reads.get(&rel)) {
-                indexer::record_with_stat(ix, file, &read.hash, resolver, read.stat)?;
+                previous.skipped_tests.insert(rel.clone(), ix.skipped_tests(&rel)?);
+                let skipped = locrin_core::testcases::skipped_names(file);
+                indexer::record_with_stat(ix, file, &read.hash, resolver, read.stat, &skipped)?;
                 continue;
             }
             let Some(path) = by_rel.get(&rel) else { continue };
@@ -350,7 +437,9 @@ fn index_files(
             let stat = file_stat(path);
             let Some((source, hash)) = read_source(path)? else { continue };
             let Some(parsed) = parse_source(path, &rel, source) else { continue };
-            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
+            previous.skipped_tests.insert(rel.clone(), ix.skipped_tests(&rel)?);
+            let skipped = locrin_core::testcases::skipped_names(&parsed);
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat, &skipped)?;
             reads.insert(rel.clone(), FileRead { hash, stat });
             files.push(parsed);
         }
@@ -379,7 +468,7 @@ fn index_files(
     // would be the same answer a second time, so the parse wins.
     let parsed_rels: HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
     served.retain(|f| !parsed_rels.contains(f.file.as_str()));
-    Ok(Indexed { files, served, changed, before, reads })
+    Ok(Indexed { files, served, changed, before, reads, previous })
 }
 
 /// One row per (file this run parsed, enabled file rule), so the next run can
@@ -465,8 +554,7 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let mut ix = if record { Index::open(root)? } else { Index::open_in_memory()? };
 
     let rules = file_rules();
-    let enabled: Vec<&'static str> =
-        rules.iter().filter(|r| config.rule_enabled_or(r.id(), r.enabled_by_default())).map(|r| r.id()).collect();
+    let enabled: Vec<&'static str> = rules.iter().filter(|r| rule_runs(r.as_ref(), &config)).map(|r| r.id()).collect();
     let config_hash = cache::config_hash(&config);
     let key = CacheKey { config_hash: &config_hash, enabled: &enabled };
 
@@ -481,7 +569,22 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // neither, so it does not pay to build them.
     let scope_is_watermark = scope.is_none() && opts.changed_only;
     let plan = Plan { report_all, scope: scope.as_ref(), capture_before: scope_is_watermark };
-    let indexed = index_files(root, &candidates, &plan, &key, &resolver, &mut ix)?;
+    let mut indexed = index_files(root, &candidates, &plan, &key, &resolver, &mut ix)?;
+    // The index's memory of each changed file, captured before it was overwritten.
+    let mut previous = std::mem::take(&mut indexed.previous);
+    // For a diff scope git is the better witness and overrides it. The index
+    // remembers the last run, which on a fresh CI clone is nothing at all and on
+    // a warm one is whenever the developer last ran locrin; the base commit is
+    // the "before" a pull request is actually judged against, and it is the same
+    // commit `changed_files` diffed to build this scope.
+    if let Some(diff) = &opts.diff {
+        let rev = crate::git::base_rev(root, diff)?;
+        for rel in scope.iter().flatten() {
+            if let Some(was) = skipped_at(root, &rev, rel)? {
+                previous.skipped_tests.insert(rel.clone(), was);
+            }
+        }
+    }
 
     let entries = EntryPoints::detect(root, &config.entry_points)?;
     // The file rules go across the pool, a file at a time: five rules over a
@@ -490,9 +593,18 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // over the whole index: they are SQL and a change anywhere can move their
     // answer. The borrow of `ix` ends inside this block, before the cache write
     // takes it mutably.
-    let fresh = run_file_rules(&rules, &indexed.files, &config, &entries)?;
+    let base = RuleContext {
+        files: &indexed.files,
+        config: &config,
+        index: None,
+        entries: &entries,
+        root,
+        offline: opts.offline,
+        previous: &previous,
+    };
+    let fresh = run_file_rules(&rules, &indexed.files, &base)?;
     let graph = {
-        let ctx = RuleContext { files: &indexed.files, config: &config, index: Some(&ix), entries: &entries };
+        let ctx = RuleContext { index: Some(&ix), ..base };
         run_rules(&graph_rules(), &ctx)?
     };
     if record {
@@ -536,7 +648,13 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         graph.retain(|f| wide.contains(&f.file));
     }
     findings.extend(graph);
-    Ok(Run { findings, files, changed })
+    Ok(Run {
+        findings,
+        files,
+        changed,
+        #[cfg(test)]
+        previous,
+    })
 }
 
 /// Every current finding for a run, with the index updated when `record`.
@@ -557,9 +675,9 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
 
 /// Indexes the repository and warms the findings cache, so the first `check`
 /// after it (a hook, say) pays for nothing but the files that changed since.
-pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
+pub fn scan(root: &Path, offline: bool) -> anyhow::Result<(usize, usize)> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
     let run = pass(&root, &opts, true)?;
     Ok((run.files, run.changed))
 }
@@ -568,7 +686,8 @@ pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
 /// baseline already holds: `create` is a fresh line in the sand, not a merge.
 pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
+    let opts =
+        Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: false, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::default();
     for f in &findings {
@@ -583,7 +702,8 @@ pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
 /// an entry that suppresses nothing.
 pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bool> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
+    let opts =
+        Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: false, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };
@@ -591,4 +711,94 @@ pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bo
     b.accept(f, reason, &author);
     b.save(&root)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `LOCRIN_CACHE_DIR` is process-wide and every test here sets it, so the
+    /// tests in this module take turns rather than racing over it. Poisoning is
+    /// ignored: a panicking test has already failed and must not take the rest
+    /// of the module down with it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The rules that answer with a change rather than a state need to know what
+    /// the file used to say, and for a `--changed` run the index is where that
+    /// comes from: it holds the last recorded version until this run replaces it.
+    ///
+    /// A first run has no previous version for anything, and reporting one would
+    /// make every legacy skip in a repository look like it was introduced by
+    /// whoever happened to run locrin first.
+    #[test]
+    fn a_changed_run_reads_what_the_previous_version_skipped() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // The index path comes from the environment, which the lock above keeps
+        // this test's for as long as it runs.
+        std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
+        let root = canonical_root(dir.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let rel = "src/a.test.ts";
+        let path = root.join(rel);
+        std::fs::write(&path, "it.skip(\"one\", () => {});\nit(\"two\", () => {});\n").unwrap();
+
+        let full =
+            Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: true, diff: None };
+        let first = pass(&root, &full, true).unwrap();
+        assert!(
+            first.previous.skipped_tests.is_empty(),
+            "a file the index had never seen has no previous version: {:?}",
+            first.previous.skipped_tests
+        );
+
+        std::fs::write(&path, "it.skip(\"one\", () => {});\nit.skip(\"two\", () => {});\n").unwrap();
+        let changed = Options { changed_only: true, ..full };
+        let second = pass(&root, &changed, true).unwrap();
+        assert_eq!(
+            second.previous.skipped_tests.get(rel),
+            Some(&HashSet::from(["one".to_string()])),
+            "the run has to see the version it replaced, where only the first case was skipped"
+        );
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+    }
+
+    /// A run that indexes a file it has never seen re-records the unchanged
+    /// importers that still hold an unresolved edge, and those files then go to
+    /// the rules like any other. They are unchanged, so the index still holds
+    /// their previous version, and the pass has to capture it: without that, a
+    /// pull request that adds one new file would make every skipped test in
+    /// every unresolved importer look like it was skipped by this change.
+    #[test]
+    fn the_repair_pass_captures_the_previous_version_of_the_files_it_re_records() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
+        let root = canonical_root(dir.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // The unresolved import is what puts this file in the repair pass, and
+        // the skip is what the pass has to remember about it.
+        let rel = "src/a.test.ts";
+        std::fs::write(root.join(rel), "import { gone } from \"./missing\";\nit.skip(\"one\", () => { gone(); });\n")
+            .unwrap();
+
+        let full =
+            Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: true, diff: None };
+        pass(&root, &full, true).unwrap();
+
+        // A file the index has never seen is what triggers the repair pass; the
+        // test file itself is untouched.
+        std::fs::write(root.join("src/b.ts"), "export const b = 1;\n").unwrap();
+        let changed = Options { changed_only: true, ..full };
+        let second = pass(&root, &changed, true).unwrap();
+        assert_eq!(
+            second.previous.skipped_tests.get(rel),
+            Some(&HashSet::from(["one".to_string()])),
+            "an unchanged file the repair pass re-recorded still has the version the index held: {:?}",
+            second.previous.skipped_tests
+        );
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+    }
 }

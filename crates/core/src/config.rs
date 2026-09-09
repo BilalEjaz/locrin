@@ -32,6 +32,39 @@ pub struct Boundary {
     pub allow: Vec<String>,
 }
 
+/// What the repository's framework looks like, for the rules that cannot tell
+/// from the source alone (spec 7.5). Both lists are hints: a repository that
+/// says nothing gets the defaults, and a rule that needs a hint the repository
+/// has not given says so rather than guessing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Framework {
+    /// Identifiers that mark a route as authenticated, e.g. `["requireAuth", "authenticate"]`.
+    /// Empty by default: no name can be guessed, and `express-route-without-auth`
+    /// runs only when the repository has named one.
+    pub auth_middleware: Vec<String>,
+    /// Globs for code that runs on a server and may hold a Supabase service-role
+    /// key. A key under one of these is not client exposure.
+    pub server_paths: Vec<String>,
+}
+
+impl Default for Framework {
+    fn default() -> Self {
+        Framework {
+            auth_middleware: vec![],
+            server_paths: vec![
+                "supabase/functions/**".into(),
+                "server/**".into(),
+                "api/**".into(),
+                "scripts/**".into(),
+                "**/*.server.*".into(),
+                "**/*.test.*".into(),
+                "**/*.spec.*".into(),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -39,6 +72,7 @@ pub struct Config {
     pub debug_allowed: Vec<String>,
     pub entry_points: Vec<String>,
     pub boundaries: Vec<Boundary>,
+    pub framework: Framework,
     pub rules: BTreeMap<String, RuleOverride>,
 }
 
@@ -49,6 +83,7 @@ impl Default for Config {
             debug_allowed: vec!["**/scripts/**".into(), "**/*.config.*".into(), "**/bin/**".into()],
             entry_points: vec![],
             boundaries: vec![],
+            framework: Framework::default(),
             rules: BTreeMap::new(),
         }
     }
@@ -77,10 +112,11 @@ impl Config {
     /// Checks that every configured glob compiles, naming the one that does not,
     /// and that every boundary reads one way and names the files it rules on.
     fn validate_globs(&self) -> anyhow::Result<()> {
-        let lists: [(&str, &Vec<String>); 3] = [
+        let lists: [(&str, &Vec<String>); 4] = [
             ("excludes", &self.excludes),
             ("debug_allowed", &self.debug_allowed),
             ("entry_points", &self.entry_points),
+            ("framework.server_paths", &self.framework.server_paths),
         ];
         for (field, globs) in lists {
             for g in globs {
@@ -281,5 +317,48 @@ mod tests {
         std::fs::write(path(&dir).join(CONFIG_FILE), "entry_points = [\"tools/[\"]\n").unwrap();
         let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
         assert!(err.contains("tools/["), "{err}");
+    }
+
+    /// The framework hints of spec 7.5. `auth_middleware` is empty by default
+    /// because no name can be guessed for a repository the engine has not been
+    /// told about; `server_paths` ships with the places server code usually
+    /// lives, so a service-role key there is not reported as client exposure.
+    #[test]
+    fn parses_framework_section() {
+        let dir = fresh("config13");
+        std::fs::write(
+            path(&dir).join(CONFIG_FILE),
+            "[framework]\nauth_middleware = [\"requireAuth\"]\nserver_paths = [\"backend/**\"]\n",
+        )
+        .unwrap();
+        let c = Config::load(path(&dir)).unwrap();
+        assert_eq!(c.framework.auth_middleware, vec!["requireAuth"]);
+        assert_eq!(c.framework.server_paths, vec!["backend/**"]);
+
+        let d = Framework::default();
+        assert!(d.auth_middleware.is_empty(), "no middleware name is guessed");
+        assert!(d.server_paths.iter().any(|g| g == "supabase/functions/**"), "{:?}", d.server_paths);
+        assert!(d.server_paths.iter().any(|g| g == "**/*.test.*"), "{:?}", d.server_paths);
+        assert_eq!(Config::default().framework, d, "the config's default framework is the framework default");
+    }
+
+    #[test]
+    fn an_unknown_framework_key_is_an_error() {
+        let dir = fresh("config14");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[framework]\nauth_middlewares = [\"x\"]\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains(CONFIG_FILE), "{err}");
+        assert!(err.contains("auth_middlewares"), "{err}");
+    }
+
+    /// `server_paths` is a glob list like every other, so a typo in it fails at
+    /// the config rather than being dropped by whichever rule compiles it.
+    #[test]
+    fn an_invalid_server_path_glob_is_an_error() {
+        let dir = fresh("config15");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[framework]\nserver_paths = [\"server/[\"]\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains("server/["), "{err}");
+        assert!(err.contains(CONFIG_FILE), "{err}");
     }
 }

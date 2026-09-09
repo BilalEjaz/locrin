@@ -48,9 +48,18 @@ enum Cmd {
         /// Files changed by the commits in REF..HEAD (the deployment gate)
         #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "base"])]
         since: Option<String>,
+        /// Never touch the network; use the cached advisory snapshot or skip
+        /// vulnerable-dependency with a warning
+        #[arg(long)]
+        offline: bool,
     },
     /// Index the repository and warm the findings cache without printing a verdict
-    Scan,
+    Scan {
+        /// Never touch the network; use the cached advisory snapshot or skip
+        /// vulnerable-dependency with a warning
+        #[arg(long)]
+        offline: bool,
+    },
     /// Manage the baseline of accepted findings
     Baseline {
         #[command(subcommand)]
@@ -77,9 +86,9 @@ fn real_main() -> anyhow::Result<i32> {
         None => std::env::current_dir()?,
     };
     match cli.cmd {
-        Cmd::Check { paths, changed, json, sarif, base, since } => {
+        Cmd::Check { paths, changed, json, sarif, base, since, offline } => {
             let diff = base.map(git::DiffScope::Base).or(since.map(git::DiffScope::Since));
-            let opts = run::Options { root, paths, changed_only: changed, json, diff };
+            let opts = run::Options { root, paths, changed_only: changed, json, offline, diff };
             let verdict = run::check(&opts)?;
             if sarif {
                 let rules: Vec<locrin_reporters::sarif::RuleMeta> = locrin_rules::all_rules()
@@ -102,8 +111,8 @@ fn real_main() -> anyhow::Result<i32> {
             }
             Ok(verdict.exit_code())
         }
-        Cmd::Scan => {
-            let (files, changed) = run::scan(&root)?;
+        Cmd::Scan { offline } => {
+            let (files, changed) = run::scan(&root, offline)?;
             println!("indexed {files} file(s), {changed} changed");
             Ok(0)
         }

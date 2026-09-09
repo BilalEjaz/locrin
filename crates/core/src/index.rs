@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SCHEMA_VERSION: &str = "3";
+pub const SCHEMA_VERSION: &str = "4";
 
 /// How long a statement waits for another process holding the same index before
 /// it gives up.
@@ -60,13 +61,38 @@ CREATE TABLE IF NOT EXISTS findings_cache (
   findings TEXT NOT NULL,
   PRIMARY KEY (rel, rule)
 );
+CREATE TABLE IF NOT EXISTS skipped_tests (
+  rel TEXT NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY (rel, name)
+);
+CREATE TABLE IF NOT EXISTS osv_batch (
+  lock_hash TEXT PRIMARY KEY,
+  fetched_at INTEGER NOT NULL,
+  json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS osv_vulns (
+  id TEXT PRIMARY KEY,
+  fetched_at INTEGER NOT NULL,
+  json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
 /// Every table that holds rows keyed by a file's repo-relative path. `remove_missing`
 /// walks this list so a file that leaves the repository leaves every table.
-const PER_FILE_TABLES: &[(&str, &str)] =
-    &[("symbols", "rel"), ("edges", "from_rel"), ("allow_lines", "rel"), ("findings_cache", "rel"), ("files", "rel")];
+///
+/// The two OSV tables are not here: they are keyed by a lockfile hash and by an
+/// advisory id, and they are a snapshot of what a registry said, not a statement
+/// about any one file in this repository.
+const PER_FILE_TABLES: &[(&str, &str)] = &[
+    ("symbols", "rel"),
+    ("edges", "from_rel"),
+    ("allow_lines", "rel"),
+    ("skipped_tests", "rel"),
+    ("findings_cache", "rel"),
+    ("files", "rel"),
+];
 
 pub fn content_hash(source: &str) -> String {
     blake3::hash(source.as_bytes()).to_hex().to_string()
@@ -436,6 +462,35 @@ impl Index {
         })
     }
 
+    /// Records which test cases in `rel` the runner will skip, replacing whatever
+    /// was stored before. This is the memory that lets a later run tell a test
+    /// skipped in this change from one that was already skipped: the run reads
+    /// the stored set before it re-records the file, and what it reads is what
+    /// the previous version of that file said.
+    ///
+    /// Names are a set, so two cases sharing a name store one row. A test file
+    /// with no skipped case stores nothing, which is not the same as a file the
+    /// index has never seen: the caller learns which of the two it has from the
+    /// `files` row, not from this table.
+    pub fn replace_skipped_tests(&mut self, rel: &str, names: &[String]) -> anyhow::Result<()> {
+        self.savepoint("skipped_tests", |tx| {
+            tx.execute("DELETE FROM skipped_tests WHERE rel = ?1", params![rel])?;
+            let mut stmt = tx.prepare("INSERT OR IGNORE INTO skipped_tests(rel, name) VALUES (?1, ?2)")?;
+            for name in names {
+                stmt.execute(params![rel, name])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The names of the test cases `rel` was last recorded as skipping. Empty for
+    /// a file that skipped nothing and for a file the index has never seen.
+    pub fn skipped_tests(&self, rel: &str) -> anyhow::Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT name FROM skipped_tests WHERE rel = ?1")?;
+        let rows = stmt.query_map(params![rel], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn is_allowed(&self, rel: &str, line: u32) -> anyhow::Result<bool> {
         let n: i64 = self.conn.query_row(
             "SELECT count(*) FROM allow_lines WHERE rel = ?1 AND line = ?2",
@@ -463,7 +518,7 @@ impl Index {
         let mut stmt = self.conn.prepare("SELECT rel FROM files")?;
         let existing: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         drop(stmt);
-        let keep: std::collections::HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
+        let keep: HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
         self.savepoint("remove_missing", |tx| {
             let mut removed = 0;
             for rel in existing.iter().filter(|r| !keep.contains(r.as_str())) {
@@ -641,6 +696,37 @@ mod tests {
         assert!(ix.is_allowed("src/a.ts", 4).unwrap());
     }
 
+    /// The skipped set is per file and replaces wholesale, because it stands for
+    /// "what this version of the file skips". A name that leaves the file has to
+    /// leave the table, or re-skipping it later would look like an old decision.
+    #[test]
+    fn skipped_tests_round_trip_and_replace() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert!(ix.skipped_tests("src/a.test.ts").unwrap().is_empty(), "a file the index never saw skips nothing");
+
+        ix.replace_skipped_tests("src/a.test.ts", &["one".to_string(), "two".to_string()]).unwrap();
+        assert_eq!(
+            ix.skipped_tests("src/a.test.ts").unwrap(),
+            HashSet::from(["one".to_string(), "two".to_string()]),
+            "both names come back"
+        );
+        assert!(ix.skipped_tests("src/b.test.ts").unwrap().is_empty(), "the set is per file");
+
+        ix.replace_skipped_tests("src/a.test.ts", &["two".to_string()]).unwrap();
+        assert_eq!(
+            ix.skipped_tests("src/a.test.ts").unwrap(),
+            HashSet::from(["two".to_string()]),
+            "replace must drop the names that are no longer skipped"
+        );
+
+        // Two cases can share a name; the memory is a set, not a count.
+        ix.replace_skipped_tests("src/c.test.ts", &["same".to_string(), "same".to_string()]).unwrap();
+        assert_eq!(ix.skipped_tests("src/c.test.ts").unwrap(), HashSet::from(["same".to_string()]));
+
+        ix.replace_skipped_tests("src/a.test.ts", &[]).unwrap();
+        assert!(ix.skipped_tests("src/a.test.ts").unwrap().is_empty(), "a file that skips nothing stores nothing");
+    }
+
     #[test]
     fn parse_status_and_file_list() {
         let mut ix = Index::open_in_memory().unwrap();
@@ -658,6 +744,7 @@ mod tests {
         let mut ix = Index::open_in_memory().unwrap();
         ix.upsert_file("a.ts", "typescript", "1", "ok").unwrap();
         ix.replace_allow_lines("a.ts", &[1]).unwrap();
+        ix.replace_skipped_tests("a.ts", &["one".to_string()]).unwrap();
         let c = ix.conn();
         c.execute(
             "INSERT INTO symbols(rel, kind, name, start_line, start_col, end_line, end_col, exported)
@@ -677,7 +764,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ix.remove_missing(&[]).unwrap(), 1);
-        for table in ["files", "symbols", "edges", "allow_lines", "findings_cache"] {
+        for table in ["files", "symbols", "edges", "allow_lines", "skipped_tests", "findings_cache"] {
             let n: i64 = ix.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
             assert_eq!(n, 0, "{table} still has rows for a removed file");
         }
