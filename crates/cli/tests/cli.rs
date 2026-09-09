@@ -584,3 +584,35 @@ fn config_change_invalidates_the_cache() {
     let debug = v["findings"].as_array().unwrap().iter().find(|f| f["rule"] == "leftover-debug").unwrap();
     assert_eq!(debug["severity"], "low", "{v}");
 }
+
+/// The repair pass reads an importer the cache had already answered for, and the
+/// rules then produce that file's findings a second time. Whatever the cache
+/// served for a file the run ended up parsing has to give way, or one restored
+/// target makes its importer report every finding twice.
+#[test]
+fn a_repaired_importer_is_not_reported_twice() {
+    let dir = copy_fixture();
+    let b_source = "export function helper(): number {\n  return 1;\n}\n";
+    std::fs::write(
+        dir.path().join("src/a.ts"),
+        "import { helper } from \"./b\";\nconsole.log(helper());\nexport const v = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/b.ts"), b_source).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+    std::fs::remove_file(dir.path().join("src/b.ts")).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    // b.ts is back, so a.ts is re-recorded to resolve its edge again even though
+    // the cache had already answered for it.
+    std::fs::write(dir.path().join("src/b.ts"), b_source).unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let n = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["file"] == "src/a.ts" && f["rule"] == "leftover-debug")
+        .count();
+    assert_eq!(n, 1, "{v}");
+}
