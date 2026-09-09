@@ -1131,3 +1131,75 @@ fn base_reports_a_test_skipped_since_the_base_commit_and_not_one_the_base_alread
     assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
     assert!(newly_skipped(&v).is_empty(), "the base commit already skipped it: {v}");
 }
+
+/// A lockfileVersion 3 `package-lock.json` with one installed package, written
+/// into a scratch copy of the fixture rather than committed beside it: every
+/// other test in this file shares that fixture and none of them should start
+/// paying for an advisory rule.
+const LOCK: &str = r#"{
+  "name": "scope-fixture",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "scope-fixture",
+      "version": "1.0.0",
+      "dependencies": { "left-pad": "^1.3.0" }
+    },
+    "node_modules/left-pad": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"
+    }
+  }
+}
+"#;
+
+/// `vulnerable-dependency` answers for the lockfile, and the lockfile is not a
+/// source file: no scope's import neighbourhood can ever reach it, so on every
+/// scoped run the rule used to pay its whole cost (the lockfile read, the
+/// snapshot read, and online the requests) and then have every finding thrown
+/// away by the graph filter.
+///
+/// The contract is now that a scoped run runs the rule only when the lockfile is
+/// among the paths the scope itself names, and skips it outright otherwise. The
+/// skip is observed through the warning an offline run with no snapshot prints:
+/// its absence is proof the rule never ran, because a rule that ran would have
+/// printed it.
+///
+/// Everything here is offline, so no test in this file makes a network call.
+#[test]
+fn a_scoped_run_reads_the_lockfile_only_when_the_scope_names_it() {
+    const SKIPPED: &str = "no cached advisory snapshot; vulnerable-dependency skipped";
+    let dir = copy_fixture();
+    std::fs::write(dir.path().join("package-lock.json"), LOCK).unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let stderr = |args: &[&str]| -> String {
+        let out = locrin(dir.path()).args(args).output().unwrap();
+        String::from_utf8(out.stderr).unwrap()
+    };
+
+    // A whole-repository check answers for the lockfile, so the rule runs.
+    let err = stderr(&["check", "--offline"]);
+    assert!(err.contains(SKIPPED), "a whole-repository check runs the rule: {err}");
+
+    // A named source file does not, and neither does anything its imports reach.
+    let err = stderr(&["check", "src/clean.ts", "--offline"]);
+    assert!(!err.contains(SKIPPED), "the rule must not run for a scope that cannot report it: {err}");
+
+    // Naming the lockfile is an instruction to answer for it.
+    let err = stderr(&["check", "package-lock.json", "--offline"]);
+    assert!(err.contains(SKIPPED), "a scope that names the lockfile runs the rule: {err}");
+
+    // `--changed` takes its scope from the index, which holds source files only,
+    // so the lockfile can never be in it however it was edited.
+    std::fs::write(dir.path().join("package-lock.json"), LOCK.replace("1.3.0", "1.3.1")).unwrap();
+    let err = stderr(&["check", "--changed", "--offline"]);
+    assert!(!err.contains(SKIPPED), "--changed cannot see a file that is not indexed: {err}");
+
+    // A diff scope can: git lists every changed file, not only the parsed ones.
+    let err = stderr(&["check", "--base", "HEAD", "--offline"]);
+    assert!(err.contains(SKIPPED), "the lockfile is in the diff, so the rule runs: {err}");
+}

@@ -8,10 +8,22 @@
 //! range: the answer belongs to the advisory database, and this file's whole job
 //! is to turn it into findings a reader can act on.
 //!
-//! Graph scope, so it runs every time. A file rule would never fire, because the
-//! lockfile is not a source file the engine parses, and the answer can change
-//! without any file changing at all: an advisory published this morning affects
-//! a repository nobody has touched.
+//! Graph scope, so it runs on every whole-repository pass. A file rule would
+//! never fire, because the lockfile is not a source file the engine parses, and
+//! the answer can change without any file changing at all: an advisory published
+//! this morning affects a repository nobody has touched.
+//!
+//! Which is also the scoping contract, and the CLI enforces it before the rule
+//! is asked to run (see `lock_in_scope` in `crates/cli/src/run.rs`). A run
+//! narrowed to a scope answers for the lockfile only when the scope names the
+//! lockfile itself: a diff whose git file list includes it, or a path argument
+//! naming it. Any other scope skips the rule outright, reading neither the
+//! lockfile nor the snapshot and making no request, because nothing else can put
+//! the lockfile in scope: it is in no walk, no index and no import
+//! neighbourhood, so every finding would have been discarded after being paid
+//! for. `--changed` is therefore never a run that reports advisories, whatever
+//! was done to the lockfile: that scope is the index's watermark and the index
+//! holds source files only.
 //!
 //! Severity comes from the advisory rather than from the rule, which is why
 //! [`crate::run_rules`] overwrites a finding's severity only when the config

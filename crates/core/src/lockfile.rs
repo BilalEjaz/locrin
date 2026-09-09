@@ -74,6 +74,18 @@ pub fn read(root: &Path) -> anyhow::Result<Option<Lockfile>> {
     Ok(None)
 }
 
+/// The repo-relative path of the lockfile [`read`] would parse, without reading
+/// or parsing it, or `None` when the repository has none.
+///
+/// A run narrowed to a scope has to know whether the lockfile is in that scope
+/// before it decides whether to run the rule that reads it, and that question
+/// must not cost the read the answer may make unnecessary: a `package-lock.json`
+/// is routinely a megabyte or more, and the whole point of the check is that a
+/// scope which cannot report an advisory never opens it.
+pub fn locate(root: &Path) -> Option<&'static str> {
+    CANDIDATES.iter().map(|(name, _)| *name).find(|name| root.join(name).is_file())
+}
+
 /// The key a snapshot of these packages is stored under: `name@version` per
 /// line, sorted, hashed. See [`Lockfile::hash`].
 fn package_hash(packages: &[Package]) -> String {
@@ -289,11 +301,22 @@ mod tests {
         assert_ne!(npm, package_hash(&normalize(more)), "one more package is a different list");
     }
 
+    /// `locate` and `read` have to name the same file: a scoped run decides
+    /// whether to run the advisory rule from `locate` and the rule then reports
+    /// against `read`, so a disagreement would run the rule and discard its
+    /// findings, or skip it over a lockfile that was in scope.
+    #[test]
+    fn locate_names_the_file_read_would_parse() {
+        assert_eq!(locate(&fixtures()), Some("package-lock.json"));
+        assert_eq!(locate(&fixtures()).map(str::to_string), read(&fixtures()).unwrap().map(|l| l.rel));
+    }
+
     #[test]
     fn read_finds_nothing_in_a_directory_without_a_lockfile() {
         let dir = std::env::temp_dir().join(format!("locrin-lockfile-none-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read(&dir).unwrap().is_none());
+        assert_eq!(locate(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

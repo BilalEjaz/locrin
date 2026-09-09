@@ -133,15 +133,28 @@ struct Parsed {
     skipped: Vec<String>,
 }
 
+/// The paths named on the command line, in the two readings a run needs.
+struct Explicit {
+    /// The source files: what is parsed, and what file-rule findings are
+    /// reported for.
+    files: Vec<PathBuf>,
+    /// Every path that was named, before any language filter. A rule that
+    /// answers for a file the engine does not parse can only learn that the run
+    /// was asked about it from here; `vulnerable-dependency` and the lockfile
+    /// are the case that exists today. See `lock_in_scope` in `pass`.
+    raw: Vec<PathBuf>,
+}
+
 /// The files named on the command line, canonical and inside the root, or None
 /// when nothing was named. A directory expands to the walked files beneath it,
 /// so the config's excludes still apply inside it; a file is taken as named,
 /// excluded or not, because naming a file is an instruction.
-fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow::Result<Option<Vec<PathBuf>>> {
+fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow::Result<Option<Explicit>> {
     if paths.is_empty() {
         return Ok(None);
     }
-    let mut out = Vec::new();
+    let mut files = Vec::new();
+    let mut raw = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() { p.clone() } else { root.join(p) };
         // Canonicalise before anything else: `src/../src/dirty.ts` and
@@ -152,14 +165,24 @@ fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow:
             anyhow::bail!("path is outside the repository root: {}", p.display());
         }
         if canon.is_dir() {
-            out.extend(walked.iter().filter(|f| f.starts_with(&canon)).cloned());
-        } else if Language::from_path(&canon).is_some() {
-            out.push(canon);
+            // A directory names the files under it and not itself: nothing
+            // reports against a directory, and the walk already applied the
+            // config's excludes.
+            let under: Vec<PathBuf> = walked.iter().filter(|f| f.starts_with(&canon)).cloned().collect();
+            raw.extend(under.iter().cloned());
+            files.extend(under);
+        } else {
+            raw.push(canon.clone());
+            if Language::from_path(&canon).is_some() {
+                files.push(canon);
+            }
         }
     }
-    out.sort();
-    out.dedup();
-    Ok(Some(out))
+    for v in [&mut files, &mut raw] {
+        v.sort();
+        v.dedup();
+    }
+    Ok(Some(Explicit { files, raw }))
 }
 
 /// Reads a candidate and hashes the bytes it read, or None when those bytes are
@@ -527,29 +550,61 @@ fn write_cache(ix: &mut Index, indexed: &Indexed, fresh: &[Finding], key: &Cache
 /// re-indexing: dropping an import is what makes an export dead, and the edge has
 /// to be captured before it is replaced. A scope that did not come from the
 /// watermark does not get that widening; see the comment at the `retain` below.
+///
+/// The lockfile is the exception to all of that, because it is not a source
+/// file: no walk, no index and no import neighbourhood reaches it, so a scoped
+/// run answers for it only when the scope names it outright. See `lock_in_scope`.
 fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
     let walked = source_files(root, &WalkOptions { excludes: config.excludes.clone() })?;
     let explicit = explicit_files(root, &opts.paths, &walked)?;
     let mut candidates = walked;
     if let Some(e) = &explicit {
-        candidates.extend(e.iter().cloned());
+        candidates.extend(e.files.iter().cloned());
         candidates.sort();
         candidates.dedup();
     }
     let rels: Vec<String> = candidates.iter().map(|p| rel_path(root, p)).collect();
-    let mut scope: Option<HashSet<String>> = explicit.as_ref().map(|e| e.iter().map(|p| rel_path(root, p)).collect());
+    let mut scope: Option<HashSet<String>> =
+        explicit.as_ref().map(|e| e.files.iter().map(|p| rel_path(root, p)).collect());
+    // The same scope before the language filter: every path the run was pointed
+    // at, source file or not. See `lock_in_scope` below.
+    let mut raw_scope: Option<HashSet<String>> =
+        explicit.as_ref().map(|e| e.raw.iter().map(|p| rel_path(root, p)).collect());
     // A diff-derived scope is a scope like any other: it narrows what is parsed
     // and what is reported, and everything downstream (file findings to the
     // scope, graph findings to the scope plus what its edges touch) already
     // knows what to do with one.
     if let Some(diff) = &opts.diff {
-        let listed: HashSet<String> = crate::git::changed_files(root, diff)?.into_iter().collect();
+        let listed: Vec<String> = crate::git::changed_files(root, diff)?;
         let walked: HashSet<&str> = rels.iter().map(|s| s.as_str()).collect();
         // Excludes apply to a diff-derived scope: generated code in a pull
         // request is still generated code.
-        scope = Some(listed.into_iter().filter(|r| walked.contains(r.as_str())).collect());
+        scope = Some(listed.iter().filter(|r| walked.contains(r.as_str())).cloned().collect());
+        raw_scope = Some(listed.into_iter().collect());
     }
+    // Which file the advisory rule would answer for, found without reading it,
+    // and whether this run's scope reaches it.
+    //
+    // The lockfile is not a source file, so it is in no walk, no index and no
+    // import neighbourhood: a scope can only contain it by naming it. Left to
+    // the graph filter at the end of this function, every advisory finding on a
+    // scoped run was therefore produced and then discarded, after the rule had
+    // paid for the lockfile read, the snapshot read and, online, its requests.
+    // So the rule is dropped from the run instead, and the findings it does
+    // produce when the lockfile *is* named are kept whatever the neighbourhood
+    // says.
+    //
+    // `--changed` is the one scope that cannot name it: that scope comes from
+    // the index, which holds source files only, so a lockfile edit is invisible
+    // to it and the rule never runs. A whole-repository run has no scope at all
+    // and is unchanged.
+    let lockfile_rel = locrin_core::lockfile::locate(root);
+    let lock_in_scope = if opts.changed_only {
+        false
+    } else {
+        raw_scope.as_ref().is_none_or(|raw| lockfile_rel.is_some_and(|rel| raw.contains(rel)))
+    };
     let resolver = Resolver::new(root, rels.iter().cloned().collect());
     let mut ix = if record { Index::open(root)? } else { Index::open_in_memory()? };
 
@@ -605,7 +660,13 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let fresh = run_file_rules(&rules, &indexed.files, &base)?;
     let graph = {
         let ctx = RuleContext { index: Some(&ix), ..base };
-        run_rules(&graph_rules(), &ctx)?
+        let mut rules = graph_rules();
+        if !lock_in_scope {
+            // Not a config decision and not the registry's business: this run
+            // could not report what the rule would find, so it does not ask.
+            rules.retain(|r| r.id() != "vulnerable-dependency");
+        }
+        run_rules(&rules, &ctx)?
     };
     if record {
         write_cache(&mut ix, &indexed, &fresh, &key)?;
@@ -645,7 +706,12 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
             wide.extend(indexed.before);
         }
         wide.extend(neighbours(&ix, scope)?);
-        graph.retain(|f| wide.contains(&f.file));
+        // The lockfile is the one file a graph finding can name that no
+        // neighbourhood contains, because nothing imports it. The scope named it
+        // (or the rule that reports against it did not run at all), so its
+        // findings are kept on that authority rather than on the graph's.
+        let lock_rel = lockfile_rel.filter(|_| lock_in_scope);
+        graph.retain(|f| wide.contains(&f.file) || lock_rel.is_some_and(|rel| f.file == rel));
     }
     findings.extend(graph);
     Ok(Run {
