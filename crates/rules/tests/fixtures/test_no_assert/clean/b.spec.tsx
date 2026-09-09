@@ -35,4 +35,10 @@ describe("row", () => {
     const { getByText } = render(<Row />);
     getByText("row");
   });
+
+  it("guards an invariant by throwing", () => {
+    for (const x of [{ id: 1 }, { id: 2 }]) {
+      if (!x) throw new Error("missing");
+    }
+  });
 });

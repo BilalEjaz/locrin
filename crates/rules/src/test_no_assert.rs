@@ -6,10 +6,10 @@
 //! What counts as an assertion is [`locrin_core::testcases`]: a call to
 //! `expect` or `assert` in any form, a chai `.should` chain, a Testing Library
 //! query that throws when it finds nothing (`getBy*`, `getAllBy*`, `findBy*`,
-//! `findAllBy*`, however the call is spelled), or a call to a same-file function
-//! whose own body asserts. That is one file's syntax and nothing more, which is
-//! why the rule ships at Medium confidence and where its false positives come
-//! from:
+//! `findAllBy*`, however the call is spelled), a `throw` statement anywhere in
+//! the body, or a call to a same-file function whose own body asserts. That is
+//! one file's syntax and nothing more, which is why the rule ships at Medium
+//! confidence and where its false positives come from:
 //!
 //! - **Helpers are followed one level, not two.** A case calling a helper that
 //!   asserts is clean; a case calling a helper that calls a second helper that
@@ -29,7 +29,16 @@
 //!   first precision sample were that shape
 //!   (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
 //!   `queryBy*` is not one of them: it returns null instead of throwing, so a
-//!   case whose only query is a `queryBy*` still checks nothing.
+//!   case whose only query is a `queryBy*` still checks nothing. The bare
+//!   `throw` is named for the same kind of reason: all 11 findings in the second
+//!   precision sample were a guard case walking a data set and throwing a
+//!   written explanation when an invariant broke, which fails the case exactly
+//!   as an `expect` would.
+//! - **A rethrow reads as a check.** The cost of counting `throw` on syntax
+//!   alone: a case that catches its own call and rethrows is read as asserting,
+//!   even though the rethrow only repeats a failure the runner would have seen
+//!   anyway. Separating the two needs to know whether the try body can fail,
+//!   which is flow analysis. The rule under-reports there on purpose.
 //! - **Some case forms are not recognised.** `it.skip.each(table)(...)` is not
 //!   read as a case, because its callee is a member of a member rather than of
 //!   an identifier. It is skipped, so the rule would not report it either way,

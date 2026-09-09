@@ -233,6 +233,16 @@ fn is_throwing_query(name: &str) -> bool {
 /// whose leftmost part is a call, not the `expect` identifier.
 fn asserts(node: Node, src: &str, helpers: &HashSet<String>) -> bool {
     match node.kind() {
+        // A case that throws fails, so a `throw` is a check: the guard style
+        // `if (!ok) throw new Error("<why>")` asserts exactly what an `expect`
+        // would and names the offending item in the message besides. It counts
+        // wherever it sits in the body, nested blocks and loops included, which
+        // is where the style is written. All 11 of `test-no-assert`'s corpus
+        // findings were that shape
+        // (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+        // The cost: a rethrow inside a catch reads the same, and telling the two
+        // apart needs to know whether the try body can fail.
+        "throw_statement" => true,
         "call_expression" => {
             let Some(func) = node.child_by_field_name("function") else { return false };
             match func.kind() {
@@ -473,6 +483,76 @@ it("waits on a throwing query", async () => {
                 ("query only", 0),
                 ("query all through screen only", 0),
                 ("waits on a throwing query", 1),
+            ]
+        );
+    }
+
+    /// A guard case walks a data set and throws a written explanation when an
+    /// invariant breaks. The runner reports a thrown error as a failed case, so
+    /// the case checks exactly as much as an `expect` would; it just names no
+    /// matcher. The `throw` counts wherever it sits in the body.
+    #[test]
+    fn a_throw_anywhere_in_the_body_is_an_assertion() {
+        let src = r#"const ITEMS = [{ id: "a" }, { id: "b" }];
+
+function assertShape(item: { id: string }) {
+  if (!item.id) {
+    throw new Error("every item needs an id");
+  }
+}
+
+it("throws at the top level of the body", () => {
+  throw new Error("unreachable");
+});
+
+it("throws inside an if", () => {
+  const found = ITEMS[0];
+  if (!found) {
+    throw new Error("missing item");
+  }
+});
+
+it("throws inside a loop nested in a block", () => {
+  for (const item of ITEMS) {
+    if (item.id.length === 0) {
+      throw new Error(`empty id for ${JSON.stringify(item)}`);
+    }
+  }
+});
+
+it("delegates to a helper that throws", () => {
+  assertShape(ITEMS[0]);
+});
+
+it("catches its own throw and checks nothing", () => {
+  try {
+    JSON.parse("{}");
+  } catch (err) {
+    throw new Error(String(err));
+  }
+});
+
+it("checks nothing at all", () => {
+  ITEMS.map((item) => item.id);
+});
+"#;
+        let cases = extract(&parsed(src));
+        let view: Vec<(&str, u32)> = cases.iter().map(|c| (c.name.as_str(), c.assertions)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("throws at the top level of the body", 1),
+                ("throws inside an if", 1),
+                ("throws inside a loop nested in a block", 1),
+                // A same-file helper whose own body throws is an assertion
+                // helper, on the same one level the `expect` helpers get.
+                ("delegates to a helper that throws", 1),
+                // Read as an assertion, which is the honest cost of a syntax
+                // rule: a rethrow inside a catch fails the case too, and
+                // telling it from a guard needs to know the try body can
+                // throw. Pinned so the cost is visible rather than assumed.
+                ("catches its own throw and checks nothing", 1),
+                ("checks nothing at all", 0),
             ]
         );
     }
