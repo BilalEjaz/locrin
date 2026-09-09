@@ -27,6 +27,9 @@ struct Cli {
 enum Cmd {
     /// Check files (all by default) and print a verdict
     Check {
+        /// Files or directories to check. A diff scope names its own files, so
+        /// paths and --base/--since cannot be combined
+        #[arg(conflicts_with_all = ["base", "since"])]
         paths: Vec<PathBuf>,
         /// Only files whose content changed since the last index, plus the
         /// graph findings their edges reach.

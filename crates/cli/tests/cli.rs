@@ -728,3 +728,20 @@ fn sarif_output_lists_every_rule_and_every_finding() {
     assert_eq!(run["results"].as_array().unwrap().len(), 2);
     assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
 }
+
+/// Named paths and a diff scope each decide which files the run sees. Taking
+/// both would mean one silently winning, so clap refuses the invocation with
+/// its usage exit code instead.
+#[test]
+fn named_paths_and_a_diff_scope_are_a_usage_error() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "src/dirty.ts", "--base", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with '--base"), "{err}");
+
+    let out = locrin(dir.path()).args(["check", "src/dirty.ts", "--since", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with '--since"), "{err}");
+}
