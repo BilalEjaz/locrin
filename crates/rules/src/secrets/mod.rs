@@ -100,6 +100,21 @@ const VALUE_PLACEHOLDER: &str = r"(?i)(<[^>]+>|\$\{|process\.env|sk_test_|pk_tes
 /// unremarkable JWT to be read as a credential.
 const CREDENTIAL_NAME: &str = r"(?i)(secret|token|key|password|passwd|pwd|credential|auth)";
 
+/// The Supabase role that bypasses row level security.
+const SERVICE_ROLE: &str = "service_role";
+
+/// The `role` claims that make a JWT a credential on their own.
+///
+/// This is a list of names rather than "anything that is not `anon` or
+/// `authenticated`", which is what it used to be and which read every
+/// application's own vocabulary as privileged: a session token with
+/// `"role": "viewer"`, `"member"` or `"customer"` was a locked High finding on
+/// a fixture. A role outside this list falls through to the credential name
+/// gate, so `authToken = "<viewer token>"` is still reported and
+/// `viewerSession = "<the same token>"` is not.
+const PRIVILEGED_ROLES: [&str; 7] =
+    [SERVICE_ROLE, "supabase_admin", "supabase_auth_admin", "admin", "superuser", "owner", "root"];
+
 /// The longest line the rule looks at. A generated bundle or a base64 asset
 /// inlined into a source file is one enormous line and holds no credential
 /// anybody typed; a real one lives on a line a person wrote.
@@ -242,17 +257,19 @@ fn reported(provider: &str, value: &str, line: &str, start: usize) -> bool {
         return false;
     }
     match provider {
-        patterns::SUPABASE_SERVICE_ROLE => jwt::role(value).as_deref() == Some("service_role"),
-        // A privileged role is a credential wherever it sits. A role that is
-        // not privileged is a client key and never reported, whatever the line
-        // calls it: `SUPABASE_ANON_KEY` is a credential-shaped name holding a
-        // value that is meant to be public. The service role token belongs to
-        // the entry above, so this one steps aside for it rather than reporting
-        // the same line twice.
+        patterns::SUPABASE_SERVICE_ROLE => jwt::role(value).as_deref() == Some(SERVICE_ROLE) && !jwt::expired(value),
+        patterns::JWT if jwt::expired(value) => false,
+        // A named privileged role is a credential wherever it sits. Supabase's
+        // two public roles never are, whatever the line calls them:
+        // `SUPABASE_ANON_KEY` is a credential-shaped name holding a value that
+        // is meant to be in the browser. The service role token belongs to the
+        // entry above, so this one steps aside rather than report the same line
+        // twice. Everything else is an application's own word for a user, and
+        // is a credential only when the name on the line says so.
         patterns::JWT => match jwt::role(value).as_deref() {
-            Some("anon") | Some("authenticated") | Some("service_role") => false,
-            Some(_) => true,
-            None => credential_name().is_match(&line[..start]),
+            Some("anon" | "authenticated" | SERVICE_ROLE) => false,
+            Some(role) if PRIVILEGED_ROLES.contains(&role) => true,
+            _ => credential_name().is_match(&line[..start]),
         },
         patterns::BASIC_AUTH => decodes_to_a_pair(value),
         p if patterns::GENERIC.contains(&p) => entropy::looks_random(value),

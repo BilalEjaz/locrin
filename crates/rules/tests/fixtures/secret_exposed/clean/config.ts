@@ -48,6 +48,12 @@ export const sentryPublicDsn = "https://9f2c1a7b4e6d8039acbe5172d0f34a6b@o12345.
 export const twilioAccountSid = "AC9f2c1a7b4e6d8039acbe5172d0f34a6b";
 export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFiY2RlZmdoaWprbG1ub3AiLCJyb2xlIjoiYW5vbiIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoyMDAwMDAwMDAwfQ.SyntheticSignatureForLocrinFixturesOnly0000000";
 export const userSessionToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFiY2RlZmdoaWprbG1ub3AiLCJyb2xlIjoiYXV0aGVudGljYXRlZCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoyMDAwMDAwMDAwfQ.SyntheticSignatureForLocrinFixturesOnly0000000";
+// An application role that is not one of the privileged names. It is a user's
+// session, not a credential, and the line does not say otherwise.
+export const viewerSession = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJsb2NyaW4iLCJyb2xlIjoidmlld2VyIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjIwMDAwMDAwMDB9.SyntheticSignatureForLocrinFixturesOnly0000000";
+// A service role key whose `exp` is in the past. It is not live, so there is
+// nothing to revoke and nothing to block a build over.
+export const rotatedServiceRoleKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFiY2RlZmdoaWprbG1ub3AiLCJyb2xlIjoic2VydmljZV9yb2xlIiwiaWF0IjoxNjAwMDAwMDAwLCJleHAiOjE2MDAwMDM2MDB9.SyntheticSignatureForLocrinFixturesOnly0000000";
 
 // Development connection strings: a local host, a password equal to its
 // username, or one of the words every compose file uses.

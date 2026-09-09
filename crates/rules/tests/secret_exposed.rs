@@ -113,6 +113,16 @@ fn two_private_keys_in_one_file_are_two_findings_with_two_ids() {
     assert!(keys.iter().all(|f| f.evidence.contains("MIIE")), "{keys:?}");
 }
 
+/// The privileged role list is positive. `admin` and `superuser` are
+/// credentials on their own; `viewer` is one only because the line calls it a
+/// token, and the clean fixture holds the same token under a name that does not.
+#[test]
+fn a_privileged_role_is_a_credential_and_any_other_role_needs_a_credential_name() {
+    let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "flag"), &Config::default());
+    let jwts = out.iter().filter(|f| provider(&f.evidence) == "JSON Web Token").count();
+    assert_eq!(jwts, 3, "admin, superuser, and the viewer token on a credential name");
+}
+
 #[test]
 fn environment_references_placeholders_public_identifiers_and_dev_uris_are_clean() {
     let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "clean"), &Config::default());
