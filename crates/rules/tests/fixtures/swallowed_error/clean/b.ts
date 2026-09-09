@@ -57,3 +57,32 @@ export function plain(): void {
 export function detach(view: { refresh(): void }): void {
   view.refresh();
 }
+
+/** Pins: the exemption for `lenient` is the returned failure value, not the
+ * absence of a caller: this one uses its result. */
+export function count(): number {
+  const n = lenient("{}");
+  return n ?? 0;
+}
+
+/** Pins: a method's log-only catch is judged by `this.<name>()` callers only. A
+ * free function of the same name, whose result a caller does use, says nothing
+ * about the method. */
+export class Loader {
+  read(text: string): number {
+    try {
+      return JSON.parse(text).count;
+    } catch (err) {
+      console.error("bad json", err);
+    }
+    return 0;
+  }
+}
+
+function read(text: string): number {
+  return JSON.parse(text).count;
+}
+
+export function sum(text: string): number {
+  return read(text) + 1;
+}

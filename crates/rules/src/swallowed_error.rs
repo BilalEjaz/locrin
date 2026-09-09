@@ -12,10 +12,13 @@
 //!   written down where the next reader will see it.
 //! - **Form 2 reads calls, not types.** "Callers use the result" means the file
 //!   calls the enclosing function somewhere outside its own body in a position
-//!   whose parent is not an expression statement. A caller in another file, a
-//!   call through a variable, and a result used only for its side effects are
-//!   all invisible, so the form under-reports rather than guesses. It is
-//!   Medium confidence for that reason.
+//!   whose parent is not an expression statement. How a caller spells that call
+//!   depends on the declaration: a function or a named arrow is called bare, a
+//!   method only through `this`, the one object a single file can resolve. A
+//!   caller in another file, a call through a variable, a call on any other
+//!   object, and a result used only for its side effects are all invisible, so
+//!   the form under-reports rather than guesses. It is Medium confidence for
+//!   that reason.
 //! - **Form 3 resolves only what one file can resolve.** A call is a floating
 //!   promise when it names an `async` function or arrow declared in the same
 //!   file, or reaches an `async` method of the same class through `this`. A
@@ -98,6 +101,24 @@ fn enclosing_function<'a>(node: Node<'a>, src: &str) -> Option<(Node<'a>, String
     None
 }
 
+/// Whether the callee of `call` is the way a caller reaches `name` declared as
+/// `owner`. A `function_declaration` or a named arrow is reached bare, `name(…)`;
+/// a `method_definition` is reached through an object, and `this` is the one
+/// object a single file can resolve, so `this.name(…)` is what counts. Keeping
+/// them apart is what stops a method's catch being judged by the calls to a free
+/// function that happens to share its name, and what lets a method be judged at
+/// all: matched bare only, a method's own callers were invisible and its log-only
+/// catch never fired.
+fn reaches(call: Node, src: &str, owner: Node, name: &str) -> bool {
+    let Some(callee) = call.child_by_field_name("function") else { return false };
+    if owner.kind() == "method_definition" {
+        return callee.kind() == "member_expression"
+            && callee.child_by_field_name("object").is_some_and(|o| o.kind() == "this")
+            && callee.child_by_field_name("property").is_some_and(|p| text(p, src) == name);
+    }
+    callee.kind() == "identifier" && text(callee, src) == name
+}
+
 /// Whether `name` is called outside `owner`'s own body in a position whose
 /// parent is not an expression statement, which is the syntactic reading of
 /// "a caller does something with what this returns".
@@ -110,8 +131,7 @@ fn result_used_elsewhere(root: Node, src: &str, owner: Node, name: &str) -> bool
         if n.start_byte() >= owner.start_byte() && n.end_byte() <= owner.end_byte() {
             return;
         }
-        let callee = n.child_by_field_name("function");
-        if !callee.is_some_and(|c| c.kind() == "identifier" && text(c, src) == name) {
+        if !reaches(n, src, owner, name) {
             return;
         }
         used = n.parent().is_some_and(|p| p.kind() != "expression_statement");
