@@ -240,9 +240,15 @@ the machine rather than the engine, on the evidence that the Task 1 commit
 `d195857`, which has none of this plan's work in it, measured 4996 ms on Task 7's
 day against 3607 ms when Task 1 ran. That reading is now confirmed from the other
 side. Task 7c changed no indexing code at all: both of its commits are rule
-logic, one in `swallowed_error::result_is_used` and one in `testcases::asserts`,
-and neither runs during a `scan`. The cold scan nonetheless moved from 5152 to
-3764 ms, and every other benchmark moved with it in the same proportion (warm
+logic, one in `swallowed_error::result_is_used`, which does not run during a
+`scan`, and one in `testcases::asserts`, which does. A scan calls
+`testcases::skipped_names` for every test file, that calls `extract`, and
+`extract` computes the assertion-helper set and every case's assertion count
+before the caller throws all of it away and keeps the skipped names. The
+`throw_statement` arm 7c added is one more `kind()` comparison inside a walk
+that was already visiting those nodes, so it costs nothing measurable, which is
+why the timing did not move on its account. The cold scan nonetheless moved from
+5152 to 3764 ms, and every other benchmark moved with it in the same proportion (warm
 single-file 240 to 215 ms, warm 30-file 350 to 233 ms, startup 28 to 18 ms).
 
 So the 152 ms Task 7b could not close was the measuring box, exactly as it
