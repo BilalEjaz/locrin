@@ -1,7 +1,6 @@
 mod common;
 
-use common::{fixture, hits, run_on};
-use locrin_core::config::Config;
+use common::{fixture, hits, rule_on, run_on};
 use locrin_core::finding::{Category, Confidence, Severity};
 use locrin_rules::injection_sink::InjectionSink;
 
@@ -13,7 +12,7 @@ const SQL_FIX: &str =
 
 #[test]
 fn every_sink_family_flags_its_lines_in_the_fixture() {
-    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "flag"), &Config::default());
+    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "flag"), &rule_on("injection-sink"));
     assert_eq!(
         hits(&out),
         vec![
@@ -68,7 +67,7 @@ fn every_sink_family_flags_its_lines_in_the_fixture() {
 /// constraints.
 #[test]
 fn every_finding_carries_the_security_metadata_for_its_family() {
-    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "flag"), &Config::default());
+    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "flag"), &rule_on("injection-sink"));
     assert!(
         out.iter().all(|f| f.severity == Severity::High
             && f.category == Category::Security
@@ -99,7 +98,7 @@ fn every_finding_carries_the_security_metadata_for_its_family() {
 /// finding says as well as the symbol it sits in.
 #[test]
 fn findings_have_distinct_ids() {
-    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "flag"), &Config::default());
+    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "flag"), &rule_on("injection-sink"));
     let mut ids: Vec<&str> = out.iter().map(|f| f.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -111,7 +110,7 @@ fn findings_have_distinct_ids() {
 /// sink the rule knows.
 #[test]
 fn literals_tagged_templates_and_parameterised_calls_are_left_alone() {
-    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "clean"), &Config::default());
+    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "clean"), &rule_on("injection-sink"));
     assert!(out.is_empty(), "{:?}", hits(&out));
 }
 
@@ -124,7 +123,7 @@ fn literals_tagged_templates_and_parameterised_calls_are_left_alone() {
 /// see the module doc.
 #[test]
 fn a_constant_is_not_a_finding_and_a_plain_variable_is_only_a_medium_one() {
-    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "edge"), &Config::default());
+    let out = run_on(Box::new(InjectionSink), &fixture("injection_sink", "edge"), &rule_on("injection-sink"));
     assert_eq!(hits(&out), vec![("c.ts".to_string(), 9), ("seed.test.ts".to_string(), 2)]);
     assert_eq!(out[0].confidence, Confidence::Medium, "{}", out[0].evidence);
     assert_eq!(out[0].evidence, "SQL built from a variable reaches db.query");

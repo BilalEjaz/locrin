@@ -572,6 +572,39 @@ impl Rule for InjectionSink {
         Confidence::High
     }
 
+    /// Off by default: **2 of 28 corpus findings were worth acting on**, against
+    /// the spec 10.2 gate of 17 in 20. See
+    /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`,
+    /// Part B.
+    ///
+    /// Every one of the 28 is an accurate report of a string built by
+    /// interpolation reaching a sink, and that is the problem rather than the
+    /// defence: 25 of them are jest seeding a local SQLite fixture with
+    /// file-level constants, one applies a committed migration file statement by
+    /// statement, and one is a build script whose own comment says the two
+    /// interpolated names are hardcoded constants and that there is no injection
+    /// surface. All 26 are High severity, so on `strongspan` the rule turned one
+    /// High finding into twenty-six and buried the repository's real ones. The
+    /// two that stand are `fasting-app`'s v1 importer interpolating table and
+    /// column names taken from `Object.keys` of an imported payload.
+    ///
+    /// Task 10 already lowered a test-file SQL finding to Medium *confidence*
+    /// for this cluster, which changes how the finding reads but not how many
+    /// there are or what severity blocks the run. Seeing that a fixture's SQL
+    /// carries no attacker-reachable value needs the origin of the interpolated
+    /// expression, which is cross-function taint and belongs to release two
+    /// (spec 4.2). Until then a repository that wants the rule turns it on with
+    ///
+    /// ```toml
+    /// [rules.injection-sink]
+    /// enabled = true
+    /// ```
+    ///
+    /// and baselines or `locrin:allow`s its fixtures.
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
     }
