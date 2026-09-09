@@ -616,3 +616,62 @@ fn a_repaired_importer_is_not_reported_twice() {
         .count();
     assert_eq!(n, 1, "{v}");
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn base_sees_the_working_tree_and_since_sees_only_commits() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let base = git(dir.path(), &["rev-parse", "HEAD"]);
+
+    // dirty.ts blocks on a full check but is untouched by this diff.
+    std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  debugger;\n  return 1;\n}\n")
+        .unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert_eq!(files, vec!["src/clean.ts"], "{v}");
+    assert_eq!(v["status"], "block");
+
+    let out = locrin(dir.path()).args(["check", "--since", &base]).output().unwrap();
+    assert!(
+        String::from_utf8(out.stdout).unwrap().starts_with("PASS  0 finding(s)"),
+        "uncommitted work is invisible to --since"
+    );
+
+    git(dir.path(), &["commit", "-qam", "edit"]);
+    let out = locrin(dir.path()).args(["check", "--since", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["findings"][0]["file"], "src/clean.ts", "{v}");
+
+    // An untracked file is part of the working tree view.
+    std::fs::write(dir.path().join("src/new.ts"), "export const n = 1;\nconsole.log(n);\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["findings"].as_array().unwrap().iter().any(|f| f["file"] == "src/new.ts"), "{v}");
+}
+
+#[test]
+fn a_bad_ref_is_an_engine_error() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let out = locrin(dir.path()).args(["check", "--base", "no-such-ref"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.starts_with("error:"), "{err}");
+    assert!(err.contains("no-such-ref"), "{err}");
+}

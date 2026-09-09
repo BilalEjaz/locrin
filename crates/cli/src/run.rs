@@ -23,6 +23,9 @@ pub struct Options {
     pub paths: Vec<PathBuf>,
     pub changed_only: bool,
     pub json: bool,
+    /// The scope taken from git rather than from the command line: a pull
+    /// request's working tree against its base, or the commits since a tag.
+    pub diff: Option<crate::git::DiffScope>,
 }
 
 /// What one pass over the repository produced.
@@ -395,6 +398,17 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     }
     let rels: Vec<String> = candidates.iter().map(|p| rel_path(root, p)).collect();
     let mut scope: Option<HashSet<String>> = explicit.as_ref().map(|e| e.iter().map(|p| rel_path(root, p)).collect());
+    // A diff-derived scope is a scope like any other: it narrows what is parsed
+    // and what is reported, and everything downstream (file findings to the
+    // scope, graph findings to the scope plus what its edges touch) already
+    // knows what to do with one.
+    if let Some(diff) = &opts.diff {
+        let listed: HashSet<String> = crate::git::changed_files(root, diff)?.into_iter().collect();
+        let walked: HashSet<&str> = rels.iter().map(|s| s.as_str()).collect();
+        // Excludes apply to a diff-derived scope: generated code in a pull
+        // request is still generated code.
+        scope = Some(listed.into_iter().filter(|r| walked.contains(r.as_str())).collect());
+    }
     let resolver = Resolver::new(root, rels.iter().cloned().collect());
     let mut ix = if record { Index::open(root)? } else { Index::open_in_memory()? };
 
@@ -467,7 +481,7 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
 /// after it (a hook, say) pays for nothing but the files that changed since.
 pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
     let run = pass(&root, &opts, true)?;
     Ok((run.files, run.changed))
 }
@@ -476,7 +490,7 @@ pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
 /// baseline already holds: `create` is a fresh line in the sand, not a merge.
 pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::default();
     for f in &findings {
@@ -491,7 +505,7 @@ pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
 /// an entry that suppresses nothing.
 pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bool> {
     let root = canonical_root(root);
-    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };

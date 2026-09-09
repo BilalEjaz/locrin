@@ -1,3 +1,4 @@
+mod git;
 mod run;
 
 use std::path::PathBuf;
@@ -34,6 +35,12 @@ enum Cmd {
         /// Compact JSON for agents (capped at ten findings)
         #[arg(long)]
         json: bool,
+        /// Files that differ from the merge base with REF, plus untracked files (the pull-request view)
+        #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "since"])]
+        base: Option<String>,
+        /// Files changed by the commits in REF..HEAD (the deployment gate)
+        #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "base"])]
+        since: Option<String>,
     },
     /// Index the repository and warm the findings cache without printing a verdict
     Scan,
@@ -63,8 +70,9 @@ fn real_main() -> anyhow::Result<i32> {
         None => std::env::current_dir()?,
     };
     match cli.cmd {
-        Cmd::Check { paths, changed, json } => {
-            let opts = run::Options { root, paths, changed_only: changed, json };
+        Cmd::Check { paths, changed, json, base, since } => {
+            let diff = base.map(git::DiffScope::Base).or(since.map(git::DiffScope::Since));
+            let opts = run::Options { root, paths, changed_only: changed, json, diff };
             let verdict = run::check(&opts)?;
             if opts.json {
                 println!("{}", locrin_reporters::agent::render(&verdict));
