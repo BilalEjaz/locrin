@@ -38,13 +38,15 @@
 //! Findings for a file rule are cached per file, and the cache key does not
 //! include the previous snapshot: it cannot, because the snapshot describes the
 //! run rather than the file. So a cached row carries the `previous` of the run
-//! that wrote it. A skip reported once therefore keeps being served on every
-//! later run until the file is next edited, at which point the file is
-//! re-parsed, the index's memory of it says the skip was already there, and the
-//! finding stops. This is deliberate: a finding that vanished on the next run
-//! before anybody looked at it would be worse than useless in a hook, and the
-//! repository-wide answer to a skip somebody has decided to live with is the
-//! baseline, not a silent expiry.
+//! that wrote it. A newly skipped case is therefore reported once, and that
+//! finding keeps being served from the cache until the file is next parsed:
+//! an edit, a `check <path>` that names it, or a cache miss after a config
+//! change. At that point the index's record of the skip is the file's previous
+//! version, the skip is no longer new, and the finding is not repeated. This is
+//! deliberate: a finding that vanished on the very next run before anybody
+//! looked at it would be worse than useless in a hook. Absorbing a skip the
+//! repository has decided to live with is the baseline's job, and so is the
+//! legacy a first run reports.
 
 use std::collections::HashSet;
 

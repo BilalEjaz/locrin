@@ -963,6 +963,10 @@ const SKIPPED_TEST: &str =
 /// `leftover-debug` finding proves the file was in scope and the rule stayed
 /// quiet on purpose.
 const SKIPPED_TEST_EDITED: &str = "// still skipped, and now edited again\nconsole.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+/// The same two versions carrying the `console.log` from the start, for a leg
+/// whose every run needs the positive control rather than only its last one.
+const ACTIVE_TEST_WITH_DEBUG: &str = "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const SKIPPED_TEST_WITH_DEBUG: &str = "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
 
 /// Every `test-newly-skipped` finding in a `--json` payload, as (file, evidence).
 fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
@@ -1024,7 +1028,7 @@ fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
     let test_file = dir.path().join("src/a.test.ts");
     std::fs::write(
         &test_file,
-        "describe(\"rows\", () => {\n  it.skip(\"legacy\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
+        "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"legacy\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
     )
     .unwrap();
     // The whole-repository run that records the skip. It reports it once (the
@@ -1036,8 +1040,55 @@ fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
     for run in 1..=2 {
         let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        // The planted `console.log` is the positive control: "no newly-skipped
+        // finding" is also what an empty scope produces, so without it this leg
+        // would pass if the named path had never reached the file at all.
+        assert!(debug_reported(&v, "src/a.test.ts"), "named-path run {run} did not reach the file: {v}");
         assert!(newly_skipped(&v).is_empty(), "named-path run {run} reported a skip the index knew: {v}");
     }
+}
+
+/// The lifetime of a newly-skipped finding, which the rule's module doc
+/// describes and nothing else pins: reported once, then served from the findings
+/// cache until the file is next parsed, and gone from there on.
+///
+/// A named path is one of the three things that parse an unchanged file (an edit
+/// and a cache miss after a config change are the others), so it is what this
+/// leg uses to reach that point without editing the file: the named-path run
+/// re-runs the rules over the file, and this time the index's record of the skip
+/// is the file's previous version, so it writes cache rows with no finding in
+/// them and the whole-repository run after it serves those.
+#[test]
+fn a_newly_skipped_finding_is_served_from_the_cache_until_the_file_is_parsed_again() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(&test_file, ACTIVE_TEST_WITH_DEBUG).unwrap();
+    // The run that makes the active version the "previous" the next one compares
+    // against.
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    std::fs::write(&test_file, SKIPPED_TEST_WITH_DEBUG).unwrap();
+    let out = locrin(dir.path()).arg("check").args(["--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        newly_skipped(&v),
+        vec![("src/a.test.ts".to_string(), "test \"renders a row\" is skipped (newly)".to_string())],
+        "the whole-repository run that sees the edit reports the skip: {v}"
+    );
+
+    // The named path parses the unchanged file again. The skip is in the index
+    // now, so it is no longer new and the rows this run caches say so.
+    let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the named path has to reach the file: {v}");
+    assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
+
+    // And the whole-repository run after it serves those rows rather than the
+    // ones the reporting run wrote, so the finding does not come back.
+    let out = locrin(dir.path()).arg("check").args(["--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(debug_reported(&v, "src/a.test.ts"), "the file has to be answered for: {v}");
+    assert!(newly_skipped(&v).is_empty(), "the finding outlived the parse that retired it: {v}");
 }
 
 /// For a diff scope git overrides the index: the base commit is the "before" a
