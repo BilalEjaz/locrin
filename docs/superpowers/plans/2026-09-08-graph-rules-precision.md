@@ -467,3 +467,32 @@ is roughly the 106 ms the walk was costing, less what the pool cannot remove. Th
 spread across the three runs is still the machine: run 3's 243 ms is the same
 loaded-box noise that produced the 302 ms and 335 ms failures recorded above, but
 it now lands inside the target rather than outside it.
+
+## Benchmarks after Task 16b
+
+Task 16 made `scan` warm the findings cache, which meant the file rules had to
+run over every parsed file rather than over the changed ones alone. Five rules
+over about 1,840 parsed files, single-threaded, cost about 3.7 s, and the cold
+`scan` benchmark went to about 7.8 s against a 5000 ms target.
+
+Task 16b parallelises that pass. `run_file_rules` gives each parsed file a
+`RuleContext` of its own and runs the file rules over it across the rayon pool,
+collecting per-file results and flattening them in file order, so the output is
+byte-identical to the sequential pass on every machine. The per-file contexts
+carry no index (`RuleContext.index` is now `Option<&Index>`), because no file
+rule reads one; a graph rule takes it through `ctx.index()?`, which errors with
+"graph rule run without an index" rather than panicking. The graph rules still
+run once, through `run_rules`, over the whole index.
+
+Same command, same FastLift checkout, same machine, three runs back to back:
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 3347 ms | 3024 ms | 2996 ms | PASS |
+| warm single-file check | under 300 ms | 159 ms | 159 ms | 152 ms | PASS |
+| startup (`--help`) | under 50 ms | 19 ms | 23 ms | 18 ms | PASS |
+
+The cold run is back inside the target with about 1650 ms of margin at its
+worst, and it now leaves a warm findings cache behind it, which the numbers
+before Task 16 did not. The warm check is unchanged by this task, as expected:
+it parses one file, so there is nothing for the pool to spread.
