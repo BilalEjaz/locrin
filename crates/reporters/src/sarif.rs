@@ -63,7 +63,11 @@ pub fn render(v: &Verdict, rules: &[RuleMeta], version: &str) -> String {
                 "id": r.id,
                 "name": r.id,
                 "shortDescription": { "text": r.description },
-                "defaultConfiguration": { "level": level(r.severity) },
+                // `enabled` is SARIF's own `reportingConfiguration` field, so a
+                // consumer that reads the standard (GitHub code scanning does)
+                // knows a rule ships off without knowing locrin's properties.
+                // The property stays beside it for consumers already reading it.
+                "defaultConfiguration": { "level": level(r.severity), "enabled": r.enabled_by_default },
                 "properties": { "category": r.category, "enabledByDefault": r.enabled_by_default }
             })
         })
@@ -150,6 +154,8 @@ mod tests {
         assert_eq!(listed[1]["id"], "dead-export");
         assert_eq!(listed[1]["properties"]["enabledByDefault"], false);
         assert_eq!(listed[1]["defaultConfiguration"]["level"], "note");
+        assert_eq!(listed[0]["defaultConfiguration"]["enabled"], true);
+        assert_eq!(listed[1]["defaultConfiguration"]["enabled"], false, "SARIF's own field says the rule ships off");
     }
 
     #[test]
