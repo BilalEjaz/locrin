@@ -9,7 +9,7 @@ use globset::{Glob, GlobSetBuilder};
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, line_text, Rule, RuleContext};
+use crate::{clean_files, finding, line_text, Rule, RuleContext, Scope};
 
 pub struct LeftoverDebug;
 
@@ -43,6 +43,12 @@ impl Rule for LeftoverDebug {
     fn id(&self) -> &'static str {
         "leftover-debug"
     }
+    fn description(&self) -> &'static str {
+        "console.log, console.debug, or debugger left in code"
+    }
+    fn scope(&self) -> Scope {
+        Scope::File
+    }
     fn category(&self) -> Category {
         Category::Erosion
     }
@@ -53,7 +59,7 @@ impl Rule for LeftoverDebug {
         Confidence::High
     }
 
-    fn run(&self, ctx: &RuleContext) -> Vec<Finding> {
+    fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let mut b = GlobSetBuilder::new();
         for g in &ctx.config.debug_allowed {
             if let Ok(glob) = Glob::new(g) {
@@ -81,6 +87,6 @@ impl Rule for LeftoverDebug {
                 ));
             }
         }
-        out
+        Ok(out)
     }
 }

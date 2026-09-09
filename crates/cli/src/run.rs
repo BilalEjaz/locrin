@@ -1,16 +1,20 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Context;
 use locrin_core::baseline::Baseline;
 use locrin_core::config::Config;
+use locrin_core::entry::EntryPoints;
 use locrin_core::finding::{Finding, Verdict};
-use locrin_core::index::{content_hash, Index};
+use locrin_core::index::{content_hash, file_stat, Index};
+use locrin_core::indexer;
 use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
-use locrin_core::symbols;
+use locrin_core::resolve::Resolver;
 use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
 use locrin_rules::{run_all, RuleContext};
+use rayon::prelude::*;
 
 pub struct Options {
     pub root: PathBuf,
@@ -24,22 +28,36 @@ struct Indexed {
     changed: usize,
 }
 
-/// Resolves the files a run should consider.
-///
-/// With no explicit paths this is the whole repository. With explicit paths it
-/// is still the whole repository, narrowed afterwards: the config's excludes are
-/// repo-relative globs, so the walk has to start at the repository root or
-/// `src/dirty.ts` would never match a walk rooted at `src`. Named directories
-/// are therefore a filter over the repository walk, not a root of their own.
-///
-/// Explicitly named files bypass the excludes. Naming a file is an instruction,
-/// not a suggestion, and silently checking nothing would be the worse answer.
-fn candidate_files(root: &Path, paths: &[PathBuf], config: &Config) -> anyhow::Result<Vec<PathBuf>> {
-    let opts = WalkOptions { excludes: config.excludes.clone() };
+/// A candidate that has been read and judged, waiting to be parsed.
+struct Pending {
+    path: PathBuf,
+    rel: String,
+    hash: String,
+    is_changed: bool,
+    source: String,
+    /// The size and modification time taken before the read, so it belongs to
+    /// the bytes in `source` and never to a later save. See
+    /// [`indexer::record_with_stat`].
+    stat: (i64, i64),
+}
+
+/// A candidate that has been through the parser, waiting to be recorded. `file`
+/// is None when the path had no language the engine parses.
+struct Parsed {
+    hash: String,
+    is_changed: bool,
+    stat: (i64, i64),
+    file: Option<ParsedFile>,
+}
+
+/// The files named on the command line, canonical and inside the root, or None
+/// when nothing was named. A directory expands to the walked files beneath it,
+/// so the config's excludes still apply inside it; a file is taken as named,
+/// excluded or not, because naming a file is an instruction.
+fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow::Result<Option<Vec<PathBuf>>> {
     if paths.is_empty() {
-        return source_files(root, &opts);
+        return Ok(None);
     }
-    let mut dirs = Vec::new();
     let mut out = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() { p.clone() } else { root.join(p) };
@@ -51,49 +69,75 @@ fn candidate_files(root: &Path, paths: &[PathBuf], config: &Config) -> anyhow::R
             anyhow::bail!("path is outside the repository root: {}", p.display());
         }
         if canon.is_dir() {
-            dirs.push(canon);
+            out.extend(walked.iter().filter(|f| f.starts_with(&canon)).cloned());
         } else if Language::from_path(&canon).is_some() {
             out.push(canon);
         }
     }
-    if !dirs.is_empty() {
-        let walked = source_files(root, &opts)?;
-        out.extend(walked.into_iter().filter(|f| dirs.iter().any(|d| f.starts_with(d))));
-    }
     out.sort();
     out.dedup();
-    Ok(out)
+    Ok(Some(out))
 }
 
-/// Reads and hashes every candidate, parses the changed ones (or all when `parse_all`),
-/// updates the index when `record` is set, and returns the parsed files that are
-/// in scope.
+/// Reads and hashes every candidate, parses the ones that changed, are in scope,
+/// or all of them when `parse_all`, records the changed ones, and returns the
+/// parsed files.
 ///
 /// A file that is not valid UTF-8 is not a source file this engine can reason
-/// about, so it is reported once and skipped rather than aborting the run: one
-/// stray binary blob with a `.ts` extension must not stop a repository check.
+/// about, so it is reported once and skipped rather than aborting the run.
 ///
-/// `record` is what separates a run that observes the repository from one that
-/// merely reads it. The baseline commands read every file to find the finding
-/// they were asked about; if they also stamped the hashes they saw, an edit made
-/// between two commands would look already-seen and the next `--changed` check
-/// would skip it. Only `check` and `scan` are entitled to move the watermark.
+/// A run owns the whole write side of the index: it opens one transaction,
+/// records, prunes the files that left the repository, and commits once. Pruning
+/// lives here rather than in the callers so that the transaction has a single
+/// scope, and so a run that fails part way commits nothing at all.
 ///
-/// Pruning rows for files that have gone away is deliberately not done here.
-/// Only a caller knows whether the candidate list is the whole repository or an
-/// explicitly named subset, and pruning on a subset would delete every other
-/// file's row.
+/// That single scope is also why the two ways a candidate can go wrong end
+/// differently. A candidate that cannot be read (permission denied, deleted
+/// between the walk and the read) aborts the run with exit 2 and, since the run
+/// is one transaction, throws away every file this run had indexed so far: an
+/// unreadable file is an environment problem the operator has to see, and an
+/// index built while the engine could not see part of the repository would call
+/// live code dead. A candidate that is not valid UTF-8 only warns and is
+/// skipped: a binary blob carrying a source extension is a repository quirk the
+/// engine tolerates, and the rest of the repository is still worth indexing.
 fn index_files(
     root: &Path,
     candidates: &[PathBuf],
     parse_all: bool,
-    record: bool,
+    scope: Option<&HashSet<String>>,
+    resolver: &Resolver,
     ix: &mut Index,
 ) -> anyhow::Result<Indexed> {
     let mut files = Vec::new();
     let mut changed = 0;
+    let mut recorded: HashSet<String> = HashSet::new();
+    let mut present: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut any_new = false;
+    ix.begin()?;
+    // Reading and deciding is cheap and touches the index, so it stays here, on
+    // the one thread that owns the connection. Parsing is neither, so it goes to
+    // the pool below.
+    let mut pending: Vec<Pending> = Vec::new();
     for path in candidates {
         let rel = rel_path(root, path);
+        present.push(rel.clone());
+        let in_scope = scope.is_some_and(|s| s.contains(&rel));
+        // The stat is taken before the read, always, because it is stored beside
+        // the hash of the bytes this run reads. A stat taken after the read
+        // would belong to whatever is on disk by then: a save landing in between
+        // would be recorded as the new stat beside the old hash, and every later
+        // narrowed run would match that stat and skip the file for good.
+        let stat = file_stat(path);
+        // A narrowed run reads a file only to find out whether it changed, and
+        // for almost every file the answer is no. Size and modification time
+        // answer that without opening the file, which is what keeps a
+        // single-file check from reading the whole repository. The stat may only
+        // say "certainly unchanged": anything else falls through to the read and
+        // the content hash below, so a file touched without being edited is
+        // still recognised as unchanged.
+        if !parse_all && !in_scope && ix.unchanged_by_stat(&rel, stat.0, stat.1)? {
+            continue;
+        }
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let source = match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -104,46 +148,124 @@ fn index_files(
         };
         let hash = content_hash(&source);
         let is_changed = ix.changed(&rel, &hash)?;
-        if !is_changed && !parse_all {
-            continue;
+        if !is_changed {
+            // The file was touched but not edited: the stat disagreed and the
+            // hash overruled it. Nothing is recorded for such a file, so the
+            // stale stat has to be replaced here or this run's read and hash are
+            // repeated by every run after it. A full run refreshes it too: the
+            // stat may have moved without the bytes moving (a checkout, a
+            // formatter, a stash pop), so store the current one and the next
+            // narrowed run can skip the read.
+            ix.refresh_stat(&rel, stat.0, stat.1)?;
+            if !parse_all && !in_scope {
+                continue;
+            }
         }
-        let Some(parsed) = parse_source(path, &rel, source) else { continue };
-        let status = if parsed.has_error { "error" } else { "ok" };
+        pending.push(Pending { path: path.clone(), rel, hash, is_changed, source, stat });
+    }
+    // Parsing is the single largest cost of a cold run and needs nothing but the
+    // source text, so it runs across the pool. `collect` keeps candidate order,
+    // which is what the recording pass below and the returned `files` rely on.
+    let parsed: Vec<Parsed> = pending
+        .into_par_iter()
+        .map(|p| {
+            let Pending { path, rel, hash, is_changed, source, stat } = p;
+            let file = parse_source(&path, &rel, source);
+            Parsed { hash, is_changed, stat, file }
+        })
+        .collect();
+    for Parsed { hash, is_changed, stat, file } in parsed {
+        let Some(parsed) = file else { continue };
         if parsed.has_error {
-            eprintln!("warning: parse errors in {rel}; excluded from rules");
+            eprintln!("warning: parse errors in {}; excluded from rules", parsed.rel);
         }
         if is_changed {
             changed += 1;
-            if record {
-                ix.upsert_file(&rel, parsed.language.as_str(), &hash, status)?;
-                let syms = symbols::extract(&parsed);
-                symbols::store(ix, &parsed, &syms)?;
-            }
+            any_new |= ix.file_hash(&parsed.rel)?.is_none();
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
+            recorded.insert(parsed.rel.clone());
         }
         files.push(parsed);
     }
+    // A file that leaves the repository leaves its importers pointing at nothing:
+    // `Index::remove_missing` marks those edges unresolved without touching the
+    // importers, which are unchanged and so are never re-indexed. When the file
+    // comes back the edges would stay unresolved and the graph rules would call
+    // the returned file dead. So whenever a run records a file the index had not
+    // seen before, re-record the importers that still hold an unresolved edge.
+    if any_new {
+        let by_rel: HashMap<String, &PathBuf> = candidates.iter().map(|p| (rel_path(root, p), p)).collect();
+        for rel in ix.files_with_unresolved_edges()? {
+            if recorded.contains(&rel) {
+                continue;
+            }
+            let Some(path) = by_rel.get(&rel) else { continue };
+            // Before the read, for the same reason as the pass above.
+            let stat = file_stat(path);
+            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let Ok(source) = String::from_utf8(bytes) else { continue };
+            let hash = content_hash(&source);
+            let Some(parsed) = parse_source(path, &rel, source) else { continue };
+            indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
+            if !files.iter().any(|f| f.rel == rel) {
+                files.push(parsed);
+            }
+        }
+    }
+    // The candidate list is the whole repository on every run, so pruning rows
+    // for files that went away is always safe.
+    ix.remove_missing(&present)?;
+    ix.commit()?;
     Ok(Indexed { files, changed })
 }
 
-/// Every current finding for a run. `record` decides whether the pass is allowed
-/// to leave its mark on the index; see `index_files`.
+/// Every current finding for a run. `record` decides whether the run is allowed
+/// to leave its mark on the repository's index.
+///
+/// Every run has to fill an index before it can report anything: the graph rules
+/// answer by querying one, and on a fresh cache (every CI job, every fresh
+/// clone) the repository's index is empty. So a non-recording run does index the
+/// whole repository, into a throwaway in-memory database that is dropped when
+/// the run ends. The repository's own index is never opened, so the watermark it
+/// holds does not move: an edit made between `check` and `baseline accept` is
+/// still unseen to the next `check --changed`, which is the thing a baseline
+/// command must never swallow.
+///
+/// The walk is always the whole repository, whatever was named on the command
+/// line: the resolver has to know every file to resolve an import, and the
+/// graph rules answer for the repository, not for a subset. Named paths narrow
+/// what is parsed and what is reported, never what is indexed.
 fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Vec<Finding>> {
     let config = Config::load(root)?;
-    let candidates = candidate_files(root, &opts.paths, &config)?;
-    let mut ix = Index::open(root)?;
-    let parse_all = !opts.changed_only;
-    let indexed = index_files(root, &candidates, parse_all, record, &mut ix)?;
-    // Only a whole-repository pass knows the full set of files that still
-    // exist, so only a whole-repository pass may delete rows. `--changed`
-    // narrows which files are parsed, not which files were walked, so its
-    // candidate list is still the whole repository and still prunes. A pass
-    // that is not recording does not prune either: deleting rows is a write.
-    if record && opts.paths.is_empty() {
-        let present: Vec<String> = candidates.iter().map(|p| rel_path(root, p)).collect();
-        ix.remove_missing(&present)?;
+    let walked = source_files(root, &WalkOptions { excludes: config.excludes.clone() })?;
+    let explicit = explicit_files(root, &opts.paths, &walked)?;
+    let mut candidates = walked;
+    if let Some(e) = &explicit {
+        candidates.extend(e.iter().cloned());
+        candidates.sort();
+        candidates.dedup();
     }
-    let ctx = RuleContext { files: &indexed.files, config: &config };
-    Ok(run_all(&ctx))
+    let rels: Vec<String> = candidates.iter().map(|p| rel_path(root, p)).collect();
+    let scope: Option<HashSet<String>> = explicit.as_ref().map(|e| e.iter().map(|p| rel_path(root, p)).collect());
+    let resolver = Resolver::new(root, rels.iter().cloned().collect());
+    let mut ix = if record { Index::open(root)? } else { Index::open_in_memory()? };
+    // A whole-repository check parses everything because, until the findings
+    // cache lands (plan 2 part B), that is the only way to run the file rules
+    // over every file. A named path or `--changed` parses only what it must. A
+    // run filling a throwaway index has no choice: nothing else will ever fill
+    // it.
+    let parse_all = !record || (scope.is_none() && !opts.changed_only);
+    let indexed = index_files(root, &candidates, parse_all, scope.as_ref(), &resolver, &mut ix)?;
+    let entries = EntryPoints::detect(root, &config.entry_points)?;
+    let ctx = RuleContext { files: &indexed.files, config: &config, index: &ix, entries: &entries };
+    let mut findings = run_all(&ctx)?;
+    if let Some(scope) = &scope {
+        findings.retain(|f| scope.contains(&f.file));
+    } else if opts.changed_only {
+        let changed: HashSet<&str> = indexed.files.iter().map(|f| f.rel.as_str()).collect();
+        findings.retain(|f| changed.contains(f.file.as_str()));
+    }
+    Ok(findings)
 }
 
 pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
@@ -160,11 +282,11 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
 pub fn scan(root: &Path) -> anyhow::Result<(usize, usize)> {
     let root = canonical_root(root);
     let config = Config::load(&root)?;
-    let candidates = candidate_files(&root, &[], &config)?;
+    let candidates = source_files(&root, &WalkOptions { excludes: config.excludes.clone() })?;
+    let rels: Vec<String> = candidates.iter().map(|p| rel_path(&root, p)).collect();
+    let resolver = Resolver::new(&root, rels.iter().cloned().collect());
     let mut ix = Index::open(&root)?;
-    let indexed = index_files(&root, &candidates, false, true, &mut ix)?;
-    let present: Vec<String> = candidates.iter().map(|p| rel_path(&root, p)).collect();
-    ix.remove_missing(&present)?;
+    let indexed = index_files(&root, &candidates, false, None, &resolver, &mut ix)?;
     Ok((candidates.len(), indexed.changed))
 }
 

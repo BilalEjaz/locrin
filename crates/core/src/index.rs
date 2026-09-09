@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "3";
 
 /// How long a statement waits for another process holding the same index before
 /// it gives up.
@@ -16,13 +16,16 @@ CREATE TABLE IF NOT EXISTS files (
   language TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   parse_status TEXT NOT NULL,
-  indexed_at INTEGER NOT NULL
+  indexed_at INTEGER NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  mtime INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS symbols (
   id INTEGER PRIMARY KEY,
   rel TEXT NOT NULL,
   kind TEXT NOT NULL,
   name TEXT NOT NULL,
+  export_name TEXT,
   start_line INTEGER NOT NULL,
   start_col INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
@@ -31,11 +34,59 @@ CREATE TABLE IF NOT EXISTS symbols (
 );
 CREATE INDEX IF NOT EXISTS symbols_rel ON symbols(rel);
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
+CREATE INDEX IF NOT EXISTS symbols_export ON symbols(export_name);
+CREATE TABLE IF NOT EXISTS edges (
+  id INTEGER PRIMARY KEY,
+  from_rel TEXT NOT NULL,
+  to_rel TEXT,
+  specifier TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  resolution TEXT NOT NULL,
+  line INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS edges_from ON edges(from_rel);
+CREATE INDEX IF NOT EXISTS edges_to ON edges(to_rel);
+CREATE TABLE IF NOT EXISTS allow_lines (
+  rel TEXT NOT NULL,
+  line INTEGER NOT NULL,
+  PRIMARY KEY (rel, line)
+);
+CREATE TABLE IF NOT EXISTS findings_cache (
+  rel TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  findings TEXT NOT NULL,
+  PRIMARY KEY (rel, rule)
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
+/// Every table that holds rows keyed by a file's repo-relative path. `remove_missing`
+/// walks this list so a file that leaves the repository leaves every table.
+const PER_FILE_TABLES: &[(&str, &str)] =
+    &[("symbols", "rel"), ("edges", "from_rel"), ("allow_lines", "rel"), ("findings_cache", "rel"), ("files", "rel")];
+
 pub fn content_hash(source: &str) -> String {
     blake3::hash(source.as_bytes()).to_hex().to_string()
+}
+
+/// The size and modification time a stat-based change check compares against.
+///
+/// The modification time is in nanoseconds, as fine as the filesystem records.
+/// Seconds would be too coarse to be safe: an editor hook that saves twice
+/// inside one second, ending at the same byte length, would leave the second
+/// save looking unchanged and its findings stale until the file is edited again.
+///
+/// Zero for either value means the filesystem did not answer, which
+/// [`Index::unchanged_by_stat`] treats as "no answer" rather than as a match, so
+/// a platform that cannot supply one simply never takes the shortcut.
+pub fn file_stat(path: &Path) -> (i64, i64) {
+    let Ok(meta) = std::fs::metadata(path) else { return (0, 0) };
+    let mtime =
+        meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos() as i64).unwrap_or(0);
+    (meta.len() as i64, mtime)
 }
 
 /// Where the index database for `repo_root` lives.
@@ -115,11 +166,17 @@ pub struct Index {
 
 impl Index {
     pub fn open(repo_root: &Path) -> anyhow::Result<Index> {
-        let path = cache_path(repo_root);
+        Index::open_at(&cache_path(repo_root))
+    }
+
+    /// Opens the index database at an exact path, rebuilding it when its schema
+    /// is not this build's. [`Index::open`] derives that path from a repository
+    /// root; callers that already know where the database lives use this.
+    pub fn open_at(path: &Path) -> anyhow::Result<Index> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let conn = open_with_timeout(&path)?;
+        let conn = open_with_timeout(path)?;
         let mut ix = Index { conn };
         // A file that is not a database at all fails the same way a stale schema
         // does: it is a cache the engine cannot read, and spec 9 says rebuild it
@@ -144,8 +201,8 @@ impl Index {
         };
         if rebuild {
             drop(ix);
-            remove_database_files(&path)?;
-            ix = Index { conn: open_with_timeout(&path)? };
+            remove_database_files(path)?;
+            ix = Index { conn: open_with_timeout(path)? };
         }
         ix.init()?;
         Ok(ix)
@@ -192,6 +249,70 @@ impl Index {
         &self.conn
     }
 
+    /// Runs `body` as one atomic unit, releasing the savepoint on success and
+    /// rolling back to it on failure.
+    ///
+    /// A savepoint outside any transaction behaves like `BEGIN DEFERRED`, so a
+    /// caller that opens no transaction of its own still gets one commit per
+    /// call. Inside the run-wide transaction [`Index::begin`] opens it nests
+    /// instead, which is what lets a whole run share a single commit.
+    ///
+    /// `name` is a SQL identifier and is only ever a literal from this crate.
+    ///
+    /// A failed rollback is not reported: the caller's error is the one that
+    /// explains what went wrong, and replacing it with the cleanup's error would
+    /// hide the cause.
+    pub(crate) fn savepoint<T>(
+        &self,
+        name: &str,
+        body: impl FnOnce(&Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        match body(&self.conn) {
+            Ok(value) => {
+                self.conn.execute_batch(&format!("RELEASE {name}"))?;
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Opens a transaction meant to span a whole run.
+    ///
+    /// Every write the index does is a savepoint, so without this each one is
+    /// its own commit: several thousand fsync-shaped units for a repository the
+    /// size of a real app. Wrapping the run turns those into one. The caller
+    /// owns the pair: call [`Index::commit`] once the run's writes are done, and
+    /// drop the index instead if anything failed, which rolls the run back.
+    ///
+    /// The transaction is `IMMEDIATE`, so the write lock is taken here rather
+    /// than at the run's first write. That is what makes a second locrin against
+    /// the same cache wait (up to the busy timeout) instead of failing: in WAL
+    /// mode a deferred transaction that has already read and then tries to write
+    /// after another connection committed is refused with a snapshot conflict
+    /// straight away, and the busy handler is never consulted for it. Taking the
+    /// lock up front sends the second run through the busy handler, where
+    /// waiting is what it is for. Readers are unaffected either way: the
+    /// database is in WAL mode. The lock is then held for the whole run.
+    pub fn begin(&mut self) -> anyhow::Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(())
+    }
+
+    /// Commits the transaction [`Index::begin`] opened.
+    pub fn commit(&mut self) -> anyhow::Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Records the file row, without any stat for a later run to compare against.
+    ///
+    /// A row written this way is never matched by [`Index::unchanged_by_stat`],
+    /// so a run that reads it falls back to the content hash. Callers that hold
+    /// the file's size and modification time use [`Index::upsert_file_stat`].
     pub fn upsert_file(
         &mut self,
         rel: &str,
@@ -199,20 +320,87 @@ impl Index {
         content_hash: &str,
         parse_status: &str,
     ) -> anyhow::Result<()> {
+        self.upsert_file_stat(rel, language, content_hash, parse_status, 0, 0)
+    }
+
+    /// Records the file row together with the size and modification time that
+    /// [`Index::unchanged_by_stat`] compares against on a later run. Pass zero
+    /// for either when the filesystem could not answer; a zero is "no answer",
+    /// not a value that can match.
+    pub fn upsert_file_stat(
+        &mut self,
+        rel: &str,
+        language: &str,
+        content_hash: &str,
+        parse_status: &str,
+        size: i64,
+        mtime: i64,
+    ) -> anyhow::Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         self.conn.execute(
-            "INSERT INTO files(rel, language, content_hash, parse_status, indexed_at) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files(rel, language, content_hash, parse_status, indexed_at, size, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(rel) DO UPDATE SET language=excluded.language, content_hash=excluded.content_hash,
-             parse_status=excluded.parse_status, indexed_at=excluded.indexed_at",
-            params![rel, language, content_hash, parse_status, now],
+             parse_status=excluded.parse_status, indexed_at=excluded.indexed_at, size=excluded.size,
+             mtime=excluded.mtime",
+            params![rel, language, content_hash, parse_status, now, size, mtime],
         )?;
         Ok(())
+    }
+
+    /// Brings the stored size and modification time for `rel` up to date without
+    /// saying anything about its content.
+    ///
+    /// This is for the file that was touched but not edited: the stat disagreed,
+    /// the run read and hashed the file, and the hash said unchanged. Nothing is
+    /// re-recorded for such a file, so without this the stale stat would stay and
+    /// the file would pay a read and a hash on every run from now on. A checkout,
+    /// a formatter or a stash pop rewrites hundreds of unchanged files at once,
+    /// so that adds up.
+    ///
+    /// The stat passed in must be the one taken before the read, the same rule
+    /// [`indexer::record_with_stat`](crate::indexer::record_with_stat) explains.
+    /// A stat that could not answer is not stored, and a file the index has never
+    /// seen is not invented: only an existing row is updated, and only when the
+    /// values actually differ.
+    pub fn refresh_stat(&mut self, rel: &str, size: i64, mtime: i64) -> anyhow::Result<()> {
+        if size == 0 || mtime == 0 {
+            return Ok(());
+        }
+        // Prepared once and reused: a full run calls this for every file whose
+        // stat moved without its bytes moving, which after a checkout is most of
+        // the repository.
+        self.conn
+            .prepare_cached("UPDATE files SET size = ?1, mtime = ?2 WHERE rel = ?3 AND (size <> ?1 OR mtime <> ?2)")?
+            .execute(params![size, mtime, rel])?;
+        Ok(())
+    }
+
+    /// Whether `rel` is certainly the file this index already recorded, judged
+    /// by size and modification time alone.
+    ///
+    /// This is a shortcut past reading and hashing a file, so it may only ever
+    /// be wrong in the direction of more work: false means "read it and decide
+    /// properly". It answers true only when a row exists and both values match
+    /// and neither is zero, because zero is what an unavailable stat records and
+    /// two unavailable stats must not compare equal.
+    pub fn unchanged_by_stat(&self, rel: &str, size: i64, mtime: i64) -> anyhow::Result<bool> {
+        if size == 0 || mtime == 0 {
+            return Ok(false);
+        }
+        let stored: Option<(i64, i64)> = self
+            .conn
+            .prepare_cached("SELECT size, mtime FROM files WHERE rel = ?1")?
+            .query_row(params![rel], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(stored == Some((size, mtime)))
     }
 
     pub fn file_hash(&self, rel: &str) -> anyhow::Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT content_hash FROM files WHERE rel = ?1", params![rel], |r| r.get(0))
+            .prepare_cached("SELECT content_hash FROM files WHERE rel = ?1")?
+            .query_row(params![rel], |r| r.get(0))
             .optional()?)
     }
 
@@ -220,20 +408,78 @@ impl Index {
         Ok(self.file_hash(rel)?.as_deref() != Some(content_hash))
     }
 
+    pub fn parse_status(&self, rel: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT parse_status FROM files WHERE rel = ?1", params![rel], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Every indexed file, sorted, so callers iterate in a reproducible order.
+    pub fn all_files(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT rel FROM files ORDER BY rel")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records which lines of `rel` carry the allow marker, replacing whatever was
+    /// stored before. The rule runner consults this for findings on files it did not
+    /// parse this run, so suppression works for graph rules too.
+    pub fn replace_allow_lines(&mut self, rel: &str, lines: &[u32]) -> anyhow::Result<()> {
+        self.savepoint("allow_lines", |tx| {
+            tx.execute("DELETE FROM allow_lines WHERE rel = ?1", params![rel])?;
+            let mut stmt = tx.prepare("INSERT INTO allow_lines(rel, line) VALUES (?1, ?2)")?;
+            for line in lines {
+                stmt.execute(params![rel, line])?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn is_allowed(&self, rel: &str, line: u32) -> anyhow::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM allow_lines WHERE rel = ?1 AND line = ?2",
+            params![rel, line],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every file that still has at least one unresolved import edge, sorted.
+    ///
+    /// `remove_missing` marks edges into a departed file unresolved without
+    /// touching the importer's own row, so when that file comes back the
+    /// importer is unchanged and would never be re-indexed. This is how a run
+    /// finds the importers whose edges are worth attempting again.
+    pub fn files_with_unresolved_edges(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT from_rel FROM edges WHERE resolution = 'unresolved' ORDER BY from_rel")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn remove_missing(&mut self, present: &[String]) -> anyhow::Result<usize> {
         let mut stmt = self.conn.prepare("SELECT rel FROM files")?;
         let existing: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         drop(stmt);
         let keep: std::collections::HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
-        let mut removed = 0;
-        let tx = self.conn.transaction()?;
-        for rel in existing.iter().filter(|r| !keep.contains(r.as_str())) {
-            tx.execute("DELETE FROM symbols WHERE rel = ?1", params![rel])?;
-            tx.execute("DELETE FROM files WHERE rel = ?1", params![rel])?;
-            removed += 1;
-        }
-        tx.commit()?;
-        Ok(removed)
+        self.savepoint("remove_missing", |tx| {
+            let mut removed = 0;
+            for rel in existing.iter().filter(|r| !keep.contains(r.as_str())) {
+                for (table, column) in PER_FILE_TABLES {
+                    tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), params![rel])?;
+                }
+                // Edges from files that stayed still point here. The target is gone, so
+                // the edge is no longer resolved: it keeps its specifier and says so.
+                tx.execute(
+                    "UPDATE edges SET to_rel = NULL, resolution = 'unresolved' WHERE to_rel = ?1",
+                    params![rel],
+                )?;
+                removed += 1;
+            }
+            Ok(removed)
+        })
     }
 }
 
@@ -275,6 +521,103 @@ mod tests {
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h2"));
     }
 
+    /// The stat check is only ever allowed to say "definitely unchanged". A
+    /// missing row, a value that differs, or a stat that could not answer all
+    /// have to send the caller down the read-and-hash path.
+    #[test]
+    fn unchanged_by_stat_needs_a_row_and_two_real_values() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert!(!ix.unchanged_by_stat("src/a.ts", 10, 100).unwrap(), "a file with no row was never indexed");
+        ix.upsert_file_stat("src/a.ts", "typescript", "h1", "ok", 10, 100).unwrap();
+        assert!(ix.unchanged_by_stat("src/a.ts", 10, 100).unwrap());
+        assert!(!ix.unchanged_by_stat("src/a.ts", 11, 100).unwrap(), "a different size is a change");
+        assert!(!ix.unchanged_by_stat("src/a.ts", 10, 101).unwrap(), "a different mtime is a change");
+
+        ix.upsert_file_stat("src/b.ts", "typescript", "h1", "ok", 0, 100).unwrap();
+        assert!(!ix.unchanged_by_stat("src/b.ts", 0, 100).unwrap(), "an unknown size is not a match");
+        ix.upsert_file_stat("src/c.ts", "typescript", "h1", "ok", 10, 0).unwrap();
+        assert!(!ix.unchanged_by_stat("src/c.ts", 10, 0).unwrap(), "an unknown mtime is not a match");
+    }
+
+    /// A file that was touched but not edited has to have its stat brought up
+    /// to date, or the run that read it to find that out pays that read on
+    /// every later run too. Nothing about the content changed, so the hash is
+    /// left exactly as it was.
+    #[test]
+    fn refresh_stat_updates_a_row_without_touching_its_hash() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file_stat("src/a.ts", "typescript", "h1", "ok", 10, 100).unwrap();
+        ix.refresh_stat("src/a.ts", 10, 250).unwrap();
+        assert!(ix.unchanged_by_stat("src/a.ts", 10, 250).unwrap());
+        assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"), "a refresh says nothing about content");
+
+        ix.refresh_stat("src/a.ts", 0, 300).unwrap();
+        ix.refresh_stat("src/a.ts", 10, 0).unwrap();
+        assert!(ix.unchanged_by_stat("src/a.ts", 10, 250).unwrap(), "a stat that could not answer is not one to store");
+
+        ix.refresh_stat("src/gone.ts", 10, 250).unwrap();
+        assert!(ix.file_hash("src/gone.ts").unwrap().is_none(), "a refresh never invents a file row");
+    }
+
+    #[test]
+    fn file_stat_reads_a_real_file_and_gives_up_quietly() {
+        let dir = unique_cache_dir("stat");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.ts");
+        std::fs::write(&path, "export const a = 1;\n").unwrap();
+        let (size, mtime) = file_stat(&path);
+        assert_eq!(size, 20);
+        assert!(mtime > 0, "a file on disk has a modification time");
+        // Nanoseconds, not seconds. Two saves inside one wall clock second is an
+        // ordinary editor-hook workflow, and if they end at the same length a
+        // second-granularity mtime would call the second one unchanged and leave
+        // the file's findings stale until it is edited again.
+        let handle = std::fs::File::options().write(true).open(&path).unwrap();
+        handle.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)).unwrap();
+        drop(handle);
+        assert_eq!(file_stat(&path).1, 1_000_000_000_000_000_000, "the modification time is nanoseconds");
+        assert_eq!(file_stat(&dir.join("nothing.ts")), (0, 0), "a path that is not there answers nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The run-wide transaction takes the write lock when it opens, so a second
+    /// run waits for the first through the busy handler and then says the
+    /// database is busy. A deferred transaction would instead read happily and
+    /// fail on its first write with a snapshot conflict, which the busy handler
+    /// is never consulted for: the second run would fail immediately rather than
+    /// wait its turn.
+    #[test]
+    fn begin_takes_the_write_lock_up_front() {
+        let dir = unique_cache_dir("begin");
+        let path = dir.join("index.db");
+        let mut first = Index::open_at(&path).unwrap();
+        let mut second = Index::open_at(&path).unwrap();
+        // Short, so the test does not sit out the real five second timeout. The
+        // point is that the wait happens at all.
+        let wait = std::time::Duration::from_millis(50);
+        second.conn().busy_timeout(wait).unwrap();
+
+        first.begin().unwrap();
+        assert!(first.begin().is_err(), "one transaction at a time on one connection");
+
+        let started = std::time::Instant::now();
+        let err = second.begin().expect_err("the first run holds the write lock");
+        let waited = started.elapsed();
+        let code = err.downcast_ref::<rusqlite::Error>().map(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _) => f.code,
+            _ => rusqlite::ErrorCode::Unknown,
+        });
+        assert_eq!(code, Some(rusqlite::ErrorCode::DatabaseBusy), "{err:?}");
+        assert!(waited >= wait / 2, "the busy handler has to be consulted, but it gave up after {waited:?}");
+
+        first.commit().unwrap();
+        second.begin().expect("the write lock is free once the first run commits");
+        second.commit().unwrap();
+        drop(first);
+        drop(second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn remove_missing_drops_files_not_present() {
         let mut ix = Index::open_in_memory().unwrap();
@@ -284,6 +627,102 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(ix.file_hash("b.ts").unwrap().is_none());
         assert!(ix.file_hash("a.ts").unwrap().is_some());
+    }
+
+    #[test]
+    fn allow_lines_round_trip_and_replace() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.replace_allow_lines("src/a.ts", &[3, 9]).unwrap();
+        assert!(ix.is_allowed("src/a.ts", 3).unwrap());
+        assert!(!ix.is_allowed("src/a.ts", 4).unwrap());
+        assert!(!ix.is_allowed("src/b.ts", 3).unwrap());
+        ix.replace_allow_lines("src/a.ts", &[4]).unwrap();
+        assert!(!ix.is_allowed("src/a.ts", 3).unwrap(), "replace must drop the old lines");
+        assert!(ix.is_allowed("src/a.ts", 4).unwrap());
+    }
+
+    #[test]
+    fn parse_status_and_file_list() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert_eq!(ix.parse_status("src/a.ts").unwrap(), None);
+        ix.upsert_file("src/b.ts", "typescript", "h", "ok").unwrap();
+        ix.upsert_file("src/a.ts", "typescript", "h", "error").unwrap();
+        assert_eq!(ix.parse_status("src/a.ts").unwrap().as_deref(), Some("error"));
+        assert_eq!(ix.all_files().unwrap(), vec!["src/a.ts".to_string(), "src/b.ts".to_string()]);
+    }
+
+    /// A file that left the repository must leave every table, or a graph rule
+    /// would keep seeing edges from a file that no longer exists.
+    #[test]
+    fn remove_missing_cascades_to_every_table() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file("a.ts", "typescript", "1", "ok").unwrap();
+        ix.replace_allow_lines("a.ts", &[1]).unwrap();
+        let c = ix.conn();
+        c.execute(
+            "INSERT INTO symbols(rel, kind, name, start_line, start_col, end_line, end_col, exported)
+             VALUES ('a.ts','function','f',1,0,1,1,0)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
+             VALUES ('a.ts','b.ts','./b','x','import','resolved',1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO findings_cache(rel, rule, content_hash, config_hash, findings) VALUES ('a.ts','r','1','c','[]')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(ix.remove_missing(&[]).unwrap(), 1);
+        for table in ["files", "symbols", "edges", "allow_lines", "findings_cache"] {
+            let n: i64 = ix.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "{table} still has rows for a removed file");
+        }
+    }
+
+    /// The other half of the cascade: an edge from a file that stayed into a file
+    /// that left must stop claiming it resolved, or a graph rule would follow it
+    /// to a node that is no longer in the index.
+    #[test]
+    fn remove_missing_unresolves_edges_into_a_departed_file() {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.upsert_file("a.ts", "typescript", "1", "ok").unwrap();
+        ix.upsert_file("b.ts", "typescript", "1", "ok").unwrap();
+        ix.conn()
+            .execute(
+                "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
+                 VALUES ('a.ts','b.ts','./b','x','import','resolved',1)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(ix.remove_missing(&["a.ts".to_string()]).unwrap(), 1);
+        let (to_rel, resolution): (Option<String>, String) = ix
+            .conn()
+            .query_row("SELECT to_rel, resolution FROM edges WHERE from_rel = 'a.ts'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(to_rel, None, "the edge must stop pointing at a file that left the repository");
+        assert_eq!(resolution, "unresolved");
+    }
+
+    #[test]
+    fn files_with_unresolved_edges_lists_each_importer_once() {
+        let ix = Index::open_in_memory().unwrap();
+        ix.conn()
+            .execute_batch(
+                "INSERT INTO edges(from_rel, to_rel, specifier, name, kind, resolution, line)
+                 VALUES ('b.ts',NULL,'./gone','x','import','unresolved',1),
+                        ('a.ts',NULL,'./gone','x','import','unresolved',1),
+                        ('a.ts',NULL,'./gone','y','import','unresolved',1),
+                        ('a.ts','b.ts','./b','z','import','resolved',2),
+                        ('c.ts',NULL,'react','d','import','external',1)",
+            )
+            .unwrap();
+        assert_eq!(ix.files_with_unresolved_edges().unwrap(), vec!["a.ts".to_string(), "b.ts".to_string()]);
     }
 
     #[test]

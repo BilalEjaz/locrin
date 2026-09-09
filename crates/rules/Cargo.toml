@@ -10,5 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 locrin-core = { path = "../core" }
+anyhow.workspace = true
 tree-sitter.workspace = true
 globset.workspace = true
