@@ -10,6 +10,7 @@ pub mod test_newly_skipped;
 pub mod test_no_assert;
 pub mod unreachable;
 pub mod unused_import;
+pub mod weak_crypto;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -271,6 +272,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(test_no_assert::TestNoAssert),
         Box::new(test_newly_skipped::TestNewlySkipped),
         Box::new(secrets::SecretExposed),
+        Box::new(weak_crypto::WeakCrypto),
     ]
 }
 
@@ -610,11 +612,12 @@ mod tests {
                 "swallowed-error",
                 "test-no-assert",
                 "test-newly-skipped",
-                "secret-exposed"
+                "secret-exposed",
+                "weak-crypto"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 9, "nine file rules and three graph rules");
+        assert_eq!(file_rules().len(), 10, "ten file rules and three graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
             vec!["dead-export", "dead-file", "boundary-violation"]
