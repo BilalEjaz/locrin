@@ -61,13 +61,16 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
         }
         let Some(callee) = case_callee(node, src) else { return };
         let args = named_args(node);
-        let body = case_body(&args);
+        let assertions = match case_body(&args) {
+            Some(body) => count_assertions(body, src, &helpers),
+            None => u32::from(names_assertion_helper(&args, src, &helpers)),
+        };
         out.push(TestCase {
             name: case_name(args.first().copied(), src),
             line: line(node),
             end_line: node.end_position().row as u32 + 1,
             skipped: callee_skips(callee, src) || in_skipped_suite(node, src),
-            assertions: body.map_or(0, |b| count_assertions(b, src, &helpers)),
+            assertions,
         });
     });
     out
@@ -81,6 +84,19 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
 /// case written `it(() => {})` has no name and no body worth counting.
 fn case_body<'a>(args: &[Node<'a>]) -> Option<Node<'a>> {
     args.iter().skip(1).rev().find(|a| matches!(a.kind(), "arrow_function" | "function_expression")).copied()
+}
+
+/// Whether a case with no inline callback names one instead: `it("shape", checkShape)`.
+///
+/// The runner calls the named function exactly as it would an inline body, so a
+/// name in the assertion-helper set makes the case assert once, on the same one
+/// level a helper called from inside a body gets. Without this the case reads as
+/// zero assertions and `test-no-assert`, which ships on by default, reports a
+/// case that is fully checked. A name the helper set does not hold still yields
+/// zero: it is either a helper that asserts nothing or one this file cannot see,
+/// and neither is evidence that the case checks anything.
+fn names_assertion_helper(args: &[Node], src: &str, helpers: &HashSet<String>) -> bool {
+    args.iter().skip(1).any(|a| a.kind() == "identifier" && helpers.contains(text(*a, src)))
 }
 
 /// Pre-order walk, `node` first. Source order, so callers can push as they go.
@@ -428,6 +444,41 @@ it(() => {
                 // rule reports `<unnamed>` with nothing asserted rather than
                 // reading the name argument as a body.
                 ("<unnamed>", 0),
+            ]
+        );
+    }
+
+    /// A case may name its callback instead of writing it inline. The runner
+    /// calls the named function exactly as it would an inline one, so when the
+    /// name belongs to a same-file helper that asserts, the case asserts; when it
+    /// does not, the case still reads as asserting nothing, which is the same
+    /// answer an inline body of the same code gives.
+    #[test]
+    fn a_named_callback_asserts_when_it_names_an_assertion_helper() {
+        let src = r#"function checkShape(row) {
+  expect(row).toBeDefined();
+}
+
+function warmUp(row) {
+  render(row);
+}
+
+it("shape", checkShape);
+
+it("warm up", warmUp);
+
+it("imported helper", checkImported);
+"#;
+        let cases = extract(&parsed(src));
+        let view: Vec<(&str, u32)> = cases.iter().map(|c| (c.name.as_str(), c.assertions)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("shape", 1),
+                ("warm up", 0),
+                // Not declared in this file, so nothing here can say whether it
+                // checks anything: zero is the honest answer.
+                ("imported helper", 0),
             ]
         );
     }

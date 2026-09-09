@@ -6,6 +6,10 @@ function expectRowShape(row: unknown) {
   expect(row).toBeDefined();
 }
 
+function checkShape(row: unknown) {
+  expect(row).toHaveProperty("id");
+}
+
 describe("row", () => {
   it("delegates its check to a helper", () => {
     expectRowShape({ id: 1 });
@@ -41,4 +45,6 @@ describe("row", () => {
       if (!x) throw new Error("missing");
     }
   });
+
+  it("shape", checkShape);
 });
