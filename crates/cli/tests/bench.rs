@@ -119,7 +119,15 @@ fn warm_thirty_file_check_under_one_second() {
         files.extend(ts_files(sub, &format!("app/{name}/")));
     }
     files.truncate(30);
-    assert!(files.len() >= 10, "bench repo has too few files under app/ to stand in for a PR: {}", files.len());
+    // The spec's number is thirty, so thirty is what gets measured. Anything less
+    // is a different benchmark wearing this one's name.
+    assert_eq!(
+        files.len(),
+        30,
+        "the spec's pull request is 30 files and the listing found {}; widen the listing further (another \
+         directory level, or another top-level directory) if the bench checkout shrank",
+        files.len()
+    );
     let t = Instant::now();
     let out = locrin(cache.path()).arg("check").args(&files).output().unwrap();
     let ms = t.elapsed().as_millis();
