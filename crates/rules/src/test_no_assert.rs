@@ -93,15 +93,17 @@ impl Rule for TestNoAssert {
         Confidence::Medium
     }
 
-    /// Off by default: 0 of 20 sampled findings were true across the five corpus
-    /// repositories (see
+    /// Off by default after two measurements on the five corpus repositories
+    /// (see
     /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
-    /// All twenty are the third blind spot in the module doc, the custom matcher.
-    /// React Native Testing Library's queries throw when they do not match, so
-    /// `render(<Route />).getByText('REDIRECT:/')` is the whole assertion and the
-    /// case is fully checked; the rule cannot see it, because the assertion is a
-    /// call named neither `expect` nor `assert`. A suite written in the `expect`
-    /// or `assert` dialect is measured differently, so the rule is opt-in:
+    /// The first found 54 findings, 0 of 20 sampled true, all of them throwing
+    /// Testing Library queries; those now count as assertions and 43 of the 54
+    /// went with them. The second labelled all 11 that remain and none is true
+    /// either: every one is a guard case that walks a data set and calls
+    /// `throw new Error(...)` with a written explanation when an invariant
+    /// breaks, which is a real check that happens to name no matcher. Counting a
+    /// `throw` statement as an assertion is the known next step and is not done
+    /// yet, so the rule stays opt-in:
     ///
     /// ```toml
     /// [rules.test-no-assert]

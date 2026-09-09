@@ -275,17 +275,19 @@ impl Rule for SwallowedError {
         Confidence::High
     }
 
-    /// Off by default: 0 of 20 sampled findings were judged worth acting on
-    /// across the five corpus repositories (see
+    /// Off by default after two measurements on the five corpus repositories
+    /// (see
     /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
-    /// Of the 100 findings the corpus produced, 89 are the same shape: an empty
-    /// catch whose body holds a comment saying the swallow is deliberate and the
-    /// failure non-fatal, and not one bare empty catch appeared anywhere. The
-    /// rule's claim is literally true in every one of those cases, which is why
-    /// it stays a rule rather than being deleted; what the corpus says is that
-    /// on a mature codebase it reports a decision that has already been made and
-    /// written down. A repository that wants the rule as a review aid turns it on
-    /// with
+    /// The first found 100 findings, 0 of 20 sampled worth acting on, 89 of them
+    /// comment-only catches; those are exempt now and form 1 finds nothing at all
+    /// on 2674 files, because not one catch empty of everything exists there. The
+    /// second labelled all 11 that remain and none is true either: form 2 reads
+    /// `await f()`, `void f()` and `f().finally(g)` as callers using a result
+    /// that a `Promise<void>` function never returns, and form 3's five are
+    /// effect-scoped `load()` calls whose whole body is a try/catch, so the
+    /// promise cannot reject. Both are contained fixes with a corpus behind them
+    /// and neither is made yet. A repository that wants the rule as a review aid
+    /// turns it on with
     ///
     /// ```toml
     /// [rules.swallowed-error]

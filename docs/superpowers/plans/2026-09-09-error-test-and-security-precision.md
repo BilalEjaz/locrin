@@ -3,150 +3,161 @@
 Spec 10.2 gate for `swallowed-error`, `test-no-assert` and `test-newly-skipped`,
 measured on the five corpus repositories named in the plan's Global Constraints.
 
-Binary: `target/release/locrin.exe`, built from `engine/erosion` at `9edaf4f`
-(the three folded fixes of Task 7, before the default change this report causes).
-Command per repository: `locrin --root <repo> check --offline`, terminal reporter,
-uncapped, with a fresh `LOCRIN_CACHE_DIR` per repository and nothing written into
-the repository itself. None of the five has a `locrin.toml`, so this is
-out-of-the-box behaviour.
+Binary: `target/release/locrin.exe`, built from `engine/erosion` at `4395a45`
+(Task 7b: the two rule corrections below, on top of Task 7). Command per
+repository: `locrin --root <repo> check --offline`, terminal reporter, uncapped,
+with a fresh `LOCRIN_CACHE_DIR` per repository and nothing written into the
+repository itself. None of the five has a `locrin.toml`. A second pass with
+`--sarif` over the same warm cache produced the machine-readable finding list the
+labelling below works from; it reports the same findings the terminal pass did.
+
+Both rules under measurement ship `enabled_by_default() == false` since Task 7,
+so the measurement binary flips those two methods to `true` and is thrown away
+afterwards. Nothing else differs from `4395a45`, and no corpus repository was
+given a config file.
 
 | Repository | Indexed files | Verdict | Findings (all rules) | Wall |
 | --- | --- | --- | --- | --- |
-| fasting-app | 1846 | BLOCK | 831 (6 high, 167 medium, 658 low) | 12236 ms |
-| strongspan | 358 | BLOCK | 179 (1 high, 23 medium, 155 low) | 9004 ms |
-| teyji | 207 | BLOCK | 38 (5 high, 4 medium, 29 low) | 4649 ms |
-| autoqa | 258 | BLOCK | 57 (17 high, 3 medium, 37 low) | 5603 ms |
-| fastlift-admin | 5 | BLOCK | 11 (0 high, 4 medium, 7 low) | 299 ms |
+| fasting-app | 1846 | BLOCK | 727 (6 high, 102 medium, 619 low) | 5811 ms |
+| strongspan | 358 | BLOCK | 159 (1 high, 7 medium, 151 low) | 1292 ms |
+| teyji | 207 | BLOCK | 34 (5 high, 0 medium, 29 low) | 433 ms |
+| autoqa | 258 | BLOCK | 56 (17 high, 2 medium, 37 low) | 529 ms |
+| fastlift-admin | 5 | ADVISORY | 8 (0 high, 1 medium, 7 low) | 100 ms |
+
+Before Task 7b the same five repositories gave 831 / 179 / 38 / 57 / 11 findings
+and 12236 / 9004 / 4649 / 5603 / 299 ms, and fastlift-admin blocked rather than
+advising: its four Medium findings were three comment-only catches and one
+commented-out block, and losing the catches leaves nothing above Low. The wall
+times moved for two reasons and only one of them is the engine (see the benchmark
+section); a corpus pass reads every file, so its wall depends on how much of the
+repository the operating system already had in its page cache, which is why the
+controlled cold-index benchmark rather than this column is the performance
+number.
 
 Findings from the three rules under measurement, per repository:
 
-| Rule | fasting-app | strongspan | teyji | autoqa | fastlift-admin | Total |
-| --- | --- | --- | --- | --- | --- | --- |
-| swallowed-error | 68 | 22 | 4 | 3 | 3 | 100 |
-| test-no-assert | 39 | 15 | 0 | 0 | 0 | 54 |
-| test-newly-skipped | 1 | 0 | 0 | 0 | 0 | 1 |
+| Rule | fasting-app | strongspan | teyji | autoqa | fastlift-admin | Total | Before 7b |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| swallowed-error | 3 | 6 | 0 | 2 | 0 | 11 | 100 |
+| test-no-assert | 0 | 11 | 0 | 0 | 0 | 11 | 54 |
+| test-newly-skipped | 1 | 0 | 0 | 0 | 0 | 1 | 1 |
+
+## What Task 7b changed
+
+Task 7's measurement produced two corrections to the rules themselves, both
+driven by the false-positive patterns it found, and this report is the re-measure
+after them:
+
+1. `swallowed-error` form 1 fires only on a catch body with nothing in it at all.
+   A body holding only a comment is a maintainer writing the decision down, which
+   is what the rule asks for. That removed 89 of its 100 findings.
+2. `test-no-assert` counts a Testing Library throwing query (`getBy*`,
+   `getAllBy*`, `findBy*`, `findAllBy*`, bare or through `screen` / `within`) as
+   an assertion, because those queries throw when they find nothing. `queryBy*`
+   still counts as nothing. That removed 43 of its 54 findings.
+
+Neither rule's remaining findings are the ones the first sample judged; both
+sections below are labelled afresh.
 
 ## The verdict standard
 
 The same one the plan 2 report used: a finding is true when a maintainer reading
 it would change the code, and false when the correct answer is "no, this is
-intentional and already decided". That standard matters more here than it did for
-the graph rules, because `swallowed-error` is literally right about every finding
-it made on this corpus. See the gate section for what that means and for the
-reading a founder could take instead.
+intentional and already decided".
 
 ## Result at a glance
 
+Every finding was labelled: after Task 7b neither rule produces twenty, so the
+sample is the whole population rather than its first 20.
+
 | Rule | Findings | Sampled | True positives | Gate (17/20) |
 | --- | --- | --- | --- | --- |
-| swallowed-error | 100 | 20 | 0/20 | FAIL |
-| test-no-assert | 54 | 20 | 0/20 | FAIL |
+| swallowed-error | 11 | 11 | 0/11 | FAIL |
+| test-no-assert | 11 | 11 | 0/11 | FAIL |
 | test-newly-skipped | 1 | 1 | 1/1 | unmeasured, sample too small |
 
-## swallowed-error: 0/20 true positives (100 total)
+Before Task 7b: swallowed-error 100 findings, 0/20; test-no-assert 54 findings,
+0/20; test-newly-skipped unchanged. Both rules lost their dominant false-positive
+class and neither found a true positive behind it.
 
-The first 20 findings in verdict order, all from fasting-app (the rule produced 68
-there, so the sample never reached the next repository). Each was judged by reading
-the catch, its body and the function around it.
+## swallowed-error: 0/11 true positives (11 total)
 
-| Repo | File | Line | Verdict | Reason |
-| --- | --- | --- | --- | --- |
-| fasting-app | app/_layout.tsx | 216 | false | Comment-only catch: "import retried next launch; never block startup". A v1 upgrade import that is retried on the next launch by design |
-| fasting-app | app/food/photo.tsx | 110 | false | Comment-only: "Swallowed on purpose (see above)". Deleting a temp file that may already be gone |
-| fasting-app | app/group/[groupId]/index.tsx | 235 | false | Comment-only: "Reporting is best-effort; a failure never disrupts the group space" |
-| fasting-app | app/group/[groupId]/index.tsx | 657 | false | Comment-only: a declined health-permission request leaves the connect state, and the pill can be tapped again |
-| fasting-app | app/group/mile-board.tsx | 100 | false | Comment-only: "best-effort: a failed submit never disturbs the board read" |
-| fasting-app | app/group/public.tsx | 169 | false | Comment-only: the same declined-permission catch as index.tsx L657 |
-| fasting-app | app/group/public.tsx | 386 | false | Comment-only: "Reporting is best-effort; a failure never disrupts the public room" |
-| fasting-app | scripts/reset-project.js | 96 | false | Form 2, and wrong twice: the catch does log the error with its message, and the "caller uses the result" it found is `moveDirectories(userInput).finally(() => rl.close())`, a promise chained for cleanup rather than a result read |
-| fasting-app | src/db/repositories/foodEntries.ts | 94 | false | Comment-only: "Swallowed deliberately (see above); the primary write has already landed" |
-| fasting-app | src/features/account/deleteAccount.ts | 62 | false | Comment-only, in a function called `reconnectQuietly` whose doc comment exists to say the failure must never mask the delete result |
-| fasting-app | src/features/account/deleteAccount.ts | 88 | false | Comment-only: the encrypted store not being ready is the only realistic failure and leaks nothing |
-| fasting-app | src/features/account/exportData.ts | 64 | false | Comment-only: "user dismissed / share unavailable: not an export failure"; the function returns `{ ok: true }` after it |
-| fasting-app | src/features/circuit/cueAudio.ts | 47 | false | Comment-only: "one unloadable asset silences ONE cue, never the feature" |
-| fasting-app | src/features/circuit/cueAudio.ts | 72 | false | Comment-only: "a cue never blocks the session" |
-| fasting-app | src/features/circuit/cueAudio.ts | 82 | false | Comment-only: "releasing a dead player is not an error worth surfacing" |
-| fasting-app | src/features/circuit/cues.ts | 155 | false | Comment-only: "a haptic can never break a session" |
-| fasting-app | src/features/circuit/cues.ts | 200 | false | Comment-only: "a cue never blocks the session" |
-| fasting-app | src/features/food/FoodDayDial.tsx | 70 | false | Comment-only: haptics unavailable on this device, and the surrounding comment records the device fix that made the try/catch necessary |
-| fasting-app | src/features/food/WeekDial.tsx | 67 | false | Comment-only: the same haptic guard, cross-referenced to the FoodDayDial fix |
-| fasting-app | src/features/food/useDaySwipe.ts | 95 | false | Comment-only: the same haptic guard, with the step deliberately taken before it |
+Form 1 produced nothing at all. With the comment-only catch exempt, 2674 indexed
+files contain no catch that is empty of everything, which is the same fact the
+first measurement recorded from the other side (89 comment-only catches, zero
+bare ones). What is left is six log-only catches (form 2) and five floating
+promises (form 3), and all eleven are labelled below.
 
-### The dominant false-positive pattern
+| Repo | File | Line | Form | Verdict | Reason |
+| --- | --- | --- | --- | --- | --- |
+| fasting-app | scripts/reset-project.js | 96 | 2 | false | Wrong twice, as in the first measurement: the catch does log the error with its message, and the "caller that uses the result" is `moveDirectories(userInput).finally(() => rl.close())`, a promise chained for cleanup |
+| fasting-app | src/services/sync.ts | 559 | 2 | false | `bridgeWeighInsOnConnect` returns `Promise<void>` and its doc comment says it never throws and retries on the next connect event. The only same-file call is `void bridgeWeighInsOnConnect()`, which is a statement saying the result is deliberately dropped |
+| fasting-app | src/services/widgetPublish.ts | 75 | 2 | false | `publishWidgetData` returns `Promise<void>`; the only same-file call is `await publishWidgetData(now)` inside `refreshWidgets`, which sequences it rather than reading anything back. The catch is a PII-free breadcrumb and the widget keeps its last payload by design |
+| strongspan | scripts/reset-project.js | 98 | 2 | false | The same Expo template script as the fasting-app row, same reason |
+| strongspan | src/app/session/[id].tsx | 234 | 3 | false | `load()` in a `useEffect`: the async function's whole body is one try/catch that turns any failure into `setScreenState({ status: 'error' })`, so the promise it returns cannot reject |
+| strongspan | src/app/workout/[sessionId].tsx | 436 | 3 | false | The same shape |
+| strongspan | src/app/workout/complete.tsx | 305 | 3 | false | The same shape |
+| strongspan | src/components/WeekView.tsx | 292 | 3 | false | The same shape, `checkInProgress()` in a `useFocusEffect` |
+| strongspan | src/components/WeekView.tsx | 374 | 3 | false | The same shape |
+| autoqa | apps/runner/src/audit-worker.ts | 26 | 2 | false | `generateAuditReport` returns `Promise<void>` and its doc says a missing API key or an LLM error is logged and never fatal because the audit itself already succeeded. The caller is `await generateAuditReport(...)` |
+| autoqa | apps/runner/src/scan-worker.ts | 26 | 2 | false | The same function one file over, same reason |
 
-One pattern, and it is the whole sample: **the commented deliberate catch**. Across
-all 100 findings on all five repositories the split is
+### The two remaining false-positive patterns
 
-| Form | Count |
-| --- | --- |
-| Empty catch whose body is a comment | 89 |
-| Empty catch with a bare body | 0 |
-| Log-only catch (form 2) | 6 |
-| Floating promise (form 3) | 5 |
+**Form 2: `await` and `void` are not uses.** `result_used_elsewhere` counts a
+call whose parent is not an expression statement as a caller using the result.
+Every spelling that appears in this corpus around a function returning
+`Promise<void>` has such a parent: `await f()` is an await expression, `void f()`
+is a unary expression, `f().finally(g)` puts the call inside a member expression.
+So a void async function whose catch logs is reported as soon as the file calls
+it at all, which is all six findings. What would separate them is the enclosing
+function's own shape rather than its call sites: a function with no `return
+<expr>` anywhere in its body has no result for a caller to use, and every one of
+these six is that. Not changed here; it is a fourth rule change and Task 7b was
+scoped to three.
 
-Not one bare empty catch exists anywhere in 2674 indexed files. Every empty catch
-the corpus contains already carries a comment saying the swallow is deliberate and
-naming what happens instead. The rule's module doc anticipates this and answers it
-with `locrin:allow`, which is a defensible design; what the corpus adds is the
-scale. Turning the rule on out of the box asks a mature repository to annotate or
-baseline about ninety decisions it has already made and written down, at Medium
-severity, which blocks.
+**Form 3: the promise that cannot reject.** All five are the same React idiom: an
+effect declares `async function load()` whose entire body is one try/catch
+writing every failure into component state, calls it as a statement, and returns
+a cleanup that flips a `cancelled` flag. The promise is genuinely unheld, and it
+is also genuinely incapable of rejecting, so nothing is dropped. The finding asks
+for a `void` marker on a call that already handles everything. Reading that needs
+to know the callee's body handles its own failures, which is inside one file and
+so is reachable, but it is again more than this task.
 
-The two smaller forms are worth recording separately because they are not the same
-story. All 5 floating-promise findings are in strongspan and are the same shape: a
-`useFocusEffect` that defines a local `async function load()` with its own internal
-try/catch and then calls it as a statement before returning a cleanup. The promise
-is genuinely floating, and it also genuinely cannot reject. Of the 6 log-only
-findings, the one in the sample is a false positive for the reason in its row, and
-`fasting-app/src/services/widgetPublish.ts` L75 and `autoqa/apps/runner/src/audit-worker.ts`
-L26 are the same shape as it: the catch logs, the function returns nothing useful,
-and the "result" the rule saw was a promise being chained. Form 2's rule for "a
-caller uses the result" counts `f().finally(...)`, `f().then(...)` and `f().catch(...)`
-as uses, and on this corpus that is what it mostly finds.
+## test-no-assert: 0/11 true positives (11 total)
 
-## test-no-assert: 0/20 true positives (54 total)
-
-The first 20 findings in verdict order, all from fasting-app. Each case was read in
-full.
+The 39 fasting-app findings are gone: every one of them was a throwing-query
+case. All eleven that remain are in strongspan, and all eleven are one shape.
 
 | Repo | File | Line | Verdict | Reason |
 | --- | --- | --- | --- | --- |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 96 | false | `render(<GroupHubRoute />).getByText('REDIRECT:/')`; the query throws when the redirect did not render, so it is the assertion |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 100 | false | Same form, GroupCreateRoute |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 118 | false | Same form, GroupConsentRoute |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 122 | false | Same form, GroupNameRoute |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 126 | false | Same form, GroupSpaceRoute |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 131 | false | Same form, GroupRenameRoute |
-| fasting-app | app/group/flagOff.route.guard.test.tsx | 136 | false | Same form, ChallengeNewRoute |
-| fasting-app | app/group/mileBoardGate.guard.test.tsx | 145 | false | `await findByTestId('mile-board-board')` then two `getByText` calls; `findBy` rejects on timeout |
-| fasting-app | app/group/mileBoardGate.guard.test.tsx | 204 | false | `await findByTestId` then `getByTestId('mile-board-readiness')`, which is the whole point of the case |
-| fasting-app | app/group/roundsChallenge.guard.test.tsx | 173 | false | `await waitFor(() => screen.getByText(C.roundsCaption(7)))`; waitFor rejects when the query never succeeds |
-| fasting-app | app/group/roundsChallenge.guard.test.tsx | 182 | false | Two `waitFor(getByText(...))` calls, one at each end of the ladder |
-| fasting-app | app/onboarding/concierge.route.test.tsx | 135 | false | `await waitFor(() => utils.getByLabelText('Connected. Steps and sleep will show on Today.'))` |
-| fasting-app | app/onboarding/concierge.route.test.tsx | 145 | false | Same form, asserting the declined label |
-| fasting-app | app/onboarding/concierge.route.test.tsx | 156 | false | Same form, asserting the unavailable label |
-| fasting-app | app/team/flagOff.route.guard.test.tsx | 54 | false | `render(<TeamJoinRoute />).getByText('REDIRECT:/')` |
-| fasting-app | app/team/flagOff.route.guard.test.tsx | 58 | false | Same form, TeamConsentRoute |
-| fasting-app | app/team/flagOff.route.guard.test.tsx | 62 | false | Same form, TeamNameRoute |
-| fasting-app | app/team/flagOff.route.guard.test.tsx | 66 | false | Same form, TeamRoute |
-| fasting-app | app/team/flagOff.route.guard.test.tsx | 70 | false | Same form, TeamPlayerDetailRoute |
-| fasting-app | src/features/account/FirstFastBackupCard.test.tsx | 53 | false | `await waitFor(() => getByTestId('first-fast-backup-card'))` then two `getByText` calls on the copy |
+| strongspan | src/__tests__/guards/coachSurfaceAlpha.guard.test.ts | 158 | false | `it.each(COACH_SURFACES)` reads each surface file and `throw new Error(...)` with the threat id when a forbidden pattern matches |
+| strongspan | src/__tests__/guards/primaryButtonDisabled.guard.test.ts | 105 | false | Same: throws with the offending tag and the design rule when a `PrimaryButton` is passed `disabled` |
+| strongspan | src/domain/catalog/__tests__/exercises.test.ts | 73 | false | Walks `EXERCISES` and throws naming the exercise when a bodyweight increment class carries dumbbell-only equipment |
+| strongspan | src/domain/catalog/__tests__/exercises.test.ts | 109 | false | Throws when a substitution group has no flag-free alternative |
+| strongspan | src/domain/catalog/__tests__/exercises.test.ts | 136 | false | Throws when a home-track exercise uses equipment outside the allowed three |
+| strongspan | src/domain/catalog/__tests__/frozen-ids.test.ts | 104 | false | Throws when a frozen exercise id has left the live catalog, with the reason ids may never be renamed |
+| strongspan | src/domain/programs/__tests__/templates.test.ts | 71 | false | Throws naming the slot when a gym `exerciseId` does not resolve |
+| strongspan | src/domain/programs/__tests__/templates.test.ts | 83 | false | The same for home ids |
+| strongspan | src/domain/programs/__tests__/templates.test.ts | 95 | false | Throws when a home id's catalog entry is not in the home track |
+| strongspan | src/domain/programs/__tests__/templates.test.ts | 160 | false | Throws when an exercise id appears in both Day A and Day B |
+| strongspan | src/domain/programs/__tests__/templates.test.ts | 188 | false | Throws when a three-set slot maps to a non-compound catalog entry |
 
 ### The dominant false-positive pattern
 
-One pattern, twenty out of twenty: **the throwing query as the assertion**. React
-Native Testing Library's `getBy*` and `getAllBy*` throw when nothing matches,
-`findBy*` returns a promise that rejects, and `waitFor` rejects when its callback
-never stops throwing. A case written as `render(<Route />).getByText('REDIRECT:/')`
-is fully checked; there is nothing to add to it. The rule's own module doc names
-this exact blind spot ("a custom matcher named neither `expect` nor `assert` is
-invisible") and chose to under-report rather than guess, which was the right call
-for a matcher the engine cannot recognise. The corpus says the dialect is not a
-minority case in a React Native repository, it is the house style.
+**The explicit `throw` as the assertion.** Every one of the eleven walks a data
+set in a loop and throws a written explanation when an invariant breaks. A
+runner reports a thrown error as a failed case, so these check exactly as much as
+an `expect` would; what they do not do is name a matcher, and per-item loops are
+where the style pays off because the message can name the item.
 
-Nothing in the sample was a case that genuinely checks nothing. That is not proof
-that none exists in the other 34 findings, but the sample gives no evidence that
-the rule finds them.
+The lever is small and known: count a `throw_statement` inside a case body as an
+assertion, in the same `count_assertions` walk that Task 7b added the throwing
+queries to. It is not done here for the reason given under form 2 above. Until it
+is, this rule has no measurable true-positive rate: two independent samples, on
+two different false-positive classes, and still nothing it found was worth
+acting on.
 
 ## test-newly-skipped: 1 finding on the corpus
 
@@ -171,18 +182,22 @@ Applying the plan's rule (Global Constraints, "Under 17/20 the rule ships
 `enabled_by_default() == false` with the reason in its doc comment and in the
 precision report"):
 
-- **`swallowed-error`: 0/20, ships off by default.** Doc comment on
-  `enabled_by_default` cites the number and this report.
-- **`test-no-assert`: 0/20, ships off by default.** Same.
-- **`test-newly-skipped`: unmeasured, ships on.** One corpus finding, true, and no
-  false positives on 2674 files. It ships on fixture evidence plus that single
-  sample, stated as such, the way `unreachable` and `boundary-violation` shipped
-  after plan 2.
+- **`swallowed-error`: 0/11, stays off by default.** Every finding it makes on the
+  corpus was labelled and none was worth acting on. Eleven is under the gate's
+  sample size, so the rule cannot reach 17/20 in either direction on this corpus,
+  but the gate's question is not close: a rule with zero true positives out of its
+  entire corpus output does not ship on.
+- **`test-no-assert`: 0/11, stays off by default.** Same reading, and the second
+  sample in a row with nothing true in it.
+- **`test-newly-skipped`: unmeasured, ships on.** Unchanged by Task 7b. One corpus
+  finding, true, and no false positives on 2674 files. It ships on fixture
+  evidence plus that single sample, stated as such, the way `unreachable` and
+  `boundary-violation` shipped after plan 2.
 
 What does not change: both rules keep their registry entry, so `all_rules()` still
 lists eleven and the SARIF `rules` array still describes all of them; both keep
-every fixture and every test. The rule tests that assumed the rule was on now turn
-it on through `rule_on("swallowed-error")` and `rule_on("test-no-assert")`, which is
+every fixture and every test. The rule tests that assumed the rule was on turn it
+on through `rule_on("swallowed-error")` and `rule_on("test-no-assert")`, which is
 what `dead-file`'s tests already did. A repository wanting either rule writes
 
 ```toml
@@ -192,62 +207,64 @@ enabled = true
 
 and gets the same behaviour this report measured.
 
-### The reading a founder could take instead
+### What the two rules are worth now
 
-`swallowed-error` is the one call in this report that could honestly go the other
-way, and the difference is worth stating rather than burying. Under the standard
-used here (would a maintainer change the code?) it scores 0/20. Under the standard
-"is the rule's claim about the code true?" it scores 19/20 and passes: every one of
-those catches does drop its error, the comment beside it makes the decision visible
-to a reader and not to anything at runtime, and the rule's answer to a repository
-that means it is `locrin:allow` on the line. If the founder wants the rule on by
-default on that reading, the change is one method and its doc comment in
-`crates/rules/src/swallowed_error.rs`, and the two rule tests go back to
-`Config::default()`. `test-no-assert` is not in the same position: those twenty
-cases genuinely assert, and the rule is simply blind to how.
+Both are much quieter and much more nearly right than they were, and neither has
+yet found anything. That is the honest summary: 89 of `swallowed-error`'s 100
+findings and 43 of `test-no-assert`'s 54 were classes of false positive that are
+now gone, and behind them was not a single true positive on 2674 files.
 
-## Benchmarks after Part A
+The first report's "reading a founder could take instead" no longer applies to
+`swallowed-error`: it argued the rule scored 19/20 under "is the claim true?"
+because the comment-only catches really do drop their errors. Those findings are
+gone by ruling, and the eleven that remain are not true under either standard:
+form 2 misreads `await` and `void` as uses of a result, and form 3 flags promises
+that cannot reject.
+
+Each rule now has one contained next lever, both named in its section above (form
+2's "no `return <expr>` means no result", and counting a `throw` statement as an
+assertion). Either is a small change with a corpus behind it. Neither is done
+here, and until one is, the measured position is the one in the table.
+
+## Benchmarks after Task 7b
 
 `cargo test --release -p locrin-cli -- --ignored --nocapture`, three consecutive
-runs on `8014911` (Part A complete, both rules off by default). Bench repository
-`<home>/fasting-app`, fresh temporary cache per benchmark.
+runs on `4395a45`. Bench repository `<home>/fasting-app`, fresh temporary
+cache per benchmark.
 
 | Benchmark | Target | Run 1 | Run 2 | Run 3 | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| cold index (`scan`, empty cache) | under 5000 ms | 7583 ms | 7582 ms | 7037 ms | FAIL |
-| warm single-file check | under 300 ms | 251 ms | 232 ms | 243 ms | PASS |
-| warm 30-file check | under 1000 ms | 345 ms | 330 ms | 338 ms | PASS |
-| startup (`--help`) | under 50 ms | 29 ms | 29 ms | 30 ms | PASS |
+| cold index (`scan`, empty cache) | under 5000 ms | 5983 ms | 5254 ms | 5152 ms | FAIL |
+| warm single-file check | under 300 ms | 255 ms | 245 ms | 240 ms | PASS |
+| warm 30-file check | under 1000 ms | 347 ms | 340 ms | 350 ms | PASS |
+| startup (`--help`) | under 50 ms | 29 ms | 29 ms | 28 ms | PASS |
 
-### The cold-index failure
+Before Task 7b, on `8014911`: cold 7583 / 7582 / 7037 ms (FAIL), warm single-file
+251 / 232 / 243 ms, warm 30-file 345 / 330 / 338 ms, startup 29 / 29 / 30 ms.
 
-It is not caused by Task 7 and it is not new: `4f91e02`, the branch head before this
-task, measures 8497 ms, so the three folded fixes and the two default changes made
-the cold path slightly faster rather than slower. Bisected on this machine, today:
+### The cold index after the fix
 
-| Commit | What it is | Cold scan |
+Task 7 bisected the cold regression to two causes and Task 7b fixed the one that
+was ours. `testcases::extract` no longer runs inside `indexer::record_with_stat`
+on the single thread that owns the index connection; the skipped-case names are
+computed in the rayon parse pass beside `parse_source` and handed to the recorder.
+Measured effect: the worst run improves by 1600 ms and the best by 1885 ms, which
+matches Task 7's estimate of about 2 s from the stub experiment (5478 ms).
+
+The benchmark is still red by 152 ms at its best run, and the remaining cause is
+the second one Task 7 named, which no code change on this branch can address:
+
+| Commit | What it is | Cold scan, measured today or on Task 7's day |
 | --- | --- | --- |
-| `d195857` | Task 1, before `skipped_tests` | 4996 ms |
-| `0aff734` | Task 3, records skipped tests per file | 7470 ms |
-| `4f91e02` | Task 6, branch head before Task 7 | 8497 ms |
+| `d195857` | Task 1, before `skipped_tests` | 3607 ms when Task 1 ran, 4996 ms on Task 7's day |
 | `8014911` | Task 7 complete | 7037 to 7583 ms |
+| `4395a45` | Task 7b, extraction parallelised | 5152 to 5983 ms |
 
-Two causes, both real:
-
-1. **Task 3 added about 2 s.** `indexer::record` calls `testcases::extract(file)`
-   for every test file, and `record` runs on the single thread that owns the index
-   connection, not in the rayon parse pass. Replacing that call with an empty vector
-   and re-measuring gives 5478 ms, so the extraction is roughly 2 s of the 7.5 s on
-   a repository as heavily tested as fasting-app. The fix is to compute the skipped
-   set in the parallel pass beside the parse and hand it to `record`, which changes
-   a core signature and is more than a close-out task should do unasked.
-2. **The machine is slower than when the target was set.** The same Task 1 commit
-   measured 3607 ms when Task 1 ran and 4996 ms today, about 38 percent. Plan 2's
-   end-of-plan numbers were 2962 to 3274 ms. Even with Task 3's cost removed
-   entirely, today's machine gives 5478 ms against a 5000 ms target.
-
-Plan 2's instruction for this benchmark was "fix the cause; do not raise the
-target", and neither cause is fixed here. This is flagged for the founder as the one
-open item of Part A: the parallelisation of `testcases::extract` is a contained
-piece of work, and the machine's baseline should be re-measured on a quiet box
-before anyone concludes the target moved.
+The Task 1 commit, which has none of this plan's work in it at all, measures
+within 4 ms of the target on this machine. So the engine's own budget above that
+floor is a handful of milliseconds, and the 152 ms gap is not a second piece of
+engine work waiting to be found; it is the target having been set on a faster
+machine. Plan 2's instruction stands ("fix the cause; do not raise the target"),
+and the cause that was fixable has been fixed. What is owed before anyone moves
+the target is a re-measure of the Task 1 baseline on a quiet box, which is a
+founder call rather than a code change.
