@@ -223,6 +223,11 @@ export const testPassword = "correcthorsebatterystaple";
 // A form label, from the corpus: four character classes and over four bits per
 // character, and still a sentence rather than a credential.
 export const oauth2Password = "OAuth2 password grant";
+// Sequential filler: three character classes, twenty three characters and
+// 4.14 bits per character, and typed by a person all the same.
+export const stubApiKey = "test_api_key_1234567890";
+// And a value that says what it stands in for.
+export const mockClientSecret = "mockSecretZk4Np7Qm2Rt9Vx6";
 
 // A credential name beside an identifier rather than a literal. Every line
 // below names a secret and holds none: the value is fetched, read off a config
