@@ -820,3 +820,22 @@ fn since_reports_nothing_from_an_uncommitted_deletion() {
     assert!(!files.contains(&"src/lib.ts"), "{v}");
     assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "dead-export"), "{v}");
 }
+
+/// The rest of the check flags that cannot be combined. `--sarif` and `--json`
+/// are two output formats for one stdout; `--changed` and `--base` are two
+/// answers to which files the run sees.
+#[test]
+fn conflicting_check_flags_are_a_usage_error() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--sarif", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(err.contains("--json"), "{err}");
+
+    let out = locrin(dir.path()).args(["check", "--changed", "--base", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(err.contains("--base"), "{err}");
+}
