@@ -138,10 +138,15 @@ export const mixpanelApiSecret = "your_mixpanel_secret";
 export const algoliaAdminApiKey = "your_algolia_admin_key";
 export const launchDarklySdkKey = "sdk-00000000-0000-0000-0000-000000000000";
 export const statsigSecretKey = "secret-your-statsig-key";
-export const branchLiveKey = "key_live_your_branch_key";
+// The Branch Key: the public half, in every mobile bundle Branch ships in. The
+// secret half is spelled `secret_live_`, and that is the one the table matches.
+export const branchLiveKey = "key_live_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
 export const onesignalRestApiKey = "your_onesignal_rest_api_key";
 export const appsflyerDevKey = "your_appsflyer_dev_key";
-export const revenuecatSecretKey = "your_revenuecat_secret_key";
+// RevenueCat's public SDK keys, which every client is configured with and which
+// are `appl_` and `goog_`. The secret key is `sk_`.
+export const revenuecatSecretKey = "appl_A1b2C3d4E5f6G7h8I9j0K1l2";
+export const revenuecatGooglePlaySecretKey = "goog_A1b2C3d4E5f6G7h8I9j0K1l2";
 export const elasticApiKey = "your_elastic_api_key";
 
 // Commerce.

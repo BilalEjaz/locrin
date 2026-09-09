@@ -117,6 +117,7 @@ pub const GENERIC: [&str; 3] = ["password assignment", "API key assignment", "se
 /// before it, because neither is an assignment: a key inside a connection
 /// string, and a value after an HTTP scheme word in a header. Everything else
 /// with a `v` group goes through [`assigned!`], which the test below enforces.
+#[cfg(test)]
 const NOT_ASSIGNMENTS: [&str; 2] = ["Azure storage account key", BASIC_AUTH];
 
 pub const PATTERNS: &[Pattern] = &[
@@ -377,7 +378,10 @@ pub const PATTERNS: &[Pattern] = &[
         regex: r"\bsdk-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     },
     Pattern { provider: "Statsig secret key", regex: r"\bsecret-[A-Za-z0-9]{40,}\b" },
-    Pattern { provider: "Branch.io live key", regex: r"\bkey_live_[A-Za-z0-9]{32}\b" },
+    // Branch's `key_live_` is the Branch Key: the public half, in every mobile
+    // bundle the SDK ships in. The secret half is `secret_live_`, and it is the
+    // only one of the two worth a locked finding.
+    Pattern { provider: "Branch.io secret key", regex: r"\bsecret_live_[A-Za-z0-9]{32}\b" },
     Pattern {
         provider: "OneSignal REST API key",
         regex: assigned!(r#"onesignal[^"'\n]{0,30}(?:rest[_-]?)?(?:api[_-]?)?key"#, r#"[A-Za-z0-9_-]{40,}"#),
@@ -386,9 +390,12 @@ pub const PATTERNS: &[Pattern] = &[
         provider: "AppsFlyer dev key",
         regex: assigned!(r#"appsflyer[^"'\n]{0,25}dev[_-]?key"#, r#"[A-Za-z0-9]{20,}"#),
     },
+    // `appl_` and `goog_` are RevenueCat's public SDK keys, which every client is
+    // configured with and which are meant to be in the bundle. Only the `sk_`
+    // key reaches the REST API, so the credential name alone is not enough.
     Pattern {
         provider: "RevenueCat secret key",
-        regex: assigned!(r#"revenuecat[^"'\n]{0,25}(?:secret|api)[_-]?key"#, r#"[A-Za-z0-9_-]{20,}"#),
+        regex: assigned!(r#"revenuecat[^"'\n]{0,25}(?:secret|api)[_-]?key"#, r#"sk_[A-Za-z0-9_-]{20,}"#),
     },
     Pattern {
         provider: "Elastic Cloud API key",
