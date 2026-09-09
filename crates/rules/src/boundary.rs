@@ -92,7 +92,7 @@ impl Rule for BoundaryViolation {
         // second boundary catching the same line is its own violation and keeps
         // its own id, because the anchor carries the label.
         let mut seen: HashSet<(String, u32, &str)> = HashSet::new();
-        for e in edges::resolved(ctx.index)? {
+        for e in edges::resolved(ctx.index()?)? {
             let Some(to) = e.to_rel.as_deref() else { continue };
             for c in &compiled {
                 if !c.violated(&e.from_rel, to) {

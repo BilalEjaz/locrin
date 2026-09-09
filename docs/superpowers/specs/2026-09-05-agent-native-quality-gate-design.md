@@ -51,7 +51,7 @@ SQLite database per repository in the user cache directory, keyed by canonical r
 - `fingerprints`: symbol id, structural hash, MinHash signature, LSH band keys, signature vector.
 - `findings_cache`: file hash, rule id, serialized findings.
 
-Incremental rule: a changed file is re-parsed and re-fingerprinted; its reverse-import dependents are re-evaluated for cross-file rules only. Everything else is served from cache.
+Incremental rule: a changed file is re-parsed and re-fingerprinted; its reverse-import dependents are re-evaluated for cross-file rules only. Everything else is served from cache. A scope taken from git (`--base`, `--since`) or from named paths reaches the scope plus its import neighbours only, never the index's record of what changed since the last run, so a pull request's verdict is a function of the tree and the ref; a pull request that deletes the last importer of an export sees that dead export on the next whole-repository check.
 
 Resolution: tsconfig `paths` and `baseUrl`, package.json `exports` and workspaces, barrel files followed one level. Known blind spots: deep re-export chains, dynamic imports with computed paths. Recorded as `unresolved`, never guessed.
 
@@ -85,7 +85,7 @@ Every finding carries: rule id, category (erosion or security), OWASP 2021 categ
 Erosion pack, free:
 - `already-exists`: moved to release two, see 4.2
 - `dead-export`: exported symbol imported nowhere. Entry points from package.json (`main`, `exports`, `bin`), framework conventions (Next.js `app/` and `pages/`, Expo Router `app/`), and config.
-- `dead-file`: file imported nowhere and not an entry point.
+- `dead-file`: file imported nowhere and not an entry point. Ships disabled by default (6/9 precision on the corpus substitute, 2026-09-08); a repository enables it with `[rules.dead-file]` `enabled = true` once its entry points are curated.
 - `unreachable`: code after unconditional return, throw, break, continue.
 - `unused-import`.
 - `swallowed-error`: empty catch, catch that only logs and returns undefined where the caller uses the result, promise created without await, then, or catch.

@@ -1,3 +1,4 @@
+mod git;
 mod run;
 
 use std::path::PathBuf;
@@ -26,16 +27,29 @@ struct Cli {
 enum Cmd {
     /// Check files (all by default) and print a verdict
     Check {
+        /// Files or directories to check. --changed and a diff scope each name
+        /// their own files, so paths and --changed/--base/--since cannot be
+        /// combined
+        #[arg(conflicts_with_all = ["base", "since", "changed"])]
         paths: Vec<PathBuf>,
-        /// Only files whose content changed since the last index. Files indexed
-        /// by `scan` but never checked are not re-evaluated; run a full check first.
+        /// Only files whose content changed since the last index, plus the
+        /// graph findings their edges reach.
         #[arg(long)]
         changed: bool,
         /// Compact JSON for agents (capped at ten findings)
         #[arg(long)]
         json: bool,
+        /// SARIF 2.1.0 on stdout, every finding, for code scanning uploads
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
+        /// Files that differ from the merge base with REF, plus untracked files (the pull-request view)
+        #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "since"])]
+        base: Option<String>,
+        /// Files changed by the commits in REF..HEAD (the deployment gate)
+        #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "base"])]
+        since: Option<String>,
     },
-    /// Index the repository without running rules
+    /// Index the repository and warm the findings cache without printing a verdict
     Scan,
     /// Manage the baseline of accepted findings
     Baseline {
@@ -63,9 +77,24 @@ fn real_main() -> anyhow::Result<i32> {
         None => std::env::current_dir()?,
     };
     match cli.cmd {
-        Cmd::Check { paths, changed, json } => {
-            let opts = run::Options { root, paths, changed_only: changed, json };
+        Cmd::Check { paths, changed, json, sarif, base, since } => {
+            let diff = base.map(git::DiffScope::Base).or(since.map(git::DiffScope::Since));
+            let opts = run::Options { root, paths, changed_only: changed, json, diff };
             let verdict = run::check(&opts)?;
+            if sarif {
+                let rules: Vec<locrin_reporters::sarif::RuleMeta> = locrin_rules::all_rules()
+                    .iter()
+                    .map(|r| locrin_reporters::sarif::RuleMeta {
+                        id: r.id().to_string(),
+                        description: r.description().to_string(),
+                        severity: r.default_severity(),
+                        category: r.category(),
+                        enabled_by_default: r.enabled_by_default(),
+                    })
+                    .collect();
+                println!("{}", locrin_reporters::sarif::render(&verdict, &rules, env!("CARGO_PKG_VERSION")));
+                return Ok(verdict.exit_code());
+            }
             if opts.json {
                 println!("{}", locrin_reporters::agent::render(&verdict));
             } else {

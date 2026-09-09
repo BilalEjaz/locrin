@@ -50,7 +50,7 @@ impl Rule for DeadFile {
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let imported = imported_names(ctx)?;
         let mut out = Vec::new();
-        for rel in ctx.index.all_files()? {
+        for rel in ctx.index()?.all_files()? {
             if imported.contains_key(&rel) || ctx.entries.is_entry(&rel) {
                 continue;
             }

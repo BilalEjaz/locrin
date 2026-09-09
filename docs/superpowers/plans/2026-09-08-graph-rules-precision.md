@@ -467,3 +467,72 @@ is roughly the 106 ms the walk was costing, less what the pool cannot remove. Th
 spread across the three runs is still the machine: run 3's 243 ms is the same
 loaded-box noise that produced the 302 ms and 335 ms failures recorded above, but
 it now lands inside the target rather than outside it.
+
+## Benchmarks after Task 16b
+
+Task 16 made `scan` warm the findings cache, which meant the file rules had to
+run over every parsed file rather than over the changed ones alone. Five rules
+over about 1,840 parsed files, single-threaded, cost about 3.7 s, and the cold
+`scan` benchmark went to about 7.8 s against a 5000 ms target.
+
+Task 16b parallelises that pass. `run_file_rules` gives each parsed file a
+`RuleContext` of its own and runs the file rules over it across the rayon pool,
+collecting per-file results and flattening them in file order, so the output is
+identical after the reporter's sort (file-major versus rule-major before it) on
+every machine. The per-file contexts
+carry no index (`RuleContext.index` is now `Option<&Index>`), because no file
+rule reads one; a graph rule takes it through `ctx.index()?`, which errors with
+"graph rule run without an index" rather than panicking. The graph rules still
+run once, through `run_rules`, over the whole index.
+
+Same command, same FastLift checkout, same machine, three runs back to back:
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 3347 ms | 3024 ms | 2996 ms | PASS |
+| warm single-file check | under 300 ms | 159 ms | 159 ms | 152 ms | PASS |
+| startup (`--help`) | under 50 ms | 19 ms | 23 ms | 18 ms | PASS |
+
+The cold run is back inside the target with about 1650 ms of margin at its
+worst, and it now leaves a warm findings cache behind it, which the numbers
+before Task 16 did not. The warm check is unchanged by this task, as expected:
+it parses one file, so there is nothing for the pool to spread.
+
+## Benchmarks after Task 19
+
+Task 19 adds the fourth spec 3.4 benchmark, `warm_thirty_file_check_under_one_second`,
+which stands in for a typical pull request: a warm cache, then one `check` invocation
+over 30 source files from the FastLift checkout's `app/` tree. The listing takes the
+top level of `app/` first and then each immediate subdirectory in turn, sorted, and
+truncates at 30, because the top level alone holds only 11 files. Same command as the
+earlier tables (`cargo test --release -p locrin-cli -- --ignored --nocapture`), same
+checkout, same machine, three runs back to back. All four benchmarks pass on all
+three runs.
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Result |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 3274 ms | 2962 ms | 3038 ms | PASS |
+| warm single-file check | under 300 ms | 144 ms | 147 ms | 145 ms | PASS |
+| warm 30-file check | under 1000 ms | 191 ms | 197 ms | 192 ms | PASS |
+| startup (`--help`) | under 50 ms | 18 ms | 19 ms | 19 ms | PASS |
+
+The warm single-file check is faster than the part A number it is compared against
+(175 / 196 / 243 ms after the parallel walk, and 254 / 246 / 252 ms before the review
+fixes): 144 to 147 ms here, a spread of 3 ms across three runs rather than 68 ms.
+That is the findings cache doing what Task 16 built it for. A warm run no longer
+re-parses and re-evaluates the whole repository, so the cost of a narrowed check is
+dominated by the walk and the cache reads rather than by work proportional to
+repository size.
+
+The 30-file number is the point of the new benchmark. It costs 191 to 197 ms against
+a single file's 144 to 147 ms, so 29 extra files add about 48 ms in total, roughly
+1.7 ms each, against a per-invocation floor of about 145 ms. The target is 1000 ms
+and the measured worst run uses 20 percent of it. The floor, not the per-file cost,
+is what a future optimisation would have to attack: at this marginal rate a 100-file
+pull request would still land near 315 ms.
+
+An earlier revision of this benchmark listed only the top level of `app/`, measured
+11 files, and recorded the shortfall as a caveat. The listing was widened one
+directory level down in the Task 17/18 review pass, so the benchmark now measures the
+30 files the spec names, and the numbers above replace the 11-file table. The
+extrapolation made from the 11-file run (185 to 200 ms for 30 files) held.

@@ -500,3 +500,402 @@ fn a_touched_but_unedited_file_is_still_unchanged() {
     assert!(text.contains("0 changed"), "the hash has to overrule the stat, but the run said: {text}");
     assert_eq!(stored_hash(dir.path(), "src/clean.ts").as_deref(), Some(before.as_str()));
 }
+
+/// The dead export lives in a file the edit never touched, and after the edit
+/// nothing connects the two: `src/index.ts` no longer imports `src/lib.ts` at
+/// all. A `--changed` run must still report it, because the changed file's *old*
+/// edge reached it, which is exactly what made the export dead. `src/lib.ts`
+/// keeps its other importer, so this is `dead-export` and not `dead-file`.
+#[test]
+fn changed_only_reports_graph_findings_on_neighbours() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/other.ts"), "import { kept } from \"./lib\";\nexport const a = kept();\n")
+        .unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { dropped } from \"./lib\";\nimport { a } from \"./other\";\nexport const total = ok() + bad() + dropped() + a;\n",
+    )
+    .unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { a } from \"./other\";\nexport const total = ok() + bad() + a;\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, vec!["src/lib.ts"], "{v}");
+    // The file rule finding on dirty.ts (console.log) is NOT in a --changed run: dirty.ts did not change.
+    assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "leftover-debug"), "{v}");
+}
+
+/// After a scan, a full check must not re-parse anything: the cache answers for
+/// every unchanged file. Row counts alone would pass on an engine that ignored
+/// the cache and re-derived the same answers, so the proof is a probe: a finding
+/// planted in `clean.ts`'s cached row, which no rule could ever produce, appears
+/// in the verdict, and disappears the moment that row's content hash stops
+/// matching the file.
+#[test]
+fn full_check_serves_unchanged_files_from_the_cache() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("scan").assert().success();
+    let db = index_db(dir.path());
+    let count = |sql: &str| -> i64 {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+    let execute = |sql: &str| {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(c.execute(sql, []).unwrap(), 1, "the probe must land on exactly one row: {sql}");
+    };
+    let evidence = |args: &[&str]| -> Vec<String> {
+        let out = locrin(dir.path()).args(args).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["findings"].as_array().unwrap().iter().map(|f| f["evidence"].as_str().unwrap().to_string()).collect()
+    };
+    let per_file = count("SELECT count(DISTINCT rule) FROM findings_cache WHERE rel = 'src/clean.ts'");
+    assert!(per_file >= 5, "scan warms every file rule, got {per_file}");
+    let before = count("SELECT count(*) FROM findings_cache");
+
+    let out = locrin(dir.path()).arg("check").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stdout).unwrap().starts_with("BLOCK  2 finding(s)"));
+    assert_eq!(count("SELECT count(*) FROM findings_cache"), before, "a warm check adds no rows");
+
+    // `clean.ts` is clean, so nothing but the cache can put this in a verdict.
+    let planted = r#"[{"id":"planted000000001","rule":"leftover-debug","category":"erosion","severity":"high",
+        "confidence":"high","file":"src/clean.ts","span":{"start_line":1,"start_col":0,"end_line":1,"end_col":1},
+        "evidence":"planted","fix":"planted","related":[],"owasp":null,"cwe":null}]"#;
+    execute(&format!(
+        "UPDATE findings_cache SET findings = '{}' WHERE rel = 'src/clean.ts' AND rule = 'leftover-debug'",
+        planted.replace('\n', "").replace("        ", "")
+    ));
+    let found = evidence(&["check", "--json"]);
+    assert!(found.iter().any(|e| e == "planted"), "an unchanged file's findings come from the cache: {found:?}");
+
+    // A row whose hash no longer describes the file on disk is not that file's
+    // answer, so the file is read and the planted finding goes.
+    execute("UPDATE findings_cache SET content_hash = 'x' WHERE rel = 'src/clean.ts' AND rule = 'leftover-debug'");
+    let found = evidence(&["check", "--json"]);
+    assert!(!found.iter().any(|e| e == "planted"), "a stale row must never be served: {found:?}");
+
+    std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  debugger;\n  return 1;\n}\n")
+        .unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+    let stale = count(
+        "SELECT count(*) FROM findings_cache c JOIN files f ON f.rel = c.rel WHERE f.content_hash <> c.content_hash",
+    );
+    assert_eq!(stale, 0, "every cache row must carry its file's current hash");
+}
+
+/// A severity override changes what the cache may serve.
+#[test]
+fn config_change_invalidates_the_cache() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("check").output().unwrap();
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.leftover-debug]\nseverity = \"low\"\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let debug = v["findings"].as_array().unwrap().iter().find(|f| f["rule"] == "leftover-debug").unwrap();
+    assert_eq!(debug["severity"], "low", "{v}");
+}
+
+/// The repair pass reads an importer the cache had already answered for, and the
+/// rules then produce that file's findings a second time. Whatever the cache
+/// served for a file the run ended up parsing has to give way, or one restored
+/// target makes its importer report every finding twice.
+#[test]
+fn a_repaired_importer_is_not_reported_twice() {
+    let dir = copy_fixture();
+    let b_source = "export function helper(): number {\n  return 1;\n}\n";
+    std::fs::write(
+        dir.path().join("src/a.ts"),
+        "import { helper } from \"./b\";\nconsole.log(helper());\nexport const v = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/b.ts"), b_source).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+    std::fs::remove_file(dir.path().join("src/b.ts")).unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    // b.ts is back, so a.ts is re-recorded to resolve its edge again even though
+    // the cache had already answered for it.
+    std::fs::write(dir.path().join("src/b.ts"), b_source).unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let n = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["file"] == "src/a.ts" && f["rule"] == "leftover-debug")
+        .count();
+    assert_eq!(n, 1, "{v}");
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn base_sees_the_working_tree_and_since_sees_only_commits() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let base = git(dir.path(), &["rev-parse", "HEAD"]);
+
+    // dirty.ts blocks on a full check but is untouched by this diff.
+    std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  debugger;\n  return 1;\n}\n")
+        .unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert_eq!(files, vec!["src/clean.ts"], "{v}");
+    assert_eq!(v["status"], "block");
+
+    let out = locrin(dir.path()).args(["check", "--since", &base]).output().unwrap();
+    assert!(
+        String::from_utf8(out.stdout).unwrap().starts_with("PASS  0 finding(s)"),
+        "uncommitted work is invisible to --since"
+    );
+
+    git(dir.path(), &["commit", "-qam", "edit"]);
+    let out = locrin(dir.path()).args(["check", "--since", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["findings"][0]["file"], "src/clean.ts", "{v}");
+
+    // An untracked file is part of the working tree view.
+    std::fs::write(dir.path().join("src/new.ts"), "export const n = 1;\nconsole.log(n);\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["findings"].as_array().unwrap().iter().any(|f| f["file"] == "src/new.ts"), "{v}");
+}
+
+#[test]
+fn a_bad_ref_is_an_engine_error() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let out = locrin(dir.path()).args(["check", "--base", "no-such-ref"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.starts_with("error:"), "{err}");
+    assert!(err.contains("no-such-ref"), "{err}");
+}
+
+/// A ref is data the operator hands the tool, and git reads an argument that
+/// begins with `-` as one of its own options. `--since=--output=<path>` used to
+/// reach `git diff` as `--output`, which wrote the diff to that path and let the
+/// check print PASS: an attacker-controlled ref in a CI configuration could
+/// write a file anywhere the runner could. The ref is refused before any git
+/// process starts, so nothing is written and the message names what was refused.
+#[test]
+fn a_ref_that_looks_like_an_option_is_refused() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let planted = dir.path().join("planted.diff");
+    let arg = format!("--since=--output={}", planted.display());
+    let out = locrin(dir.path()).args(["check", arg.as_str()]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stdout));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.starts_with("error:"), "{err}");
+    assert!(err.contains("--output="), "the message names the ref it refused: {err}");
+    assert!(!planted.exists(), "git must never have seen the ref as an option");
+}
+
+/// A file leaving the repository is a change, and the finding it causes lands in
+/// a file the run never touched: the departed file was the last importer of an
+/// export, so that export is dead now. Nothing about the surviving files changed,
+/// so a `--changed` run has an empty scope and only the deleted file's old edges
+/// connect it to the answer.
+#[test]
+fn changed_only_reports_a_dead_export_caused_by_a_deletion() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/one.ts"), "import { kept } from \"./lib\";\nexport const a = kept();\n")
+        .unwrap();
+    std::fs::write(dir.path().join("src/two.ts"), "import { dropped } from \"./lib\";\nexport const b = dropped();\n")
+        .unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { a } from \"./one\";\nexport const total = ok() + bad() + a;\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "dead-export"), "{v}");
+
+    // two.ts was the only consumer of `dropped`, and it is gone.
+    std::fs::remove_file(dir.path().join("src/two.ts")).unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(dead, vec!["src/lib.ts"], "{v}");
+}
+
+#[test]
+fn sarif_output_lists_every_rule_and_every_finding() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--sarif"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 8);
+    assert_eq!(run["results"].as_array().unwrap().len(), 2);
+    assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
+}
+
+/// Named paths and a diff scope each decide which files the run sees. Taking
+/// both would mean one silently winning, so clap refuses the invocation with
+/// its usage exit code instead.
+#[test]
+fn named_paths_and_a_diff_scope_are_a_usage_error() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "src/dirty.ts", "--base", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with '--base"), "{err}");
+
+    let out = locrin(dir.path()).args(["check", "src/dirty.ts", "--since", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with '--since"), "{err}");
+}
+
+/// The four files the two tests below share: `two.ts` is the only consumer of
+/// `dropped`, so deleting it makes that export dead in `lib.ts`, a file nothing
+/// else in the run touches.
+fn deletion_shaped_repo(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/one.ts"), "import { kept } from \"./lib\";\nexport const a = kept();\n").unwrap();
+    std::fs::write(dir.join("src/two.ts"), "import { dropped } from \"./lib\";\nexport const b = dropped();\n")
+        .unwrap();
+    std::fs::write(
+        dir.join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { a } from \"./one\";\nexport const total = ok() + bad() + a;\n",
+    )
+    .unwrap();
+}
+
+/// A diff scope's verdict is a function of the tree and the ref, and of nothing
+/// else. The index's watermark moves the moment a run consumes a deletion, so a
+/// `--base` scope that widened itself with that watermark would report a dead
+/// export on the first run and pass on an identical second one: the same command
+/// on the same tree against the same ref, two different answers.
+#[test]
+fn a_diff_scope_gives_the_same_verdict_twice() {
+    let dir = copy_fixture();
+    deletion_shaped_repo(dir.path());
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    // Warm the index while two.ts is still on disk, so the first --base run
+    // below is the one that sees it go.
+    locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+
+    std::fs::remove_file(dir.path().join("src/two.ts")).unwrap();
+    let findings = |dir: &std::path::Path| -> serde_json::Value {
+        let out = locrin(dir).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["findings"].clone()
+    };
+    let first = findings(dir.path());
+    let second = findings(dir.path());
+    assert_eq!(first, second, "the same --base run twice must answer the same");
+    // The deletion is not in the diff scope (the file is gone from the working
+    // tree), so neither run reports the export it killed.
+    assert_eq!(first.as_array().unwrap().len(), 0, "{first}");
+}
+
+/// `--since` is the deployment gate: it answers for the commits in the range and
+/// for what their edges reach. An uncommitted deletion is outside that range, so
+/// nothing it causes may appear, however recently the index learned about it.
+#[test]
+fn since_reports_nothing_from_an_uncommitted_deletion() {
+    let dir = copy_fixture();
+    deletion_shaped_repo(dir.path());
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let base = git(dir.path(), &["rev-parse", "HEAD"]);
+    locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+
+    // One commit in the range, on a file whose edges never reach lib.ts.
+    std::fs::write(dir.path().join("src/clean.ts"), "// touched\nexport function ok(): number {\n  return 1;\n}\n")
+        .unwrap();
+    git(dir.path(), &["commit", "-qam", "edit"]);
+    std::fs::remove_file(dir.path().join("src/two.ts")).unwrap();
+
+    let out = locrin(dir.path()).args(["check", "--since", &base, "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert!(!files.contains(&"src/lib.ts"), "{v}");
+    assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "dead-export"), "{v}");
+}
+
+/// The rest of the check flags that cannot be combined. `--sarif` and `--json`
+/// are two output formats for one stdout; `--changed` and `--base` are two
+/// answers to which files the run sees.
+#[test]
+fn conflicting_check_flags_are_a_usage_error() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--sarif", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(err.contains("--json"), "{err}");
+
+    let out = locrin(dir.path()).args(["check", "--changed", "--base", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(err.contains("--base"), "{err}");
+
+    // Named paths and `--changed` are two answers to which files the run sees,
+    // exactly as named paths and a diff scope are. The paths used to win in
+    // silence, so a hook that named a file and asked for `--changed` got a
+    // narrower run than it read the flag as asking for.
+    let out = locrin(dir.path()).args(["check", "src/dirty.ts", "--changed"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("cannot be used with"), "{err}");
+    assert!(err.contains("--changed"), "{err}");
+}
