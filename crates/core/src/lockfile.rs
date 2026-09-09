@@ -14,8 +14,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::Context;
-
 use crate::index::content_hash;
 
 /// One installed package: the name the registry knows it by, the exact version
@@ -27,12 +25,19 @@ pub struct Package {
     pub line: u32,
 }
 
-/// A parsed lockfile: its repo-relative path, a content hash that keys the
-/// advisory snapshot, and its packages deduplicated by (name, version) and
-/// sorted.
+/// A parsed lockfile: its repo-relative path, a hash of the package list that
+/// keys the advisory snapshot, and its packages deduplicated by (name, version)
+/// and sorted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lockfile {
     pub rel: String,
+    /// Identifies the package list, not the file. The advisory snapshot this
+    /// keys is zipped positionally against `packages`, so what the key has to
+    /// promise is that the list is the same one the snapshot answered for. A
+    /// text hash would promise less than that (a change to this module's
+    /// parsers would keep the key and move the list, attaching advisories to
+    /// the wrong package) and more than needed (a resolved-URL edit that leaves
+    /// every version alone would throw the snapshot away).
     pub hash: String,
     pub packages: Vec<Package>,
 }
@@ -45,20 +50,39 @@ const CANDIDATES: [(&str, Parser); 3] =
     [("package-lock.json", parse_npm), ("yarn.lock", parse_yarn), ("pnpm-lock.yaml", parse_pnpm)];
 
 /// The lockfile at the root of `root`, or `None` when the repository has none.
+///
+/// A lockfile that exists but cannot be read, because a permission denies it or
+/// because it is not UTF-8, is `None` and a warning rather than an error: the
+/// module doc's rule is that a problem with this input never fails the run, and
+/// a file the parser could not have made sense of anyway is exactly that.
 pub fn read(root: &Path) -> anyhow::Result<Option<Lockfile>> {
     for (name, parse) in CANDIDATES {
         let path = root.join(name);
         if !path.is_file() {
             continue;
         }
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        return Ok(Some(Lockfile {
-            rel: name.to_string(),
-            hash: content_hash(&text),
-            packages: normalize(parse(&text)),
-        }));
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("warning: cannot read {}: {e}; dependency advisories skipped", path.display());
+                return Ok(None);
+            }
+        };
+        let packages = normalize(parse(&text));
+        return Ok(Some(Lockfile { rel: name.to_string(), hash: package_hash(&packages), packages }));
     }
     Ok(None)
+}
+
+/// The key a snapshot of these packages is stored under: `name@version` per
+/// line, sorted, hashed. See [`Lockfile::hash`].
+fn package_hash(packages: &[Package]) -> String {
+    let mut lines: Vec<String> = packages.iter().map(|p| format!("{}@{}", p.name, p.version)).collect();
+    // `normalize` already sorted by name then version then line, which orders
+    // these the same way, but the hash does not depend on a caller having done
+    // that: the point of the key is that one list has one spelling.
+    lines.sort();
+    content_hash(&lines.join("\n"))
 }
 
 /// Deduplicates by (name, version), keeping the earliest line, and sorts.
@@ -240,11 +264,29 @@ mod tests {
     }
 
     #[test]
-    fn read_prefers_the_npm_lockfile_and_hashes_its_text() {
+    fn read_prefers_the_npm_lockfile_and_hashes_its_package_list() {
         let lock = read(&fixtures()).unwrap().expect("the fixture directory has lockfiles");
         assert_eq!(lock.rel, "package-lock.json");
-        assert_eq!(lock.hash, content_hash(&text("package-lock.json")));
+        assert_eq!(lock.hash, package_hash(&expected([16, 20, 24, 32])));
+        assert_ne!(lock.hash, content_hash(&text("package-lock.json")), "the text is not what is hashed");
         assert_eq!(lock.packages, expected([16, 20, 24, 32]));
+    }
+
+    /// The hash keys a snapshot that is zipped positionally against the package
+    /// list, so it has to answer for the list and not for the text that produced
+    /// it: three lockfile formats describing one install share it, and a fourth
+    /// package changes it.
+    #[test]
+    fn the_hash_follows_the_package_list_and_not_the_text() {
+        let npm = package_hash(&normalize(parse_npm(&text("package-lock.json"))));
+        let yarn = package_hash(&normalize(parse_yarn(&text("yarn.lock"))));
+        let pnpm = package_hash(&normalize(parse_pnpm(&text("pnpm-lock.yaml"))));
+        assert_eq!(npm, yarn, "the same packages at different lines hash the same");
+        assert_eq!(npm, pnpm);
+
+        let mut more = normalize(parse_npm(&text("package-lock.json")));
+        more.push(Package { name: "extra".into(), version: "1.0.0".into(), line: 99 });
+        assert_ne!(npm, package_hash(&normalize(more)), "one more package is a different list");
     }
 
     #[test]
@@ -252,6 +294,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("locrin-lockfile-none-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read(&dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lockfile that is not text is an unreadable input, not a broken run.
+    #[test]
+    fn a_lockfile_that_is_not_utf8_reads_as_no_lockfile_rather_than_an_error() {
+        let dir = std::env::temp_dir().join(format!("locrin-lockfile-binary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package-lock.json"), [0x7b, 0xff, 0xfe, 0x7d]).unwrap();
+        assert!(read(&dir).unwrap().is_none(), "an unreadable lockfile is None, and the run carries on");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

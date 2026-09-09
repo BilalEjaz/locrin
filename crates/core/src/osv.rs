@@ -9,10 +9,15 @@
 //! path through this module that turns a network problem into a failed run
 //! (spec 9): the worst case is an empty result and one warning.
 //!
-//! The snapshot is keyed by the lockfile's content hash, so editing the lockfile
-//! invalidates it, which is exactly when the answer can change.
+//! The snapshot is keyed by the lockfile's package list (see
+//! [`crate::lockfile::Lockfile::hash`]), because the response is stored as one
+//! document and zipped positionally against that list: the key has to promise
+//! that the list has not moved under it. Installing or upgrading a package
+//! invalidates the snapshot, which is exactly when the answer can change, and a
+//! snapshot from today is reused without a request even when the run is online.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -82,10 +87,18 @@ pub fn check(
         return Ok(Outcome { hits: Vec::new(), warnings, snapshot_age_days: None });
     }
     let now = now_secs();
+    let cached = cached_batch(ix, &lock.hash)?;
 
     let mut batch = None;
     let mut snapshot_age_days = None;
-    if !offline {
+    // A snapshot from today already answers for this exact package list, and one
+    // day is the age at which the run would start warning about it, so it is
+    // also the age at which an online run stops trusting it. Below that the run
+    // asks the network nothing: a repository whose lockfile has not moved costs
+    // no requests however often it is checked, which is what makes the rule
+    // affordable in a pre-commit hook.
+    let fresh = cached.as_ref().is_some_and(|(fetched_at, _)| age_in_days(now, *fetched_at) < 1);
+    if !offline && !fresh {
         match fetch_batch(lock, fetch) {
             Ok(json) => {
                 store_batch(ix, &lock.hash, now, &json)?;
@@ -96,7 +109,7 @@ pub fn check(
         }
     }
     if batch.is_none() {
-        match cached_batch(ix, &lock.hash)? {
+        match cached {
             Some((fetched_at, json)) => {
                 let age = age_in_days(now, fetched_at);
                 if age >= 1 {
@@ -155,8 +168,13 @@ pub fn check(
 /// The one place in the engine that opens a socket.
 ///
 /// `body` present means a JSON POST, absent means a GET.
+///
+/// One run makes one batch request and then one request per advisory found, so
+/// the agent is built once and shared: a fresh agent per request would throw
+/// away the connection pool and pay a TLS handshake for every advisory.
 pub fn http_fetch(url: &str, body: Option<&str>) -> anyhow::Result<String> {
-    let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).user_agent("locrin").build();
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    let agent = AGENT.get_or_init(|| ureq::AgentBuilder::new().timeout(TIMEOUT).user_agent("locrin").build());
     let response = match body {
         Some(body) => agent.post(url).set("Content-Type", "application/json").send_string(body),
         None => agent.get(url).call(),
@@ -265,11 +283,19 @@ fn advisory_from(id: &str, detail: &Value, package: &str) -> Advisory {
 /// The first version the advisory declares fixed for this package.
 ///
 /// An advisory can carry ranges for several ecosystems and several packages, so
-/// the entry has to be matched by name; within the matching entry the first
-/// `fixed` event is the version to upgrade to.
+/// the entry has to be matched by name and by ecosystem: the same name lives in
+/// npm and in Maven and in PyPI, with version numbers that have nothing to do
+/// with each other, and everything this engine reads came out of an npm
+/// lockfile. Within the matching entry the first `fixed` event is the version to
+/// upgrade to. An entry that does not say which ecosystem it is for is not read
+/// as npm; a finding then carries no fix, which is a weaker sentence, not a
+/// wrong version.
 fn first_fixed(detail: &Value, package: &str) -> Option<String> {
     for affected in detail.get("affected").and_then(Value::as_array).into_iter().flatten() {
-        if affected.get("package").and_then(|p| p.get("name")).and_then(Value::as_str) != Some(package) {
+        let named = affected.get("package");
+        let name = named.and_then(|p| p.get("name")).and_then(Value::as_str);
+        let ecosystem = named.and_then(|p| p.get("ecosystem")).and_then(Value::as_str);
+        if name != Some(package) || ecosystem != Some("npm") {
             continue;
         }
         for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
@@ -449,12 +475,16 @@ mod tests {
         let ix = Index::open_in_memory().unwrap();
         let lock = fixture_lock();
         check(&ix, &lock, false, &canned).unwrap();
+        // Old enough that the run wants to refresh it, which is what puts a
+        // request in the way of the answer at all.
+        backdate_batch(&ix, 2);
 
         let outcome = check(&ix, &lock, false, &refuse).unwrap();
 
-        assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+        assert_eq!(outcome.warnings.len(), 2, "{:?}", outcome.warnings);
         assert!(outcome.warnings[0].starts_with("advisory lookup failed"), "{:?}", outcome.warnings);
-        assert_eq!(outcome.snapshot_age_days, Some(0), "the snapshot was written moments ago");
+        assert_eq!(outcome.warnings[1], "using cached advisory snapshot from 2 days ago");
+        assert_eq!(outcome.snapshot_age_days, Some(2));
         assert_eq!(only_hit(&outcome).advisory.id, VULN_ID);
     }
 
@@ -470,6 +500,42 @@ mod tests {
         assert_eq!(outcome.snapshot_age_days, Some(0));
     }
 
+    /// The warm run is the common one, and a snapshot from today answers it. An
+    /// online check over a snapshot less than a day old asks the network
+    /// nothing, so a repository whose lockfile has not moved costs no requests.
+    #[test]
+    fn an_online_check_over_a_snapshot_from_today_makes_no_request() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+        let forbid = |url: &str, _body: Option<&str>| -> anyhow::Result<String> {
+            panic!("a fresh snapshot must not be refreshed, but {url} was requested")
+        };
+
+        let outcome = check(&ix, &lock, false, &forbid).unwrap();
+
+        assert_eq!(outcome.warnings, Vec::<String>::new());
+        assert_eq!(outcome.snapshot_age_days, Some(0));
+        assert_eq!(only_hit(&outcome).advisory.id, VULN_ID);
+    }
+
+    /// A day old is the age the run would start warning about, so it is also the
+    /// age at which an online run refreshes rather than reuses.
+    #[test]
+    fn an_online_check_over_a_day_old_snapshot_refreshes_it() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+        backdate_batch(&ix, 1);
+
+        let outcome = check(&ix, &lock, false, &canned).unwrap();
+
+        assert_eq!(outcome.warnings, Vec::<String>::new(), "the refreshed snapshot is today's");
+        assert_eq!(outcome.snapshot_age_days, Some(0));
+        let stored: i64 = ix.conn().query_row("SELECT fetched_at FROM osv_batch", [], |r| r.get(0)).unwrap();
+        assert!(age_in_days(now_secs(), stored) == 0, "the row was rewritten with today's timestamp");
+    }
+
     #[test]
     fn an_advisory_without_a_rating_is_unknown_and_a_foreign_package_has_no_fix() {
         let detail: Value = serde_json::from_str(DETAIL).unwrap();
@@ -479,6 +545,40 @@ mod tests {
         assert_eq!(advisory_from("GHSA-x", &bare, "lodash").fixed, None);
         assert_eq!(advisory_from(VULN_ID, &detail, "left-pad").fixed.as_deref(), Some("9.9.9"));
         assert_eq!(advisory_from(VULN_ID, &detail, "not-in-the-advisory").fixed, None);
+    }
+
+    /// An advisory can carry the same name in several ecosystems, and only the
+    /// npm entry's versions mean anything to a package this engine read out of
+    /// an npm lockfile.
+    #[test]
+    fn a_fixed_version_comes_only_from_the_npm_entry() {
+        let detail = json!({
+          "id": "GHSA-y",
+          "affected": [
+            {
+              "package": {"name": "lodash", "ecosystem": "Maven"},
+              "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.0.0"}]}]
+            },
+            {
+              "package": {"name": "lodash", "ecosystem": "npm"},
+              "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]
+            }
+          ]
+        });
+        assert_eq!(advisory_from("GHSA-y", &detail, "lodash").fixed.as_deref(), Some("4.17.21"));
+
+        let unstated = json!({
+          "id": "GHSA-z",
+          "affected": [{
+            "package": {"name": "lodash"},
+            "ranges": [{"type": "SEMVER", "events": [{"fixed": "9.9.9"}]}]
+          }]
+        });
+        assert_eq!(
+            advisory_from("GHSA-z", &unstated, "lodash").fixed,
+            None,
+            "an entry that does not say it is npm is not read as one"
+        );
     }
 
     #[test]
