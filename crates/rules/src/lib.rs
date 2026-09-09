@@ -5,6 +5,7 @@ pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
 pub mod swallowed_error;
+pub mod test_no_assert;
 pub mod unreachable;
 pub mod unused_import;
 
@@ -265,6 +266,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(dead_file::DeadFile),
         Box::new(boundary::BoundaryViolation),
         Box::new(swallowed_error::SwallowedError),
+        Box::new(test_no_assert::TestNoAssert),
     ]
 }
 
@@ -601,11 +603,12 @@ mod tests {
                 "dead-export",
                 "dead-file",
                 "boundary-violation",
-                "swallowed-error"
+                "swallowed-error",
+                "test-no-assert"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 6, "six file rules and three graph rules");
+        assert_eq!(file_rules().len(), 7, "seven file rules and three graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
             vec!["dead-export", "dead-file", "boundary-violation"]

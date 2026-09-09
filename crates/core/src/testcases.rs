@@ -46,16 +46,26 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
         }
         let Some(callee) = case_callee(node, src) else { return };
         let args = named_args(node);
-        let body = args.get(1).filter(|a| matches!(a.kind(), "arrow_function" | "function_expression"));
+        let body = case_body(&args);
         out.push(TestCase {
             name: case_name(args.first().copied(), src),
             line: line(node),
             end_line: node.end_position().row as u32 + 1,
             skipped: callee_skips(callee, src) || in_skipped_suite(node, src),
-            assertions: body.map_or(0, |b| count_assertions(*b, src, &helpers)),
+            assertions: body.map_or(0, |b| count_assertions(b, src, &helpers)),
         });
     });
     out
+}
+
+/// The callback a case runs, which is the last function among the arguments
+/// after the name. Runners let a case carry an options object or a timeout
+/// around its callback (`test("n", { timeout: 5000 }, fn)`, `it("n", fn, 10000)`),
+/// so a fixed argument position would miss the body of the first form and read
+/// zero assertions for it. Argument zero is the name and is never the body: a
+/// case written `it(() => {})` has no name and no body worth counting.
+fn case_body<'a>(args: &[Node<'a>]) -> Option<Node<'a>> {
+    args.iter().skip(1).rev().find(|a| matches!(a.kind(), "arrow_function" | "function_expression")).copied()
 }
 
 /// Pre-order walk, `node` first. Source order, so callers can push as they go.
@@ -338,6 +348,42 @@ describe("c", () => {
         let cases = extract(&parsed(src));
         let view: Vec<(&str, bool)> = cases.iter().map(|c| (c.name.as_str(), c.skipped)).collect();
         assert_eq!(view, vec![("one", true), ("two", true), ("three", false)]);
+    }
+
+    /// Vitest and recent Jest let a case carry an options object between its name
+    /// and its callback. Reading argument one as the body counted zero assertions
+    /// for every such case, which is a false positive for any rule that asks
+    /// whether a case asserts, so the body is the last function argument instead.
+    #[test]
+    fn the_body_is_the_last_function_argument_not_the_second() {
+        let src = r#"test("options object before the body", { timeout: 5000 }, () => {
+  expect(1).toBe(1);
+});
+
+it("trailing timeout after the body", () => {
+  expect(2).toBe(2);
+}, 10000);
+
+it("no callback at all", { timeout: 5000 });
+
+it(() => {
+  expect(3).toBe(3);
+});
+"#;
+        let cases = extract(&parsed(src));
+        let view: Vec<(&str, u32)> = cases.iter().map(|c| (c.name.as_str(), c.assertions)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("options object before the body", 1),
+                ("trailing timeout after the body", 1),
+                ("no callback at all", 0),
+                // The name slot holds the callback, so the case has no body: a
+                // rule reports `<unnamed>` with nothing asserted rather than
+                // reading the name argument as a body.
+                ("<unnamed>", 0),
+            ]
+        );
     }
 
     #[test]
