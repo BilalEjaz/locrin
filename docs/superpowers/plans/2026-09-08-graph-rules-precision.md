@@ -478,7 +478,8 @@ over about 1,840 parsed files, single-threaded, cost about 3.7 s, and the cold
 Task 16b parallelises that pass. `run_file_rules` gives each parsed file a
 `RuleContext` of its own and runs the file rules over it across the rayon pool,
 collecting per-file results and flattening them in file order, so the output is
-byte-identical to the sequential pass on every machine. The per-file contexts
+identical after the reporter's sort (file-major versus rule-major before it) on
+every machine. The per-file contexts
 carry no index (`RuleContext.index` is now `Option<&Index>`), because no file
 rule reads one; a graph rule takes it through `ctx.index()?`, which errors with
 "graph rule run without an index" rather than panicking. The graph rules still

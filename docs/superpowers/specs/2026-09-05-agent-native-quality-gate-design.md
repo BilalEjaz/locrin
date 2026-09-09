@@ -51,7 +51,7 @@ SQLite database per repository in the user cache directory, keyed by canonical r
 - `fingerprints`: symbol id, structural hash, MinHash signature, LSH band keys, signature vector.
 - `findings_cache`: file hash, rule id, serialized findings.
 
-Incremental rule: a changed file is re-parsed and re-fingerprinted; its reverse-import dependents are re-evaluated for cross-file rules only. Everything else is served from cache.
+Incremental rule: a changed file is re-parsed and re-fingerprinted; its reverse-import dependents are re-evaluated for cross-file rules only. Everything else is served from cache. A scope taken from git (`--base`, `--since`) or from named paths reaches the scope plus its import neighbours only, never the index's record of what changed since the last run, so a pull request's verdict is a function of the tree and the ref; a pull request that deletes the last importer of an export sees that dead export on the next whole-repository check.
 
 Resolution: tsconfig `paths` and `baseUrl`, package.json `exports` and workspaces, barrel files followed one level. Known blind spots: deep re-export chains, dynamic imports with computed paths. Recorded as `unresolved`, never guessed.
 

@@ -34,7 +34,9 @@
 
 ## Deviations recorded during execution
 
-Part A shipped with these departures from the plan above. Each one is recorded here so the plan and the code agree.
+Both parts shipped with departures from the plan above. Each one is recorded here so the plan and the code agree: Part A's first, then Part B's.
+
+### Part A
 
 - The index schema version is `"3"`, not the `"2"` the Global Constraints name. Task 15c added `size` and `mtime` columns to `files` for the stat shortcut, which is a schema change and so a second bump. Spec 9 still applies: a version mismatch rebuilds the index and logs once.
 - `dead-file` ships disabled by default. It came in below the spec 10.2 precision gate on the corpus substitute, 6/9 after the fixes, so a repository opts in with `[rules.dead-file]` and `enabled = true`.
@@ -45,6 +47,15 @@ Part A shipped with these departures from the plan above. Each one is recorded h
 - Non-recording runs, which is to say the baseline commands, index the repository into an in-memory database. The graph rules answer by querying an index, and on a fresh cache the repository's index is empty, so a baseline built from a read-only run would hold no graph findings at all.
 
 Spec 4.1 still lists dead-file without a default; the founder decides whether the spec records the ships-off default.
+
+### Part B
+
+- Task 16 was integrated into the `run.rs` that Part A left behind rather than replacing it. The task's brief was written before Task 15c, which had already rebuilt the pipeline around the stat shortcut, so the brief's replacement text described code that no longer existed.
+- Task 16b was added, and was not in the plan at all. Task 16 made `scan` warm the findings cache, which meant the file rules had to run over every parsed file rather than over the changed ones alone, and that pushed the cold benchmark from about 3 s to about 7.8 s against a 5 s target. Task 16b runs the file rules per file across the rayon pool: `Rule` is now `Sync`, `RuleContext.index` is `Option<&Index>` because no file rule reads an index, and `run_file_rules` is the new entry point. The cold benchmark is back inside the target.
+- Named paths conflict with `--changed`, `--base` and `--since` at the CLI rather than one silently winning over the other. Each names the files the run sees, so a silent override gives a narrower run than the operator asked for and says nothing about it.
+- The watermark-derived `before` set widens `--changed` and nothing else. A `--base` or `--since` verdict must be a function of the tree and the ref, and folding in the index's record of what changed since the last run would make the same command on the same tree answer differently on a second run, the first having consumed the deletion. The trade is recorded in spec 3.2.
+- The warm-diff benchmark's listing goes one directory level down into `app/` rather than taking a flat slice of it. The spec's pull request is 30 files and the top level of `app/` holds 11, so a flat listing could not reach the number the spec names. The benchmark now fails rather than measuring fewer.
+- The SARIF driver lists every rule, including one that ships off, and says so in `defaultConfiguration.enabled` as well as in `properties.enabledByDefault`. A consumer reading the standard, which is what GitHub code scanning does, learns the default enablement without knowing locrin's properties.
 
 ## File structure
 
