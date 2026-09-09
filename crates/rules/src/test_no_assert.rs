@@ -45,6 +45,15 @@
 //!   but a `describe.each`-generated case or a runner-specific wrapper is
 //!   likewise unseen: the rule under-reports there rather than guessing.
 //!
+//! Measured three times on the five corpus repositories
+//! (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`):
+//! 54 findings with 0 of 20 true, then 11 with 0 of 11 true, then none at all
+//! on 2674 indexed files. Both false-positive classes were the rule's own blind
+//! spots (the throwing query, then the bare `throw`) and both are closed, which
+//! is why it ships on. The gate reads a rule with no corpus findings as
+//! unmeasured, standing on its fixture evidence: what the corpus adds here is
+//! that it produces no noise on 2674 real files.
+//!
 //! One thing the rule reports on purpose, which is not a false positive: a case
 //! whose only check is that its body did not throw. A smoke test is a real
 //! thing to want, so the fix does not say to delete the case; it says to write
@@ -100,26 +109,6 @@ impl Rule for TestNoAssert {
     /// spot in the module doc turns a case that does assert into a finding.
     fn confidence(&self) -> Confidence {
         Confidence::Medium
-    }
-
-    /// Off by default after two measurements on the five corpus repositories
-    /// (see
-    /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
-    /// The first found 54 findings, 0 of 20 sampled true, all of them throwing
-    /// Testing Library queries; those now count as assertions and 43 of the 54
-    /// went with them. The second labelled all 11 that remain and none is true
-    /// either: every one is a guard case that walks a data set and calls
-    /// `throw new Error(...)` with a written explanation when an invariant
-    /// breaks, which is a real check that happens to name no matcher. Counting a
-    /// `throw` statement as an assertion is the known next step and is not done
-    /// yet, so the rule stays opt-in:
-    ///
-    /// ```toml
-    /// [rules.test-no-assert]
-    /// enabled = true
-    /// ```
-    fn enabled_by_default(&self) -> bool {
-        false
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

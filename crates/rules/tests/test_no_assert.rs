@@ -1,12 +1,13 @@
 mod common;
 
-use common::{fixture, hits, rule_on, run_on};
+use common::{fixture, hits, run_on};
+use locrin_core::config::Config;
 use locrin_core::finding::{make_id, Category, Confidence, Severity};
 use locrin_rules::test_no_assert::TestNoAssert;
 
 #[test]
 fn flags_cases_that_run_code_without_asserting_anything() {
-    let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "flag"), &rule_on("test-no-assert"));
+    let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "flag"), &Config::default());
     assert_eq!(
         hits(&out),
         vec![("a.test.ts".into(), 10), ("a.test.ts".into(), 15), ("a.test.ts".into(), 24)],
@@ -43,13 +44,13 @@ fn flags_cases_that_run_code_without_asserting_anything() {
 
 #[test]
 fn helper_assertions_every_dialect_a_throwing_query_skips_and_non_test_files_are_clean() {
-    let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "clean"), &rule_on("test-no-assert"));
+    let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "clean"), &Config::default());
     assert!(out.is_empty(), "{out:?}");
 }
 
 #[test]
 fn one_helper_deep_and_an_options_object_are_seen_but_two_helpers_deep_is_not() {
-    let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "edge"), &rule_on("test-no-assert"));
+    let out = run_on(Box::new(TestNoAssert), &fixture("test_no_assert", "edge"), &Config::default());
     assert_eq!(hits(&out), vec![("__tests__/c.ts".into(), 16)], "{out:?}");
     assert_eq!(out[0].evidence, "test \"asserts through two helpers\" has no assertion");
 }
