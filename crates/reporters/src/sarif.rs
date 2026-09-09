@@ -180,4 +180,21 @@ mod tests {
             "level follows the finding's severity, not the rule default"
         );
     }
+
+    /// `dead-file` and `boundary-violation` point at a whole file rather than at
+    /// a run of characters, so they carry a zero-width span. Shifted to SARIF's
+    /// 1-based columns that is `startColumn == endColumn == 1`, a legal
+    /// insertion point at the head of the line, which is exactly what a
+    /// file-level finding means. Pinned here because the shift is the only thing
+    /// keeping the column out of SARIF's illegal column 0.
+    #[test]
+    fn a_zero_width_span_becomes_a_legal_insertion_point() {
+        let mut finding = f("dead-file", Severity::Medium, 1);
+        finding.span = Span { start_line: 1, start_col: 0, end_line: 1, end_col: 0 };
+        let v = Verdict::from_findings(vec![finding], 1);
+        let doc: Value = serde_json::from_str(&render(&v, &rules(), "0.1.0")).unwrap();
+        let region = &doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"];
+        assert_eq!(region["startColumn"], 1, "{region}");
+        assert_eq!(region["endColumn"], 1, "{region}");
+    }
 }
