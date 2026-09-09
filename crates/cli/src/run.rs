@@ -38,6 +38,11 @@ struct Run {
     findings: Vec<Finding>,
     files: usize,
     changed: usize,
+    /// What the pass learned about the previous version of the files it reported
+    /// for. The CLI needs only the findings; this is here so a test can check the
+    /// capture without re-running the whole pipeline by hand.
+    #[allow(dead_code)]
+    previous: Previous,
 }
 
 /// The two things that decide whether a cached row may be served: the hash of
@@ -79,6 +84,11 @@ struct Indexed {
     /// The read behind every file in `files`, for the findings cache written
     /// once the rules have run.
     reads: HashMap<String, FileRead>,
+    /// What the index said about each changed file before this run overwrote it.
+    /// A file with an entry has a known previous version; a file without one
+    /// (never indexed, or unchanged and served from the cache) does not. See the
+    /// capture in the recording pass below.
+    previous: Previous,
 }
 
 /// How much of the repository one pass has to answer for, which is the one
@@ -173,6 +183,26 @@ fn serve(cached: &HashMap<String, CachedFile>, rel: &str, hash: &str, key: &Cach
     Some(out)
 }
 
+/// The test cases `rel` skipped at `rev`, for the git-sourced half of the
+/// previous snapshot.
+///
+/// A file that was not there at that revision, or that will not parse, skipped
+/// nothing: everything in the version on disk is new, which is the answer a
+/// newly added test file needs.
+///
+/// Only test files are read. The snapshot holds nothing else yet, and a `--base`
+/// run against a large pull request would otherwise fetch and parse every changed
+/// file a second time (they are all parsed at HEAD already) to learn nothing. A
+/// later field that needs the whole previous file widens this.
+fn skipped_at(root: &Path, rev: &str, rel: &str) -> anyhow::Result<HashSet<String>> {
+    if !locrin_core::testcases::is_test_file(rel) {
+        return Ok(HashSet::new());
+    }
+    let Some(source) = crate::git::show_at(root, rev, rel)? else { return Ok(HashSet::new()) };
+    let Some(file) = parse_source(&root.join(rel), rel, source) else { return Ok(HashSet::new()) };
+    Ok(locrin_core::testcases::extract(&file).into_iter().filter(|c| c.skipped).map(|c| c.name).collect())
+}
+
 /// The files whose edges touch any file in `set`, in either direction, in the
 /// index as it is now.
 fn neighbours(ix: &Index, set: &HashSet<String>) -> anyhow::Result<HashSet<String>> {
@@ -235,6 +265,7 @@ fn index_files(
     let mut changed: HashSet<String> = HashSet::new();
     let mut before: HashSet<String> = HashSet::new();
     let mut reads: HashMap<String, FileRead> = HashMap::new();
+    let mut previous = Previous::default();
     let mut present: Vec<String> = Vec::with_capacity(candidates.len());
     let mut any_new = false;
     ix.begin()?;
@@ -321,7 +352,18 @@ fn index_files(
         }
         if is_changed {
             changed.insert(parsed.rel.clone());
-            any_new |= ix.file_hash(&parsed.rel)?.is_none();
+            // What the index holds right now describes the version this run is
+            // about to replace, so it is the previous version and it has to be
+            // read before the record below overwrites it. A file with no `files`
+            // row has no previous version at all, which is not the same as one
+            // whose previous version skipped nothing: no entry is recorded for
+            // it, and a rule reads that as "everything here is new".
+            let known = ix.file_hash(&parsed.rel)?.is_some();
+            any_new |= !known;
+            if known {
+                let was = ix.skipped_tests(&parsed.rel)?;
+                previous.skipped_tests.insert(parsed.rel.clone(), was);
+            }
             indexer::record_with_stat(ix, &parsed, &hash, resolver, stat)?;
             // Whatever the cache holds for this file describes bytes that are
             // gone. The rows this run writes replace them, and until it does the
@@ -384,7 +426,7 @@ fn index_files(
     // would be the same answer a second time, so the parse wins.
     let parsed_rels: HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
     served.retain(|f| !parsed_rels.contains(f.file.as_str()));
-    Ok(Indexed { files, served, changed, before, reads })
+    Ok(Indexed { files, served, changed, before, reads, previous })
 }
 
 /// One row per (file this run parsed, enabled file rule), so the next run can
@@ -485,7 +527,20 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // neither, so it does not pay to build them.
     let scope_is_watermark = scope.is_none() && opts.changed_only;
     let plan = Plan { report_all, scope: scope.as_ref(), capture_before: scope_is_watermark };
-    let indexed = index_files(root, &candidates, &plan, &key, &resolver, &mut ix)?;
+    let mut indexed = index_files(root, &candidates, &plan, &key, &resolver, &mut ix)?;
+    // The index's memory of each changed file, captured before it was overwritten.
+    let mut previous = std::mem::take(&mut indexed.previous);
+    // For a diff scope git is the better witness and overrides it. The index
+    // remembers the last run, which on a fresh CI clone is nothing at all and on
+    // a warm one is whenever the developer last ran locrin; the base commit is
+    // the "before" a pull request is actually judged against, and it is the same
+    // commit `changed_files` diffed to build this scope.
+    if let Some(diff) = &opts.diff {
+        let rev = crate::git::base_rev(root, diff)?;
+        for rel in scope.iter().flatten() {
+            previous.skipped_tests.insert(rel.clone(), skipped_at(root, &rev, rel)?);
+        }
+    }
 
     let entries = EntryPoints::detect(root, &config.entry_points)?;
     // The file rules go across the pool, a file at a time: five rules over a
@@ -494,7 +549,6 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // over the whole index: they are SQL and a change anywhere can move their
     // answer. The borrow of `ix` ends inside this block, before the cache write
     // takes it mutably.
-    let previous = Previous::default();
     let base = RuleContext {
         files: &indexed.files,
         config: &config,
@@ -550,7 +604,7 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         graph.retain(|f| wide.contains(&f.file));
     }
     findings.extend(graph);
-    Ok(Run { findings, files, changed })
+    Ok(Run { findings, files, changed, previous })
 }
 
 /// Every current finding for a run, with the index updated when `record`.
@@ -607,4 +661,49 @@ pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bo
     b.accept(f, reason, &author);
     b.save(&root)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rules that answer with a change rather than a state need to know what
+    /// the file used to say, and for a `--changed` run the index is where that
+    /// comes from: it holds the last recorded version until this run replaces it.
+    ///
+    /// A first run has no previous version for anything, and reporting one would
+    /// make every legacy skip in a repository look like it was introduced by
+    /// whoever happened to run locrin first.
+    #[test]
+    fn a_changed_run_reads_what_the_previous_version_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // The index path comes from the environment, and this is the only test in
+        // this target, so setting it here cannot race another one.
+        std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
+        let root = canonical_root(dir.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let rel = "src/a.test.ts";
+        let path = root.join(rel);
+        std::fs::write(&path, "it.skip(\"one\", () => {});\nit(\"two\", () => {});\n").unwrap();
+
+        let full =
+            Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: true, diff: None };
+        let first = pass(&root, &full, true).unwrap();
+        assert!(
+            first.previous.skipped_tests.is_empty(),
+            "a file the index had never seen has no previous version: {:?}",
+            first.previous.skipped_tests
+        );
+
+        std::fs::write(&path, "it.skip(\"one\", () => {});\nit.skip(\"two\", () => {});\n").unwrap();
+        let changed = Options { changed_only: true, ..full };
+        let second = pass(&root, &changed, true).unwrap();
+        assert_eq!(
+            second.previous.skipped_tests.get(rel),
+            Some(&HashSet::from(["one".to_string()])),
+            "the run has to see the version it replaced, where only the first case was skipped"
+        );
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+    }
 }

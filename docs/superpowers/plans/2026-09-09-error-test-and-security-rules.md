@@ -43,6 +43,8 @@
 
 (Empty at planning time. The executor appends every ruling here with its reason, as plan 2 did.)
 
+- **Task 3, the git source reads only test files.** The plan says a diff scope runs `show_at` and `parse_source` over *each* scope file. `Previous` holds nothing but `skipped_tests`, so for a file that is not a test file both paths produce the empty set, and reading the rest would fetch and parse every changed file a second time (they are all parsed at HEAD by the same run) to learn nothing: on a large pull request that doubles the parse cost of the `--base` gate. `run::skipped_at` therefore returns early for a non-test path, and its doc comment says that a later field needing the whole previous file widens it. Observably identical for every rule in this plan.
+
 ## File structure
 
 Part A:

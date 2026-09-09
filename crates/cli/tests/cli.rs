@@ -899,3 +899,44 @@ fn conflicting_check_flags_are_a_usage_error() {
     assert!(err.contains("cannot be used with"), "{err}");
     assert!(err.contains("--changed"), "{err}");
 }
+
+/// The engine's copy of the module under test. A binary crate has no library for
+/// an integration test to link against, so the source is compiled a second time
+/// here; only `show_at` is exercised, and `base_rev` is covered through the
+/// `--base` and `--since` tests above, which run every diff through it.
+#[path = "../src/git.rs"]
+#[allow(dead_code)]
+mod git_src;
+
+/// A diff scope has to read the version of a file that is in the base commit,
+/// not the one on disk: on a fresh CI clone the index has no memory of any
+/// earlier version, and the base commit is the only "before" a pull request has.
+#[test]
+fn show_at_reads_the_committed_text_and_says_nothing_for_a_path_that_was_not_there() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    // Line endings are the repository's business, not this test's: without this a
+    // machine configured to rewrite them would commit different bytes than were
+    // written and the comparison below would be about newlines.
+    git(dir.path(), &["config", "core.autocrlf", "false"]);
+    let committed = "export const version = 1;\n";
+    std::fs::write(dir.path().join("src/committed.ts"), committed).unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let root = locrin_core::walk::canonical_root(dir.path());
+
+    // The working tree has moved on; the commit is what show_at answers with.
+    std::fs::write(dir.path().join("src/committed.ts"), "export const version = 2;\n").unwrap();
+    assert_eq!(git_src::show_at(&root, "HEAD", "src/committed.ts").unwrap().as_deref(), Some(committed));
+
+    // A file added since the commit was not there, which is not an error: it is
+    // how the caller learns everything in it is new.
+    std::fs::write(dir.path().join("src/added.ts"), "export const added = 1;\n").unwrap();
+    assert_eq!(git_src::show_at(&root, "HEAD", "src/added.ts").unwrap(), None);
+    assert_eq!(git_src::show_at(&root, "HEAD", "src/never-existed.ts").unwrap(), None);
+
+    // A revision that does not exist is a real failure, not a missing file.
+    assert!(git_src::show_at(&root, "no-such-ref", "src/committed.ts").is_err());
+    // A revision shaped like a git option never reaches git.
+    assert!(git_src::show_at(&root, "--output=planted", "src/committed.ts").is_err());
+}

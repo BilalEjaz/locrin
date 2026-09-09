@@ -8,6 +8,7 @@ use crate::index::Index;
 use crate::parse::ParsedFile;
 use crate::resolve::Resolver;
 use crate::symbols;
+use crate::testcases;
 use crate::ALLOW_MARK;
 
 /// Every import the file has, syntactic ones first. A file whose tree came back
@@ -67,6 +68,17 @@ pub fn record_with_stat(
     let allow: Vec<u32> =
         file.source.lines().enumerate().filter(|(_, l)| l.contains(ALLOW_MARK)).map(|(i, _)| i as u32 + 1).collect();
     ix.replace_allow_lines(&file.rel, &allow)?;
+    // What this version of the file skips, so the next run can tell a test
+    // skipped in that change from one that was already skipped. Non-test files
+    // are replaced with nothing rather than left alone: a file that stops being
+    // a test file (renamed out of `__tests__`, say) must not keep the set the
+    // version before it stored.
+    let skipped: Vec<String> = if testcases::is_test_file(&file.rel) {
+        testcases::extract(file).into_iter().filter(|c| c.skipped).map(|c| c.name).collect()
+    } else {
+        Vec::new()
+    };
+    ix.replace_skipped_tests(&file.rel, &skipped)?;
     let status = if file.has_error { "error" } else { "ok" };
     ix.upsert_file_stat(&file.rel, file.language.as_str(), hash, status, stat.0, stat.1)
 }
@@ -133,6 +145,39 @@ mod tests {
         broken.conn().execute_batch("DROP TABLE symbols").unwrap();
         assert!(record(&mut broken, &file, "h2", &resolver).is_err());
         assert_eq!(broken.parse_status("src/index.ts").unwrap(), None, "a failed record must not look indexed");
+    }
+
+    /// A test file's skipped cases are remembered so a later run can tell a new
+    /// skip from an old one. A file that is not a test file has nothing to
+    /// remember, and recording it must say so rather than leaving whatever an
+    /// earlier version stored.
+    #[test]
+    fn record_remembers_what_a_test_file_skips_and_nothing_for_other_files() {
+        use crate::parse::parse_source;
+        use std::path::Path;
+
+        let resolver = Resolver::new(Path::new("/repo"), HashSet::new());
+        let mut ix = Index::open_in_memory().unwrap();
+
+        let source = "it.skip(\"one\", () => {});\nit(\"two\", () => {});\nxit(\"three\", () => {});\n".to_string();
+        let test_file = parse_source(Path::new("src/a.test.ts"), "src/a.test.ts", source).unwrap();
+        record(&mut ix, &test_file, &content_hash(&test_file.source), &resolver).unwrap();
+        assert_eq!(
+            ix.skipped_tests("src/a.test.ts").unwrap(),
+            HashSet::from(["one".to_string(), "three".to_string()]),
+            "both skipped forms are remembered and the active case is not"
+        );
+
+        // The same source under a name that is not a test file: nothing is stored.
+        let plain = parse_source(Path::new("src/a.ts"), "src/a.ts", test_file.source.clone()).unwrap();
+        record(&mut ix, &plain, &content_hash(&plain.source), &resolver).unwrap();
+        assert!(ix.skipped_tests("src/a.ts").unwrap().is_empty(), "only test files carry a skipped set");
+
+        // Un-skipping is a change like any other: the old name has to go.
+        let fixed =
+            parse_source(Path::new("src/a.test.ts"), "src/a.test.ts", "it(\"one\", () => {});\n".to_string()).unwrap();
+        record(&mut ix, &fixed, &content_hash(&fixed.source), &resolver).unwrap();
+        assert!(ix.skipped_tests("src/a.test.ts").unwrap().is_empty(), "re-recording replaces the whole set");
     }
 
     /// The stat stored with a file is the one the caller took before it read the
