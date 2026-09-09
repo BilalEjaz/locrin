@@ -7,6 +7,7 @@ pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
 pub mod secrets;
+pub mod supabase;
 pub mod swallowed_error;
 pub mod test_newly_skipped;
 pub mod test_no_assert;
@@ -283,6 +284,8 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(injection_sink::InjectionSink),
         Box::new(html_injection::HtmlInjection),
         Box::new(vulnerable_dependency::VulnerableDependency),
+        Box::new(supabase::service_role::SupabaseServiceRoleInClient),
+        Box::new(supabase::rls::SupabaseTableWithoutRls),
     ]
 }
 
@@ -626,14 +629,22 @@ mod tests {
                 "weak-crypto",
                 "injection-sink",
                 "html-injection",
-                "vulnerable-dependency"
+                "vulnerable-dependency",
+                "supabase-service-role-in-client",
+                "supabase-table-without-rls"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 12, "twelve file rules and four graph rules");
+        assert_eq!(file_rules().len(), 13, "thirteen file rules and five graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
-            vec!["dead-export", "dead-file", "boundary-violation", "vulnerable-dependency"]
+            vec![
+                "dead-export",
+                "dead-file",
+                "boundary-violation",
+                "vulnerable-dependency",
+                "supabase-table-without-rls"
+            ]
         );
     }
 

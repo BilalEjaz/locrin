@@ -774,7 +774,7 @@ fn sarif_output_lists_every_rule_and_every_finding() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["version"], "2.1.0");
     let run = &doc["runs"][0];
-    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 16);
+    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 18);
     assert_eq!(run["results"].as_array().unwrap().len(), 2);
     assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
 }
