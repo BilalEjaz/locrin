@@ -85,6 +85,24 @@ impl Rule for TestNoAssert {
         Confidence::Medium
     }
 
+    /// Off by default: 0 of 20 sampled findings were true across the five corpus
+    /// repositories (see
+    /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+    /// All twenty are the third blind spot in the module doc, the custom matcher.
+    /// React Native Testing Library's queries throw when they do not match, so
+    /// `render(<Route />).getByText('REDIRECT:/')` is the whole assertion and the
+    /// case is fully checked; the rule cannot see it, because the assertion is a
+    /// call named neither `expect` nor `assert`. A suite written in the `expect`
+    /// or `assert` dialect is measured differently, so the rule is opt-in:
+    ///
+    /// ```toml
+    /// [rules.test-no-assert]
+    /// enabled = true
+    /// ```
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
     }

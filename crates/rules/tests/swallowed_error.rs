@@ -1,13 +1,12 @@
 mod common;
 
-use common::{fixture, hits, run_on};
-use locrin_core::config::Config;
+use common::{fixture, hits, rule_on, run_on};
 use locrin_core::finding::{Category, Confidence, Severity};
 use locrin_rules::swallowed_error::SwallowedError;
 
 #[test]
 fn flags_empty_catch_log_only_catch_and_floating_promises() {
-    let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "flag"), &Config::default());
+    let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "flag"), &rule_on("swallowed-error"));
     assert_eq!(
         hits(&out),
         vec![("a.ts".into(), 6), ("a.ts".into(), 13), ("a.ts".into(), 28), ("a.ts".into(), 29), ("a.ts".into(), 38)],
@@ -42,12 +41,12 @@ fn flags_empty_catch_log_only_catch_and_floating_promises() {
 
 #[test]
 fn rethrows_returned_failures_unused_results_and_handled_promises_are_clean() {
-    let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "clean"), &Config::default());
+    let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "clean"), &rule_on("swallowed-error"));
     assert!(out.is_empty(), "{out:?}");
 }
 
 #[test]
 fn comment_only_catch_and_async_arrow_call_with_the_allow_marker_honoured() {
-    let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "edge"), &Config::default());
+    let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "edge"), &rule_on("swallowed-error"));
     assert_eq!(hits(&out), vec![("c.ts".into(), 12), ("c.ts".into(), 32), ("c.ts".into(), 39)], "{out:?}");
 }

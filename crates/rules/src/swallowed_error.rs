@@ -262,6 +262,29 @@ impl Rule for SwallowedError {
         Confidence::High
     }
 
+    /// Off by default: 0 of 20 sampled findings were judged worth acting on
+    /// across the five corpus repositories (see
+    /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+    /// Of the 100 findings the corpus produced, 89 are the same shape: an empty
+    /// catch whose body holds a comment saying the swallow is deliberate and the
+    /// failure non-fatal, and not one bare empty catch appeared anywhere. The
+    /// rule's claim is literally true in every one of those cases, which is why
+    /// it stays a rule rather than being deleted; what the corpus says is that
+    /// on a mature codebase it reports a decision that has already been made and
+    /// written down. A repository that wants the rule as a review aid turns it on
+    /// with
+    ///
+    /// ```toml
+    /// [rules.swallowed-error]
+    /// enabled = true
+    /// ```
+    ///
+    /// and baselines what it means to keep, or marks those catches
+    /// `locrin:allow` one at a time.
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())
     }
