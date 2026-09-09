@@ -500,3 +500,87 @@ fn a_touched_but_unedited_file_is_still_unchanged() {
     assert!(text.contains("0 changed"), "the hash has to overrule the stat, but the run said: {text}");
     assert_eq!(stored_hash(dir.path(), "src/clean.ts").as_deref(), Some(before.as_str()));
 }
+
+/// The dead export lives in a file the edit never touched, and after the edit
+/// nothing connects the two: `src/index.ts` no longer imports `src/lib.ts` at
+/// all. A `--changed` run must still report it, because the changed file's *old*
+/// edge reached it, which is exactly what made the export dead. `src/lib.ts`
+/// keeps its other importer, so this is `dead-export` and not `dead-file`.
+#[test]
+fn changed_only_reports_graph_findings_on_neighbours() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/other.ts"), "import { kept } from \"./lib\";\nexport const a = kept();\n")
+        .unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { dropped } from \"./lib\";\nimport { a } from \"./other\";\nexport const total = ok() + bad() + dropped() + a;\n",
+    )
+    .unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { a } from \"./other\";\nexport const total = ok() + bad() + a;\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, vec!["src/lib.ts"], "{v}");
+    // The file rule finding on dirty.ts (console.log) is NOT in a --changed run: dirty.ts did not change.
+    assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "leftover-debug"), "{v}");
+}
+
+/// After a scan, a full check must not re-parse anything: the cache answers for
+/// every unchanged file. Observable through the index: `scan` then `check` leaves
+/// exactly one cache row per (file, file rule), and a `check` after an edit to
+/// one file rewrites only that file's rows.
+#[test]
+fn full_check_serves_unchanged_files_from_the_cache() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("scan").assert().success();
+    let db = index_db(dir.path());
+    let count = |sql: &str| -> i64 {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+    let per_file = count("SELECT count(DISTINCT rule) FROM findings_cache WHERE rel = 'src/clean.ts'");
+    assert!(per_file >= 5, "scan warms every file rule, got {per_file}");
+    let before = count("SELECT count(*) FROM findings_cache");
+
+    let out = locrin(dir.path()).arg("check").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stdout).unwrap().starts_with("BLOCK  2 finding(s)"));
+    assert_eq!(count("SELECT count(*) FROM findings_cache"), before, "a warm check adds no rows");
+
+    std::fs::write(dir.path().join("src/clean.ts"), "export function ok(): number {\n  debugger;\n  return 1;\n}\n")
+        .unwrap();
+    locrin(dir.path()).arg("check").output().unwrap();
+    let stale = count(
+        "SELECT count(*) FROM findings_cache c JOIN files f ON f.rel = c.rel WHERE f.content_hash <> c.content_hash",
+    );
+    assert_eq!(stale, 0, "every cache row must carry its file's current hash");
+}
+
+/// A severity override changes what the cache may serve.
+#[test]
+fn config_change_invalidates_the_cache() {
+    let dir = copy_fixture();
+    locrin(dir.path()).arg("check").output().unwrap();
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.leftover-debug]\nseverity = \"low\"\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let debug = v["findings"].as_array().unwrap().iter().find(|f| f["rule"] == "leftover-debug").unwrap();
+    assert_eq!(debug["severity"], "low", "{v}");
+}

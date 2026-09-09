@@ -27,15 +27,15 @@ enum Cmd {
     /// Check files (all by default) and print a verdict
     Check {
         paths: Vec<PathBuf>,
-        /// Only files whose content changed since the last index. Files indexed
-        /// by `scan` but never checked are not re-evaluated; run a full check first.
+        /// Only files whose content changed since the last index, plus the
+        /// graph findings their edges reach.
         #[arg(long)]
         changed: bool,
         /// Compact JSON for agents (capped at ten findings)
         #[arg(long)]
         json: bool,
     },
-    /// Index the repository without running rules
+    /// Index the repository and warm the findings cache without printing a verdict
     Scan,
     /// Manage the baseline of accepted findings
     Baseline {
