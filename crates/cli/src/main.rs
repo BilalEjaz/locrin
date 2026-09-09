@@ -35,6 +35,9 @@ enum Cmd {
         /// Compact JSON for agents (capped at ten findings)
         #[arg(long)]
         json: bool,
+        /// SARIF 2.1.0 on stdout, every finding, for code scanning uploads
+        #[arg(long, conflicts_with = "json")]
+        sarif: bool,
         /// Files that differ from the merge base with REF, plus untracked files (the pull-request view)
         #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "since"])]
         base: Option<String>,
@@ -70,10 +73,24 @@ fn real_main() -> anyhow::Result<i32> {
         None => std::env::current_dir()?,
     };
     match cli.cmd {
-        Cmd::Check { paths, changed, json, base, since } => {
+        Cmd::Check { paths, changed, json, sarif, base, since } => {
             let diff = base.map(git::DiffScope::Base).or(since.map(git::DiffScope::Since));
             let opts = run::Options { root, paths, changed_only: changed, json, diff };
             let verdict = run::check(&opts)?;
+            if sarif {
+                let rules: Vec<locrin_reporters::sarif::RuleMeta> = locrin_rules::all_rules()
+                    .iter()
+                    .map(|r| locrin_reporters::sarif::RuleMeta {
+                        id: r.id().to_string(),
+                        description: r.description().to_string(),
+                        severity: r.default_severity(),
+                        category: r.category(),
+                        enabled_by_default: r.enabled_by_default(),
+                    })
+                    .collect();
+                println!("{}", locrin_reporters::sarif::render(&verdict, &rules, env!("CARGO_PKG_VERSION")));
+                return Ok(verdict.exit_code());
+            }
             if opts.json {
                 println!("{}", locrin_reporters::agent::render(&verdict));
             } else {

@@ -715,3 +715,16 @@ fn changed_only_reports_a_dead_export_caused_by_a_deletion() {
         .collect();
     assert_eq!(dead, vec!["src/lib.ts"], "{v}");
 }
+
+#[test]
+fn sarif_output_lists_every_rule_and_every_finding() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--sarif"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 8);
+    assert_eq!(run["results"].as_array().unwrap().len(), 2);
+    assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
+}
