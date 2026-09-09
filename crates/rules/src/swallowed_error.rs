@@ -17,14 +17,22 @@
 //!   (`// TODO`, a commented-out line) is invisible to this rule; `leftover-marker`
 //!   and `leftover-commented` are the rules that see those.
 //! - **Form 2 reads calls, not types.** "Callers use the result" means the file
-//!   calls the enclosing function somewhere outside its own body in a position
-//!   whose parent is not an expression statement. How a caller spells that call
-//!   depends on the declaration: a function or a named arrow is called bare, a
-//!   method only through `this`, the one object a single file can resolve. A
-//!   caller in another file, a call through a variable, a call on any other
-//!   object, and a result used only for its side effects are all invisible, so
-//!   the form under-reports rather than guesses. It is Medium confidence for
-//!   that reason.
+//!   calls the enclosing function somewhere outside its own body and the value
+//!   that call produces goes somewhere: bound to a name (`const x = f()`,
+//!   `const x = await f()`), passed as an argument, returned, or read by an
+//!   enclosing expression. Sequencing a call is not using it, so a statement
+//!   `await f()`, a `void f()` and an `f().finally(g)` chain are all
+//!   nothing-read-back. That distinction is a corpus result: all six of the
+//!   rule's form 2 findings across the five repositories were a function
+//!   returning `Promise<void>` whose only "user" was one of those three
+//!   spellings, and none of them was worth acting on
+//!   (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+//!   How a caller spells the call depends on the declaration: a function or a
+//!   named arrow is called bare, a method only through `this`, the one object a
+//!   single file can resolve. A caller in another file, a call through a
+//!   variable, a call on any other object, and a result read from a `.then`
+//!   callback rather than a binding are all invisible, so the form
+//!   under-reports rather than guesses. It is Medium confidence for that reason.
 //! - **Form 3 resolves only what one file can resolve.** A call is a floating
 //!   promise when it names an `async` function or arrow declared in the same
 //!   file, or reaches an `async` method of the same class through `this`. A
@@ -126,9 +134,34 @@ fn reaches(call: Node, src: &str, owner: Node, name: &str) -> bool {
     callee.kind() == "identifier" && text(callee, src) == name
 }
 
-/// Whether `name` is called outside `owner`'s own body in a position whose
-/// parent is not an expression statement, which is the syntactic reading of
-/// "a caller does something with what this returns".
+/// Whether a call's value goes anywhere: bound to a name, passed as an
+/// argument, returned, or read by any enclosing expression. The walk climbs the
+/// wrappers that read nothing back off the call (`await f()`, `void f()`,
+/// parentheses) and the chain a settled promise puts around it (`f().finally(g)`
+/// is a member of the call, then a call of the member), and asks what the
+/// outermost one of those sits in. An expression statement is the answer "the
+/// result went nowhere"; anything else is a use. See the module doc.
+fn result_is_used(call: Node) -> bool {
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        let transparent = match parent.kind() {
+            "expression_statement" => return false,
+            "await_expression" | "unary_expression" | "parenthesized_expression" => true,
+            "member_expression" => parent.child_by_field_name("object").is_some_and(|o| o.id() == node.id()),
+            "call_expression" => parent.child_by_field_name("function").is_some_and(|f| f.id() == node.id()),
+            _ => false,
+        };
+        if !transparent {
+            return true;
+        }
+        node = parent;
+    }
+    true
+}
+
+/// Whether `name` is called outside `owner`'s own body somewhere that uses what
+/// the call returns, which is the syntactic reading of "a caller does something
+/// with what this returns".
 fn result_used_elsewhere(root: Node, src: &str, owner: Node, name: &str) -> bool {
     let mut used = false;
     walk(root, &mut |n: Node| {
@@ -141,7 +174,7 @@ fn result_used_elsewhere(root: Node, src: &str, owner: Node, name: &str) -> bool
         if !reaches(n, src, owner, name) {
             return;
         }
-        used = n.parent().is_some_and(|p| p.kind() != "expression_statement");
+        used = result_is_used(n);
     });
     used
 }

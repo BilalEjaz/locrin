@@ -9,7 +9,14 @@ fn flags_empty_catch_log_only_catch_and_floating_promises() {
     let out = run_on(Box::new(SwallowedError), &fixture("swallowed_error", "flag"), &rule_on("swallowed-error"));
     assert_eq!(
         hits(&out),
-        vec![("a.ts".into(), 6), ("a.ts".into(), 13), ("a.ts".into(), 28), ("a.ts".into(), 29), ("a.ts".into(), 38)],
+        vec![
+            ("a.ts".into(), 6),
+            ("a.ts".into(), 13),
+            ("a.ts".into(), 28),
+            ("a.ts".into(), 29),
+            ("a.ts".into(), 38),
+            ("a.ts".into(), 53)
+        ],
         "{out:?}"
     );
     assert_eq!(
@@ -19,7 +26,8 @@ fn flags_empty_catch_log_only_catch_and_floating_promises() {
             (13, Confidence::Medium),
             (28, Confidence::High),
             (29, Confidence::High),
-            (38, Confidence::Medium)
+            (38, Confidence::Medium),
+            (53, Confidence::Medium)
         ],
         "an empty catch and a floating promise are certain; a log-only catch is a judgement"
     );
@@ -30,7 +38,8 @@ fn flags_empty_catch_log_only_catch_and_floating_promises() {
             "catch in parseCount only logs; callers use its result",
             "refresh();",
             "loadConfig(\"y\");",
-            "catch in size only logs; callers use its result"
+            "catch in size only logs; callers use its result",
+            "catch in readCount only logs; callers use its result"
         ]
     );
     assert!(out[0].fix.starts_with("Handle the error, rethrow it, or log it"), "{:?}", out[0].fix);

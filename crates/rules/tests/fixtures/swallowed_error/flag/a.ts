@@ -44,3 +44,19 @@ export class Cache {
     return this.size(text) + 1;
   }
 }
+
+/** Pins: binding what an awaited call returns is a use of its result, so a
+ * log-only catch behind it is form 2. Statement-level `await` is not. */
+export async function readCount(path: string): Promise<number> {
+  try {
+    return JSON.parse(await loadConfig(path)).count;
+  } catch (err) {
+    console.error("bad json", err);
+  }
+  return 0;
+}
+
+export async function bump(): Promise<number> {
+  const v = await readCount("x");
+  return v + 1;
+}

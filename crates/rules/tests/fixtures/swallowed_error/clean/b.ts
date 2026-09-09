@@ -47,6 +47,24 @@ export async function drive(): Promise<void> {
   refresh().then(done);
 }
 
+/** Pins: a log-only catch in a function nobody reads a result back from. The
+ * three spellings below all reach it and none of them is a use. */
+export async function publish(payload: string): Promise<void> {
+  try {
+    await readFile(payload, "utf8");
+  } catch (err) {
+    console.error("publish failed", err);
+  }
+}
+
+/** Pins: a statement-level `await`, a `void` call and a `.finally` chain read
+ * nothing back, so the catch in `publish` is not form 2. */
+export async function drivePublish(): Promise<void> {
+  await publish("a");
+  void publish("b");
+  publish("c").finally(done);
+}
+
 /** Pins: a synchronous same-file call and an unknown import are not promises. */
 export function plain(): void {
   done();
