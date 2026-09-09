@@ -774,7 +774,7 @@ fn sarif_output_lists_every_rule_and_every_finding() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["version"], "2.1.0");
     let run = &doc["runs"][0];
-    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 10);
+    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 11);
     assert_eq!(run["results"].as_array().unwrap().len(), 2);
     assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
 }
@@ -950,4 +950,90 @@ fn show_at_reads_the_committed_text_and_says_nothing_for_a_path_that_was_not_the
     assert!(git_src::show_at(&root, "--output=planted", "src/committed.ts").is_err());
 
     std::env::remove_var("LANG");
+}
+
+const ACTIVE_TEST: &str =
+    "describe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const SKIPPED_TEST: &str =
+    "describe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const SKIPPED_TEST_EDITED: &str =
+    "// still skipped, and now edited again\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+
+/// Every `test-newly-skipped` finding in a `--json` payload, as (file, evidence).
+fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
+    v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "test-newly-skipped")
+        .map(|f| (f["file"].as_str().unwrap().to_string(), f["evidence"].as_str().unwrap().to_string()))
+        .collect()
+}
+
+/// The index is the source of "previous" for an ordinary run: what it remembered
+/// about a file is the version the edit replaced. A test active at the last run
+/// and skipped now is the finding; once the skip is in the index, the next edit
+/// to the same file does not report it again.
+#[test]
+fn changed_reports_a_test_this_edit_skipped_and_not_one_the_index_already_knew() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(&test_file, ACTIVE_TEST).unwrap();
+    // The run that puts the active version into the index; it is the "previous"
+    // every later run in this test compares against.
+    locrin(dir.path()).arg("check").output().unwrap();
+
+    std::fs::write(&test_file, SKIPPED_TEST).unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        newly_skipped(&v),
+        vec![("src/a.test.ts".to_string(), "test \"renders a row\" is skipped (newly)".to_string())],
+        "{v}"
+    );
+
+    // A second edit that keeps the skip. The file changed, so it is re-parsed
+    // rather than served from the cache, and the index now remembers the skip:
+    // the decision is no longer this change's, so the rule says nothing.
+    std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
+}
+
+/// For a diff scope git overrides the index: the base commit is the "before" a
+/// pull request is judged against, and on a fresh CI clone it is the only one
+/// there is.
+#[test]
+fn base_reports_a_test_skipped_since_the_base_commit_and_not_one_the_base_already_skipped() {
+    let dir = copy_fixture();
+    let test_file = dir.path().join("src/a.test.ts");
+    std::fs::write(&test_file, ACTIVE_TEST).unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+
+    std::fs::write(&test_file, SKIPPED_TEST).unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        newly_skipped(&v),
+        vec![("src/a.test.ts".to_string(), "test \"renders a row\" is skipped (newly)".to_string())],
+        "{v}"
+    );
+
+    // Committed: the working tree matches HEAD, so the diff is empty and there
+    // is nothing to answer for.
+    git(dir.path(), &["add", "src"]);
+    git(dir.path(), &["commit", "-qm", "skip it"]);
+    let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(newly_skipped(&v).is_empty(), "{v}");
+
+    // And with the file back in the diff for an unrelated edit, the skip is
+    // still not reported: it is in the base commit, so it is not this change's.
+    std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
+    let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(newly_skipped(&v).is_empty(), "the base commit already skipped it: {v}");
 }
