@@ -65,6 +65,42 @@ pub fn value_of<'t>(caps: &regex::Captures<'t>) -> &'t str {
     caps.name("v").or_else(|| caps.get(0)).map(|m| m.as_str()).unwrap_or("")
 }
 
+/// The delimiter a context entry requires between a credential's name and the
+/// credential: an assignment or a colon, then an opening quote, and a closing
+/// quote on the far side of the value.
+///
+/// This is the single most important string in the table, which is why it is
+/// written once here and reached only through [`assigned!`]. The looser
+/// separator it replaced (`["'\s:=]+`, a character class rather than a
+/// sequence) accepted a bare identifier as the credential, so
+/// `const expoToken = getExpoTokenFromSecureStore();` was a locked High finding
+/// on a function call, and so was the type annotation
+/// `expoToken: ExpoAccessTokenConfiguration`. A credential written into source
+/// is a literal; anything else on the right of the equals sign is a name.
+///
+/// The closing quote matters as much as the opening one: without it a value
+/// class runs to the end of the line and the mask reports a length nobody can
+/// match against the key they are looking for.
+pub const DELIMITER: &str = r#"\s*[:=]\s*["'`]"#;
+
+/// A context entry: the provider's own name, [`DELIMITER`], the value, and the
+/// closing quote. Every entry that needs context is built here, so a new
+/// provider cannot arrive with a separator of its own; the three argument form
+/// is for a value written after a scheme word inside the quotes
+/// (`Authorization: "Bearer <token>"`), where the scheme is part of the match
+/// and no part of the credential.
+///
+/// Every half is a raw literal rather than an expression because `concat!` only
+/// takes literals, which is also what stops a caller passing a runtime string.
+macro_rules! assigned {
+    ($context:literal, $value:literal) => {
+        assigned!($context, "", $value)
+    };
+    ($context:literal, $in_quote:literal, $value:literal) => {
+        concat!("(?i)", $context, r#"\s*[:=]\s*["'`]"#, $in_quote, r#"(?P<v>"#, $value, r#")["'`]"#)
+    };
+}
+
 /// The provider label of the JWT entry whose gate is the decoded role, and of
 /// the one whose gate is the name it is assigned to. [`super`] special cases
 /// both by label, so they are named here rather than spelled twice.
@@ -72,26 +108,34 @@ pub const SUPABASE_SERVICE_ROLE: &str = "Supabase service role key";
 pub const JWT: &str = "JSON Web Token";
 /// The label of the entry whose gate is a decodable `user:pass`.
 pub const BASIC_AUTH: &str = "HTTP basic auth credential";
+/// The label of the entry that reads a token out of an `Authorization` header.
+pub const BEARER: &str = "bearer token literal";
 /// The labels whose gate is [`super::entropy::looks_random`].
 pub const GENERIC: [&str; 3] = ["password assignment", "API key assignment", "secret assignment"];
+
+/// The two entries that are allowed to name a value without [`DELIMITER`]
+/// before it, because neither is an assignment: a key inside a connection
+/// string, and a value after an HTTP scheme word in a header. Everything else
+/// with a `v` group goes through [`assigned!`], which the test below enforces.
+const NOT_ASSIGNMENTS: [&str; 2] = ["Azure storage account key", BASIC_AUTH];
 
 pub const PATTERNS: &[Pattern] = &[
     // Cloud providers.
     Pattern { provider: "AWS access key ID", regex: r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b" },
     Pattern {
         provider: "AWS secret access key",
-        regex: r#"(?i)aws[_-]?secret[_-]?access[_-]?key["'\s:=]+(?P<v>[A-Za-z0-9/+=]{40})"#,
+        regex: assigned!(r#"aws[_-]?secret[_-]?access[_-]?key"#, r#"[A-Za-z0-9/+=]{40}"#),
     },
     Pattern {
         provider: "AWS session token",
-        regex: r#"(?i)aws[_-]?session[_-]?token["'\s:=]+(?P<v>[A-Za-z0-9/+=]{60,})"#,
+        regex: assigned!(r#"aws[_-]?session[_-]?token"#, r#"[A-Za-z0-9/+=]{60,}"#),
     },
     Pattern { provider: "Google API key", regex: r"\bAIza[0-9A-Za-z_-]{35}\b" },
     Pattern { provider: "Google OAuth access token", regex: r"\bya29\.[0-9A-Za-z_-]{30,}\b" },
     Pattern { provider: "Google OAuth client secret", regex: r"\bGOCSPX-[0-9A-Za-z_-]{28}\b" },
     Pattern {
         provider: "Google service account private key id",
-        regex: r#""private_key_id"\s*:\s*"(?P<v>[0-9a-f]{40})""#,
+        regex: assigned!(r#""private_key_id""#, r#"[0-9a-f]{40}"#),
     },
     Pattern {
         provider: "Firebase Cloud Messaging server key",
@@ -100,22 +144,22 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Azure storage account key", regex: r"AccountKey=(?P<v>[A-Za-z0-9+/=]{64,})" },
     Pattern {
         provider: "Azure client secret",
-        regex: r#"(?i)azure[^"'\n]{0,25}secret["'\s:=]+(?P<v>[A-Za-z0-9._~-]{32,})"#,
+        regex: assigned!(r#"azure[^"'\n]{0,25}secret"#, r#"[A-Za-z0-9._~-]{32,}"#),
     },
     Pattern {
         provider: "Azure DevOps personal access token",
-        regex: r#"(?i)(?:azure[_-]?devops|vsts|ado)[^"'\n]{0,20}(?:pat|token)["'\s:=]+(?P<v>[a-z2-7]{52})"#,
+        regex: assigned!(r#"(?:azure[_-]?devops|vsts|ado)[^"'\n]{0,20}(?:pat|token)"#, r#"[a-z2-7]{52}"#),
     },
     Pattern { provider: "Alibaba Cloud access key ID", regex: r"\bLTAI[0-9A-Za-z]{12,20}\b" },
     Pattern {
         provider: "Alibaba Cloud access key secret",
-        regex: r#"(?i)alibaba[^"'\n]{0,25}secret["'\s:=]+(?P<v>[A-Za-z0-9]{30})"#,
+        regex: assigned!(r#"alibaba[^"'\n]{0,25}secret"#, r#"[A-Za-z0-9]{30}"#),
     },
     Pattern { provider: "Tencent Cloud secret ID", regex: r"\bAKID[0-9A-Za-z]{32,}\b" },
     Pattern { provider: "Yandex Cloud API key", regex: r"\bAQVN[A-Za-z0-9_-]{35,}\b" },
     Pattern {
         provider: "IBM Cloud API key",
-        regex: r#"(?i)ibm[^"'\n]{0,25}(?:api)?key["'\s:=]+(?P<v>[A-Za-z0-9_-]{44})"#,
+        regex: assigned!(r#"ibm[^"'\n]{0,25}(?:api)?key"#, r#"[A-Za-z0-9_-]{44}"#),
     },
     // Source hosting and CI.
     Pattern { provider: "GitHub token", regex: r"\bgh[pousr]_[A-Za-z0-9]{36,}\b" },
@@ -126,17 +170,20 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "GitLab deploy token", regex: r"\bgldt-[0-9A-Za-z_-]{20,}\b" },
     Pattern {
         provider: "Bitbucket app password",
-        regex: r#"(?i)bitbucket[^"'\n]{0,25}(?:password|token)["'\s:=]+(?P<v>[A-Za-z0-9]{20,})"#,
+        regex: assigned!(r#"bitbucket[^"'\n]{0,25}(?:password|token)"#, r#"[A-Za-z0-9]{20,}"#),
     },
     Pattern {
         provider: "CircleCI API token",
-        regex: r#"(?i)circle[_-]?ci[^"'\n]{0,20}token["'\s:=]+(?P<v>[0-9a-f]{40})"#,
+        regex: assigned!(r#"circle[_-]?ci[^"'\n]{0,20}token"#, r#"[0-9a-f]{40}"#),
     },
     Pattern { provider: "Buildkite agent token", regex: r"\bbkua_[0-9a-f]{40}\b" },
-    Pattern { provider: "Travis CI token", regex: r#"(?i)travis[^"'\n]{0,20}token["'\s:=]+(?P<v>[A-Za-z0-9_-]{22,})"# },
+    Pattern { provider: "Travis CI token", regex: assigned!(r#"travis[^"'\n]{0,20}token"#, r#"[A-Za-z0-9_-]{22,}"#) },
     Pattern {
         provider: "Snyk API token",
-        regex: r#"(?i)snyk[_-]?(?:api[_-]?)?token["'\s:=]+(?P<v>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#,
+        regex: assigned!(
+            r#"snyk[_-]?(?:api[_-]?)?token"#,
+            r#"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#
+        ),
     },
     Pattern { provider: "Postman API key", regex: r"\bPMAK-[0-9a-f]{24}-[0-9a-f]{34}\b" },
     Pattern { provider: "Pulumi access token", regex: r"\bpul-[0-9a-f]{40}\b" },
@@ -163,38 +210,38 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Twitter bearer token", regex: r"\bAAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%_-]{20,}\b" },
     Pattern {
         provider: "Twitter API secret",
-        regex: r#"(?i)twitter[_-]?(?:api|consumer)[_-]?secret["'\s:=]+(?P<v>[A-Za-z0-9]{40,50})"#,
+        regex: assigned!(r#"twitter[_-]?(?:api|consumer)[_-]?secret"#, r#"[A-Za-z0-9]{40,50}"#),
     },
     Pattern { provider: "Facebook access token", regex: r"\bEAA[0-9A-Za-z]{30,}\b" },
     Pattern {
         provider: "Facebook app secret",
-        regex: r#"(?i)(?:facebook|fb)[_-]?app[_-]?secret["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"(?:facebook|fb)[_-]?app[_-]?secret"#, r#"[0-9a-f]{32}"#),
     },
     Pattern { provider: "Instagram access token", regex: r"\bIGQVJ[A-Za-z0-9_-]{50,}\b" },
     Pattern {
         provider: "LinkedIn client secret",
-        regex: r#"(?i)linkedin[^"'\n]{0,25}(?:client[_-]?)?secret["'\s:=]+(?P<v>[A-Za-z0-9]{16,})"#,
+        regex: assigned!(r#"linkedin[^"'\n]{0,25}(?:client[_-]?)?secret"#, r#"[A-Za-z0-9]{16,}"#),
     },
     Pattern { provider: "SendGrid API key", regex: r"\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}\b" },
     Pattern { provider: "Mailgun API key", regex: r"\bkey-[0-9a-f]{32}\b" },
     Pattern { provider: "Mailchimp API key", regex: r"\b[0-9a-f]{32}-us[0-9]{1,2}\b" },
     Pattern {
         provider: "Postmark server token",
-        regex: r#"(?i)postmark[^"'\n]{0,30}["'](?P<v>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']"#,
+        regex: assigned!(r#"postmark[^"'\n]{0,30}"#, r#"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#),
     },
     Pattern { provider: "Resend API key", regex: r"\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{20,}\b" },
     Pattern {
         provider: "Zendesk API token",
-        regex: r#"(?i)zendesk[^"'\n]{0,20}(?:api[_-]?)?token["'\s:=]+(?P<v>[A-Za-z0-9]{40})"#,
+        regex: assigned!(r#"zendesk[^"'\n]{0,20}(?:api[_-]?)?token"#, r#"[A-Za-z0-9]{40}"#),
     },
     Pattern {
         provider: "Freshdesk API key",
-        regex: r#"(?i)freshdesk[^"'\n]{0,20}(?:api[_-]?)?key["'\s:=]+(?P<v>[A-Za-z0-9]{20,})"#,
+        regex: assigned!(r#"freshdesk[^"'\n]{0,20}(?:api[_-]?)?key"#, r#"[A-Za-z0-9]{20,}"#),
     },
     Pattern { provider: "Intercom access token", regex: r"\bdG9r[A-Za-z0-9+/=]{40,}\b" },
     Pattern {
         provider: "Twilio auth token",
-        regex: r#"(?i)twilio[^"'\n]{0,25}(?:auth[_-]?token|secret)["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"twilio[^"'\n]{0,25}(?:auth[_-]?token|secret)"#, r#"[0-9a-f]{32}"#),
     },
     Pattern { provider: "Twilio API key secret", regex: r"\bSK[0-9a-f]{32}\b" },
     // Package registries.
@@ -208,35 +255,41 @@ pub const PATTERNS: &[Pattern] = &[
     // Hosting and platform.
     Pattern {
         provider: "Heroku API key",
-        regex: r#"(?i)heroku[_-]?api[_-]?key["'\s:=]+(?P<v>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#,
+        regex: assigned!(
+            r#"heroku[_-]?api[_-]?key"#,
+            r#"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#
+        ),
     },
     Pattern { provider: "DigitalOcean token", regex: r"\bdo[opr]_v1_[0-9a-f]{64}\b" },
-    Pattern { provider: "Linode API token", regex: r#"(?i)linode[_-]?(?:api[_-]?)?token["'\s:=]+(?P<v>[0-9a-f]{64})"# },
-    Pattern { provider: "Vultr API key", regex: r#"(?i)vultr[_-]?api[_-]?key["'\s:=]+(?P<v>[A-Z0-9]{36})"# },
+    Pattern { provider: "Linode API token", regex: assigned!(r#"linode[_-]?(?:api[_-]?)?token"#, r#"[0-9a-f]{64}"#) },
+    Pattern { provider: "Vultr API key", regex: assigned!(r#"vultr[_-]?api[_-]?key"#, r#"[A-Z0-9]{36}"#) },
     Pattern {
         provider: "Hetzner API token",
-        regex: r#"(?i)hetzner[^"'\n]{0,25}(?:token|key)["'\s:=]+(?P<v>[A-Za-z0-9]{64})"#,
+        regex: assigned!(r#"hetzner[^"'\n]{0,25}(?:token|key)"#, r#"[A-Za-z0-9]{64}"#),
     },
     Pattern {
         provider: "Cloudflare API token",
-        regex: r#"(?i)cloudflare[_-]?api[_-]?token["'\s:=]+(?P<v>[A-Za-z0-9_-]{40})"#,
+        regex: assigned!(r#"cloudflare[_-]?api[_-]?token"#, r#"[A-Za-z0-9_-]{40}"#),
     },
     Pattern {
         provider: "Cloudflare global API key",
-        regex: r#"(?i)cloudflare[^"'\n]{0,25}global[^"'\n]{0,20}key["'\s:=]+(?P<v>[0-9a-f]{37})"#,
+        regex: assigned!(r#"cloudflare[^"'\n]{0,25}global[^"'\n]{0,20}key"#, r#"[0-9a-f]{37}"#),
     },
     Pattern {
         provider: "Vercel API token",
-        regex: r#"(?i)vercel[_-]?(?:api[_-]?)?token["'\s:=]+(?P<v>[A-Za-z0-9]{24})"#,
+        regex: assigned!(r#"vercel[_-]?(?:api[_-]?)?token"#, r#"[A-Za-z0-9]{24}"#),
     },
     Pattern { provider: "Netlify personal access token", regex: r"\bnfp_[A-Za-z0-9]{36,}\b" },
     Pattern {
         provider: "Railway API token",
-        regex: r#"(?i)railway[_-]?(?:api[_-]?)?token["'\s:=]+(?P<v>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#,
+        regex: assigned!(
+            r#"railway[_-]?(?:api[_-]?)?token"#,
+            r#"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#
+        ),
     },
     Pattern { provider: "Render API key", regex: r"\brnd_[A-Za-z0-9]{28,}\b" },
     Pattern { provider: "Fly.io API token", regex: r"\bfo1_[A-Za-z0-9_-]{40,}\b" },
-    Pattern { provider: "Expo access token", regex: r#"(?i)expo[_-]?token["'\s:=]+(?P<v>[A-Za-z0-9_-]{20,})"# },
+    Pattern { provider: "Expo access token", regex: assigned!(r#"expo[_-]?token"#, r#"[A-Za-z0-9_-]{20,}"#) },
     // Databases and backends.
     Pattern { provider: "MongoDB connection string", regex: r"mongodb(?:\+srv)?://[^:@\s/]+:[^@\s]{3,}@[^\s\x22']+" },
     Pattern { provider: "PostgreSQL connection string", regex: r"postgres(?:ql)?://[^:@\s/]+:[^@\s]{3,}@[^\s\x22']+" },
@@ -247,11 +300,11 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "PlanetScale service token", regex: r"\bpscale_tkn_[A-Za-z0-9_-]{32,}\b" },
     Pattern {
         provider: "Neon API key",
-        regex: r#"(?i)neon[^"'\n]{0,20}(?:api[_-]?key|token)["'\s:=]+(?P<v>[A-Za-z0-9]{32,})"#,
+        regex: assigned!(r#"neon[^"'\n]{0,20}(?:api[_-]?key|token)"#, r#"[A-Za-z0-9]{32,}"#),
     },
     Pattern {
         provider: "Upstash REST token",
-        regex: r#"(?i)upstash[^"'\n]{0,30}token["'\s:=]+(?P<v>[A-Za-z0-9=_-]{40,})"#,
+        regex: assigned!(r#"upstash[^"'\n]{0,30}token"#, r#"[A-Za-z0-9=_-]{40,}"#),
     },
     Pattern { provider: "Supabase personal access token", regex: r"\bsbp_[0-9a-f]{40}\b" },
     // The two JWT entries. Same shape, different gate: the first is flagged when
@@ -270,7 +323,7 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Atlassian API token", regex: r"\bATATT3[A-Za-z0-9_=-]{50,}\b" },
     Pattern {
         provider: "Jira API token",
-        regex: r#"(?i)(?:jira|confluence)[^"'\n]{0,20}token["'\s:=]+(?P<v>[A-Za-z0-9]{24,})"#,
+        regex: assigned!(r#"(?:jira|confluence)[^"'\n]{0,20}token"#, r#"[A-Za-z0-9]{24,}"#),
     },
     Pattern { provider: "Sentry auth token", regex: r"\bsntrys_[A-Za-z0-9_=+/-]{40,}\b" },
     Pattern {
@@ -280,43 +333,43 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Datadog token", regex: r"\bdd[a-z]{2,}_[A-Za-z0-9]{30,}\b" },
     Pattern {
         provider: "Datadog API key",
-        regex: r#"(?i)datadog[^"'\n]{0,20}(?:api|app)[_-]?key["'\s:=]+(?P<v>[0-9a-f]{32,40})"#,
+        regex: assigned!(r#"datadog[^"'\n]{0,20}(?:api|app)[_-]?key"#, r#"[0-9a-f]{32,40}"#),
     },
     Pattern { provider: "New Relic user key", regex: r"\bNRAK-[A-Z0-9]{27}\b" },
     Pattern { provider: "New Relic license key", regex: r"\b[a-f0-9]{36}NRAL\b" },
     Pattern { provider: "Grafana token", regex: r"\bgl(?:c|sa)_[A-Za-z0-9_=+/-]{32,}\b" },
     Pattern {
         provider: "PagerDuty API key",
-        regex: r#"(?i)pagerduty[^"'\n]{0,25}(?:api[_-]?)?(?:key|token)["'\s:=]+(?P<v>[A-Za-z0-9_+-]{20,})"#,
+        regex: assigned!(r#"pagerduty[^"'\n]{0,25}(?:api[_-]?)?(?:key|token)"#, r#"[A-Za-z0-9_+-]{20,}"#),
     },
     Pattern {
         provider: "Opsgenie API key",
-        regex: r#"(?i)opsgenie[^"'\n]{0,25}(?:api[_-]?)?key["'\s:=]+(?P<v>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#,
+        regex: assigned!(
+            r#"opsgenie[^"'\n]{0,25}(?:api[_-]?)?key"#,
+            r#"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#
+        ),
     },
-    Pattern { provider: "Rollbar access token", regex: r#"(?i)rollbar[^"'\n]{0,25}token["'\s:=]+(?P<v>[0-9a-f]{32})"# },
+    Pattern { provider: "Rollbar access token", regex: assigned!(r#"rollbar[^"'\n]{0,25}token"#, r#"[0-9a-f]{32}"#) },
     Pattern {
         provider: "Bugsnag API key",
-        regex: r#"(?i)bugsnag[^"'\n]{0,25}(?:api[_-]?)?key["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"bugsnag[^"'\n]{0,25}(?:api[_-]?)?key"#, r#"[0-9a-f]{32}"#),
     },
     Pattern {
         provider: "Mezmo ingestion key",
-        regex: r#"(?i)(?:logdna|mezmo)[^"'\n]{0,25}key["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"(?:logdna|mezmo)[^"'\n]{0,25}key"#, r#"[0-9a-f]{32}"#),
     },
     Pattern {
         provider: "Segment write key",
-        regex: r#"(?i)segment[^"'\n]{0,25}write[_-]?key["'\s:=]+(?P<v>[A-Za-z0-9]{32})"#,
+        regex: assigned!(r#"segment[^"'\n]{0,25}write[_-]?key"#, r#"[A-Za-z0-9]{32}"#),
     },
     Pattern {
         provider: "Amplitude secret key",
-        regex: r#"(?i)amplitude[^"'\n]{0,25}secret[_-]?key["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"amplitude[^"'\n]{0,25}secret[_-]?key"#, r#"[0-9a-f]{32}"#),
     },
-    Pattern {
-        provider: "Mixpanel API secret",
-        regex: r#"(?i)mixpanel[^"'\n]{0,25}secret["'\s:=]+(?P<v>[0-9a-f]{32})"#,
-    },
+    Pattern { provider: "Mixpanel API secret", regex: assigned!(r#"mixpanel[^"'\n]{0,25}secret"#, r#"[0-9a-f]{32}"#) },
     Pattern {
         provider: "Algolia admin key",
-        regex: r#"(?i)algolia[^"'\n]{0,25}(?:admin|write)[^"'\n]{0,12}key["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"algolia[^"'\n]{0,25}(?:admin|write)[^"'\n]{0,12}key"#, r#"[0-9a-f]{32}"#),
     },
     Pattern { provider: "Mapbox secret token", regex: r"\bsk\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b" },
     Pattern {
@@ -327,19 +380,19 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Branch.io live key", regex: r"\bkey_live_[A-Za-z0-9]{32}\b" },
     Pattern {
         provider: "OneSignal REST API key",
-        regex: r#"(?i)onesignal[^"'\n]{0,30}(?:rest[_-]?)?(?:api[_-]?)?key["'\s:=]+(?P<v>[A-Za-z0-9_-]{40,})"#,
+        regex: assigned!(r#"onesignal[^"'\n]{0,30}(?:rest[_-]?)?(?:api[_-]?)?key"#, r#"[A-Za-z0-9_-]{40,}"#),
     },
     Pattern {
         provider: "AppsFlyer dev key",
-        regex: r#"(?i)appsflyer[^"'\n]{0,25}dev[_-]?key["'\s:=]+(?P<v>[A-Za-z0-9]{20,})"#,
+        regex: assigned!(r#"appsflyer[^"'\n]{0,25}dev[_-]?key"#, r#"[A-Za-z0-9]{20,}"#),
     },
     Pattern {
         provider: "RevenueCat secret key",
-        regex: r#"(?i)revenuecat[^"'\n]{0,25}(?:secret|api)[_-]?key["'\s:=]+(?P<v>[A-Za-z0-9_-]{20,})"#,
+        regex: assigned!(r#"revenuecat[^"'\n]{0,25}(?:secret|api)[_-]?key"#, r#"[A-Za-z0-9_-]{20,}"#),
     },
     Pattern {
         provider: "Elastic Cloud API key",
-        regex: r#"(?i)elastic[^"'\n]{0,25}(?:api[_-]?)?key["'\s:=]+(?P<v>[A-Za-z0-9=+/]{40,})"#,
+        regex: assigned!(r#"elastic[^"'\n]{0,25}(?:api[_-]?)?key"#, r#"[A-Za-z0-9=+/]{40,}"#),
     },
     // Commerce and payments.
     Pattern { provider: "Stripe secret key", regex: r"\b(?:sk|rk)_live_[0-9A-Za-z]{24,}\b" },
@@ -349,58 +402,55 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Square OAuth secret", regex: r"\bsq0csp-[0-9A-Za-z_-]{43}\b" },
     Pattern {
         provider: "PayPal client secret",
-        regex: r#"(?i)paypal[^"'\n]{0,30}(?:client[_-]?)?secret["'\s:=]+(?P<v>E[A-Za-z0-9_-]{50,})"#,
+        regex: assigned!(r#"paypal[^"'\n]{0,30}(?:client[_-]?)?secret"#, r#"E[A-Za-z0-9_-]{50,}"#),
     },
     Pattern {
         provider: "Braintree private key",
-        regex: r#"(?i)braintree[^"'\n]{0,25}private[_-]?key["'\s:=]+(?P<v>[0-9a-f]{32})"#,
+        regex: assigned!(r#"braintree[^"'\n]{0,25}private[_-]?key"#, r#"[0-9a-f]{32}"#),
     },
     Pattern { provider: "Adyen API key", regex: r"\bAQE[A-Za-z0-9+/=]{60,}\b" },
     Pattern {
         provider: "Plaid production access token",
         regex: r"\baccess-production-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     },
-    Pattern { provider: "Plaid secret", regex: r#"(?i)plaid[^"'\n]{0,20}secret["'\s:=]+(?P<v>[0-9a-f]{30})"# },
+    Pattern { provider: "Plaid secret", regex: assigned!(r#"plaid[^"'\n]{0,20}secret"#, r#"[0-9a-f]{30}"#) },
     Pattern {
         provider: "Coinbase API secret",
-        regex: r#"(?i)coinbase[^"'\n]{0,25}(?:api[_-]?)?secret["'\s:=]+(?P<v>[A-Za-z0-9+/=]{40,})"#,
+        regex: assigned!(r#"coinbase[^"'\n]{0,25}(?:api[_-]?)?secret"#, r#"[A-Za-z0-9+/=]{40,}"#),
     },
     Pattern {
         provider: "Kraken private key",
-        regex: r#"(?i)kraken[^"'\n]{0,25}(?:private|api)[_-]?(?:key|secret)["'\s:=]+(?P<v>[A-Za-z0-9+/=]{50,})"#,
+        regex: assigned!(r#"kraken[^"'\n]{0,25}(?:private|api)[_-]?(?:key|secret)"#, r#"[A-Za-z0-9+/=]{50,}"#),
     },
-    Pattern {
-        provider: "Binance secret key",
-        regex: r#"(?i)binance[^"'\n]{0,25}secret["'\s:=]+(?P<v>[A-Za-z0-9]{64})"#,
-    },
+    Pattern { provider: "Binance secret key", regex: assigned!(r#"binance[^"'\n]{0,25}secret"#, r#"[A-Za-z0-9]{64}"#) },
     // Identity.
     Pattern { provider: "Okta API token", regex: r"\b00[A-Za-z0-9_-]{40}\b" },
     Pattern {
         provider: "Auth0 client secret",
-        regex: r#"(?i)auth0[^"'\n]{0,30}(?:client[_-]?)?secret["'\s:=]+(?P<v>[A-Za-z0-9_-]{32,})"#,
+        regex: assigned!(r#"auth0[^"'\n]{0,30}(?:client[_-]?)?secret"#, r#"[A-Za-z0-9_-]{32,}"#),
     },
     Pattern {
         provider: "Salesforce client secret",
-        regex: r#"(?i)salesforce[^"'\n]{0,30}(?:client[_-]?)?secret["'\s:=]+(?P<v>[0-9A-Za-z.]{40,})"#,
+        regex: assigned!(r#"salesforce[^"'\n]{0,30}(?:client[_-]?)?secret"#, r#"[0-9A-Za-z.]{40,}"#),
     },
     Pattern {
         provider: "Zoom API secret",
-        regex: r#"(?i)zoom[^"'\n]{0,25}(?:api[_-]?)?secret["'\s:=]+(?P<v>[A-Za-z0-9]{32,})"#,
+        regex: assigned!(r#"zoom[^"'\n]{0,25}(?:api[_-]?)?secret"#, r#"[A-Za-z0-9]{32,}"#),
     },
     // Content and storage.
     Pattern { provider: "Dropbox access token", regex: r"\bsl\.[A-Za-z0-9_-]{100,}\b" },
     Pattern { provider: "Figma personal access token", regex: r"\bfigd_[A-Za-z0-9_-]{40,}\b" },
     Pattern { provider: "Contentful management token", regex: r"\bCFPAT-[A-Za-z0-9_-]{43}\b" },
-    Pattern { provider: "Sanity API token", regex: r#"(?i)sanity[^"'\n]{0,25}token["'\s:=]+(?P<v>[A-Za-z0-9]{40,})"# },
+    Pattern { provider: "Sanity API token", regex: assigned!(r#"sanity[^"'\n]{0,25}token"#, r#"[A-Za-z0-9]{40,}"#) },
     Pattern {
         provider: "Storyblok management token",
-        regex: r#"(?i)storyblok[^"'\n]{0,30}token["'\s:=]+(?P<v>[A-Za-z0-9]{20,})"#,
+        regex: assigned!(r#"storyblok[^"'\n]{0,30}token"#, r#"[A-Za-z0-9]{20,}"#),
     },
     Pattern { provider: "Cloudinary URL", regex: r"cloudinary://[0-9]{10,}:[A-Za-z0-9_-]{20,}@[a-z0-9-]+" },
-    Pattern { provider: "Pusher app secret", regex: r#"(?i)pusher[^"'\n]{0,25}secret["'\s:=]+(?P<v>[0-9a-f]{20,})"# },
+    Pattern { provider: "Pusher app secret", regex: assigned!(r#"pusher[^"'\n]{0,25}secret"#, r#"[0-9a-f]{20,}"#) },
     Pattern {
         provider: "Stream API secret",
-        regex: r#"(?i)stream[^"'\n]{0,25}(?:api[_-]?)?secret["'\s:=]+(?P<v>[A-Za-z0-9]{40,})"#,
+        regex: assigned!(r#"stream[^"'\n]{0,25}(?:api[_-]?)?secret"#, r#"[A-Za-z0-9]{40,}"#),
     },
     Pattern {
         provider: "HubSpot private app token",
@@ -408,7 +458,7 @@ pub const PATTERNS: &[Pattern] = &[
     },
     Pattern {
         provider: "Trello API secret",
-        regex: r#"(?i)trello[^"'\n]{0,25}(?:api[_-]?)?(?:secret|token)["'\s:=]+(?P<v>[0-9a-f]{64})"#,
+        regex: assigned!(r#"trello[^"'\n]{0,25}(?:api[_-]?)?(?:secret|token)"#, r#"[0-9a-f]{64}"#),
     },
     // Model providers.
     Pattern {
@@ -422,11 +472,11 @@ pub const PATTERNS: &[Pattern] = &[
     Pattern { provider: "Perplexity API key", regex: r"\bpplx-[A-Za-z0-9]{32,}\b" },
     Pattern {
         provider: "Cohere API key",
-        regex: r#"(?i)cohere[^"'\n]{0,25}(?:api[_-]?)?key["'\s:=]+(?P<v>[A-Za-z0-9]{40})"#,
+        regex: assigned!(r#"cohere[^"'\n]{0,25}(?:api[_-]?)?key"#, r#"[A-Za-z0-9]{40}"#),
     },
     Pattern {
         provider: "Mistral API key",
-        regex: r#"(?i)mistral[^"'\n]{0,25}(?:api[_-]?)?key["'\s:=]+(?P<v>[A-Za-z0-9]{32})"#,
+        regex: assigned!(r#"mistral[^"'\n]{0,25}(?:api[_-]?)?key"#, r#"[A-Za-z0-9]{32}"#),
     },
     // Key material and headers.
     Pattern {
@@ -434,22 +484,13 @@ pub const PATTERNS: &[Pattern] = &[
         regex: r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----",
     },
     Pattern { provider: BASIC_AUTH, regex: r#"(?i)basic\s+(?P<v>[A-Za-z0-9+/]{20,}={0,2})"# },
-    Pattern {
-        provider: "bearer token literal",
-        regex: r#"(?i)authorization["'\s:=]+bearer\s+(?P<v>[A-Za-z0-9._-]{20,})"#,
-    },
+    Pattern { provider: BEARER, regex: assigned!(r#"authorization"#, r#"bearer\s+"#, r#"[A-Za-z0-9._-]{20,}"#) },
     // The three generic entries, every one of them behind the entropy gate.
-    Pattern {
-        provider: "password assignment",
-        regex: r#"(?i)(?:password|passwd|pwd)\s*[:=]\s*["'](?P<v>[^"']{8,})["']"#,
-    },
-    Pattern {
-        provider: "API key assignment",
-        regex: r#"(?i)\b[a-z0-9_]*api[_-]?key\s*[:=]\s*["'](?P<v>[A-Za-z0-9_-]{20,})["']"#,
-    },
+    Pattern { provider: "password assignment", regex: assigned!(r#"(?:password|passwd|pwd)"#, r#"[^"'`]{8,}"#) },
+    Pattern { provider: "API key assignment", regex: assigned!(r#"\b[a-z0-9_]*api[_-]?key"#, r#"[A-Za-z0-9_-]{20,}"#) },
     Pattern {
         provider: "secret assignment",
-        regex: r#"(?i)\b[a-z0-9_]*(?:secret|access[_-]?token|auth[_-]?token)\s*[:=]\s*["'](?P<v>[A-Za-z0-9_-]{20,})["']"#,
+        regex: assigned!(r#"\b[a-z0-9_]*(?:secret|access[_-]?token|auth[_-]?token)"#, r#"[A-Za-z0-9_-]{20,}"#),
     },
 ];
 
@@ -469,6 +510,27 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for p in PATTERNS {
             assert!(seen.insert(p.provider), "duplicate provider {}", p.provider);
+        }
+    }
+
+    /// Every entry that names a value carries [`DELIMITER`] in front of it.
+    ///
+    /// This is the guard for the review finding that opened this pass: a context
+    /// entry whose separator was a character class rather than a sequence read
+    /// `const expoToken = getExpoTokenFromSecureStore()` as a credential, and
+    /// forty five entries were spelled that way. A new provider added by hand
+    /// rather than through [`assigned!`] fails here with its own label.
+    #[test]
+    fn every_context_entry_requires_a_delimited_literal() {
+        for p in PATTERNS {
+            if !p.regex.contains("(?P<v>") || NOT_ASSIGNMENTS.contains(&p.provider) {
+                continue;
+            }
+            assert!(p.regex.contains(DELIMITER), "{} spells its own separator: {}", p.provider, p.regex);
+        }
+        // The class that let an identifier through. Nothing may reintroduce it.
+        for p in PATTERNS {
+            assert!(!p.regex.contains(r#"["'\s:=]+"#), "{} uses the loose separator", p.provider);
         }
     }
 }

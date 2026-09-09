@@ -201,7 +201,32 @@ export const testPassword = "correcthorsebatterystaple";
 // character, and still a sentence rather than a credential.
 export const oauth2Password = "OAuth2 password grant";
 
+// A credential name beside an identifier rather than a literal. Every line
+// below names a secret and holds none: the value is fetched, read off a config
+// object, or is a type. A context entry that accepts an unquoted identifier
+// turns every one of these into a locked High finding on a build nobody can
+// unblock.
+export const expoToken = getExpoTokenFromSecureStore();
+export const azureClientSecret = config.azure.credentials.clientSecret;
+export const pagerdutyApiKey = pagerDutyIntegrationKey;
+export const bitbucketAppPassword = credentials.bitbucketAppPassword;
+export const revenuecatSecretKey = purchasesConfiguration.revenueCatSecretKey;
+
+export interface SecretsShape {
+    expoToken: ExpoAccessTokenConfiguration;
+    pagerdutyApiKey: PagerDutyIntegrationKeyReference;
+    linkedinClientSecret: LinkedInClientSecretReference;
+}
+
 declare const user: string;
 declare const secret: string;
 declare const accessToken: string;
 declare function btoa(input: string): string;
+declare const config: Record<string, Record<string, Record<string, string>>>;
+declare const credentials: Record<string, string>;
+declare const purchasesConfiguration: Record<string, string>;
+declare const pagerDutyIntegrationKey: string;
+declare function getExpoTokenFromSecureStore(): string;
+type ExpoAccessTokenConfiguration = string;
+type PagerDutyIntegrationKeyReference = string;
+type LinkedInClientSecretReference = string;
