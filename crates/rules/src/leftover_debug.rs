@@ -5,15 +5,42 @@
 //! `window.console.log(...)` and `globalThis.console.log(...)` are not flagged,
 //! because matching them would cost more false positives than the miss is worth.
 
-use globset::{Glob, GlobSetBuilder};
+use std::sync::OnceLock;
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
 use crate::{clean_files, finding, line_text, Rule, RuleContext, Scope};
 
-pub struct LeftoverDebug;
+#[derive(Default)]
+pub struct LeftoverDebug {
+    /// The compiled `debug_allowed` set, built on the first file this instance
+    /// is run over and reused for every file after it. The file rules run one
+    /// file at a time across the pool from a single set of rule instances, so
+    /// compiling the globs inside `run` compiles them once per file: a few
+    /// regexes against every file in the repository, on the path a pre-commit
+    /// hook has three hundred milliseconds to finish. The list it was built
+    /// from is stored beside it, so an instance asked to answer under a
+    /// different config compiles that config's set rather than serving the
+    /// first one's.
+    allowed: OnceLock<(Vec<String>, GlobSet)>,
+}
 
 const FLAGGED: &[&str] = &["log", "debug", "trace", "dir", "table"];
+
+/// The globs whose files this rule stays quiet about. An unparseable glob is
+/// dropped rather than failing the run: `Config::load` has already rejected the
+/// bad pattern, so anything reaching here came from a caller that built its own.
+fn allowed_set(globs: &[String]) -> GlobSet {
+    let mut b = GlobSetBuilder::new();
+    for g in globs {
+        if let Ok(glob) = Glob::new(g) {
+            b.add(glob);
+        }
+    }
+    b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+}
 
 fn is_debug_call(node: Node, src: &str) -> bool {
     if node.kind() != "call_expression" {
@@ -60,13 +87,15 @@ impl Rule for LeftoverDebug {
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
-        let mut b = GlobSetBuilder::new();
-        for g in &ctx.config.debug_allowed {
-            if let Ok(glob) = Glob::new(g) {
-                b.add(glob);
-            }
-        }
-        let allowed = b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap());
+        let memo =
+            self.allowed.get_or_init(|| (ctx.config.debug_allowed.clone(), allowed_set(&ctx.config.debug_allowed)));
+        let rebuilt;
+        let allowed = if memo.0 == ctx.config.debug_allowed {
+            &memo.1
+        } else {
+            rebuilt = allowed_set(&ctx.config.debug_allowed);
+            &rebuilt
+        };
         let mut out = Vec::new();
         for file in clean_files(ctx) {
             if allowed.is_match(&file.rel) {

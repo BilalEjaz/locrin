@@ -195,7 +195,7 @@ pub fn run_file_rules(
 /// The registry: every rule the engine ships, in the order they are declared.
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
     vec![
-        Box::new(leftover_debug::LeftoverDebug),
+        Box::new(leftover_debug::LeftoverDebug::default()),
         Box::new(leftover_commented::LeftoverCommented),
         Box::new(leftover_marker::LeftoverMarker),
         Box::new(unused_import::UnusedImport),

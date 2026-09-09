@@ -675,3 +675,43 @@ fn a_bad_ref_is_an_engine_error() {
     assert!(err.starts_with("error:"), "{err}");
     assert!(err.contains("no-such-ref"), "{err}");
 }
+
+/// A file leaving the repository is a change, and the finding it causes lands in
+/// a file the run never touched: the departed file was the last importer of an
+/// export, so that export is dead now. Nothing about the surviving files changed,
+/// so a `--changed` run has an empty scope and only the deleted file's old edges
+/// connect it to the answer.
+#[test]
+fn changed_only_reports_a_dead_export_caused_by_a_deletion() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function kept(): number {\n  return 1;\n}\nexport function dropped(): number {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/one.ts"), "import { kept } from \"./lib\";\nexport const a = kept();\n")
+        .unwrap();
+    std::fs::write(dir.path().join("src/two.ts"), "import { dropped } from \"./lib\";\nexport const b = dropped();\n")
+        .unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { ok } from \"./clean\";\nimport { bad } from \"./dirty\";\nimport { a } from \"./one\";\nexport const total = ok() + bad() + a;\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "dead-export"), "{v}");
+
+    // two.ts was the only consumer of `dropped`, and it is gone.
+    std::fs::remove_file(dir.path().join("src/two.ts")).unwrap();
+    let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(dead, vec!["src/lib.ts"], "{v}");
+}

@@ -193,7 +193,13 @@ fn index_files(
     resolver: &Resolver,
     ix: &mut Index,
 ) -> anyhow::Result<Indexed> {
-    let cached = cache::load_all(ix)?;
+    // Only a run that has to answer for the whole repository ever serves a
+    // cached row: every `serve` below sits behind `report_all`. Loading and
+    // deserialising every row for a narrowed run (a hook's `--changed`, a named
+    // path, a `--base` against a pull request's merge base) would be a fixed
+    // cost proportional to the repository, charged against the three hundred
+    // milliseconds such a run is allowed.
+    let cached = if report_all { cache::load_all(ix)? } else { HashMap::new() };
     let mut files = Vec::new();
     let mut served: Vec<Finding> = Vec::new();
     let mut changed: HashSet<String> = HashSet::new();
@@ -321,6 +327,19 @@ fn index_files(
             reads.insert(rel.clone(), FileRead { hash, stat });
             files.push(parsed);
         }
+    }
+    // A deletion is a change like any other, and the finding it causes lands
+    // somewhere else: the file that was the last importer of an export leaves,
+    // and the export is dead in a file this run never touched. The departed
+    // file's edges are the only record of that link, and `remove_missing` is
+    // about to delete them, so its targets are captured here while they still
+    // exist. See `Indexed::before`.
+    let kept: HashSet<&str> = present.iter().map(|s| s.as_str()).collect();
+    for rel in ix.all_files()? {
+        if kept.contains(rel.as_str()) {
+            continue;
+        }
+        before.extend(edges::from_file(ix, &rel)?.into_iter().filter_map(|e| e.to_rel));
     }
     // The candidate list is the whole repository on every run, so pruning rows
     // for files that went away is always safe.
