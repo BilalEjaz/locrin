@@ -676,6 +676,28 @@ fn a_bad_ref_is_an_engine_error() {
     assert!(err.contains("no-such-ref"), "{err}");
 }
 
+/// A ref is data the operator hands the tool, and git reads an argument that
+/// begins with `-` as one of its own options. `--since=--output=<path>` used to
+/// reach `git diff` as `--output`, which wrote the diff to that path and let the
+/// check print PASS: an attacker-controlled ref in a CI configuration could
+/// write a file anywhere the runner could. The ref is refused before any git
+/// process starts, so nothing is written and the message names what was refused.
+#[test]
+fn a_ref_that_looks_like_an_option_is_refused() {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let planted = dir.path().join("planted.diff");
+    let arg = format!("--since=--output={}", planted.display());
+    let out = locrin(dir.path()).args(["check", arg.as_str()]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stdout));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.starts_with("error:"), "{err}");
+    assert!(err.contains("--output="), "the message names the ref it refused: {err}");
+    assert!(!planted.exists(), "git must never have seen the ref as an option");
+}
+
 /// A file leaving the repository is a change, and the finding it causes lands in
 /// a file the run never touched: the departed file was the last importer of an
 /// export, so that export is dead now. Nothing about the surviving files changed,
