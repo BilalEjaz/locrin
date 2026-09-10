@@ -481,6 +481,33 @@ this measurement found. It is a Task 13 defect and it is not fixed here, because
 Task 16 changes rule logic only where the gate forces a default. It is carried
 as concern 1 of the Task 16 report.
 
+#### Fixed, and re-measured online (`d654658`)
+
+`osv::first_fixed` now chooses the range by the installed version rather than by
+its position in the document: every SEMVER range is read as the half-open
+interval OSV means by it, `introduced <= v < fixed`, and the range holding the
+installed version names the upgrade. A range that holds the version and names no
+fix, closed by a `last_affected` or opened by an `introduced` with nothing after
+it, answers no fix rather than borrowing another branch's, and so does a version
+no range holds.
+
+Re-run online against fasting-app with a fresh cache, once. The finding set is
+unchanged at **54 findings over the same advisories**; only the fix lines moved:
+
+| Package | Installed | Before | After | OSV's fix for that range |
+| --- | --- | --- | --- | --- |
+| fast-uri | 3.1.5 | 2.4.5 | **3.1.6** | 3.1.6 |
+| @xmldom/xmldom | 0.9.10 | 0.8.15 | **0.9.12** | 0.9.12 |
+| @xmldom/xmldom | 0.8.13 | 0.9.11 | **0.8.14** | 0.8.14 |
+| @xmldom/xmldom | 0.7.13 | 0.9.11 | **0.8.14** | 0.8.14 |
+| js-yaml | 3.15.1 | 4.3.2 | **3.15.2** | 3.15.2 |
+
+Across all 54: **52 name a later version than the installed one and 0 name an
+earlier or equal one.** The remaining 2 name no fix at all, both `image-size
+1.2.1`, whose advisories close with `{"introduced": "0", "last_affected":
+"2.0.2"}` and publish no fixed release; the advisory says so in words, which is
+the same answer the hand-check above recorded as correct.
+
 #### Warm cost
 
 Task 13 measured the rule directly on fasting-app with a warm cache: **14.2,
@@ -651,6 +678,51 @@ With that fixed the warm single-file gate returns to about 230 ms and the cold
 scan drops by roughly 90 ms, which leaves the cold gate needing the machine
 question answered separately. Both are carried as concerns 2 and 3 of the Task
 16 report, with the targets untouched.
+
+#### Re-measured after the fix wave, with the same-session control
+
+The repair above was made (`8c79f53`): the `RegexSet` is still built once per
+process and each individual `Regex` now sits behind its own `OnceLock` and
+compiles on the first line that matches its pattern. Re-measured at `8c79f53`
+with the whole four-run method repeated at the branch base `8fe38e0` in a
+detached worktree in the same session, machine confirmed idle beforehand (`0`
+cargo, rustc or locrin processes), bench repository `<home>/fasting-app`,
+fresh temporary cache per benchmark.
+
+| Benchmark | Target | `8fe38e0` (base), four runs | `8c79f53` (HEAD), four runs |
+| --- | --- | --- | --- |
+| cold index | 5000 ms | 9382 / 9101 / 9162 / 9078 | 10294 / 8914 / 9905 / 9967 |
+| warm single-file | 300 ms | 150 / 162 / 149 / 4268 | 179 / 182 / 178 / 184 |
+| warm 30-file | 1000 ms | 224 / 228 / 229 / 226 | 317 / 306 / 294 / 319 |
+| startup | 50 ms | 18 / 18 / 18 / 24 | 19 / 21 / 22 / 23 |
+
+Discarding each side's first run, which is the method Part A established (the
+first cold run after a build pays the page cache), and setting aside the base's
+single 4268 ms warm outlier as a machine hiccup with three 149 to 162 ms
+neighbours:
+
+| Benchmark | Base mean | HEAD mean | Part B costs | Ruling |
+| --- | --- | --- | --- | --- |
+| cold index | 9114 ms | 9595 ms | **+481 ms, +5.3 percent** | inside the 10 percent allowance |
+| warm single-file | 156 ms | 181 ms | +25 ms | **179 to 184 ms against 300 ms: green** |
+| warm 30-file | 228 ms | 309 ms | +81 ms | 294 to 319 ms against 1000 ms: green |
+| startup | 20 ms | 22 ms | +2 ms | green |
+
+**The warm single-file gate is green again.** It measured 319 to 362 ms before
+the repair and 178 to 184 ms after it, so the lazy compile removed about 145 ms
+from the first file of a run, more than the 90 ms the isolation predicted. The
+30-file check moved with it, 442 to 504 ms down to 294 to 319 ms.
+
+**The cold gate is red, and the whole of the red is the machine.** The base
+commit contains none of Part B and it measures **9078 to 9382 ms today** against
+the 5062 to 5459 ms Task 16 recorded for that same commit and the 3750 to 3790
+ms Part A recorded for it. That is the same measuring-box drift this ledger has
+now recorded five times, and today it is at its worst: the base misses the
+5000 ms target on its own by about 4100 ms. Part B's own share is +481 ms, or
+5.3 percent, which is inside the ruling's 10 percent allowance for cold. The
+target was not lowered and the absolute miss is recorded here beside the control
+that explains it. A cold number worth a verdict needs a quiet box, and this one
+is not it today.
 
 #### Registry
 
