@@ -2,7 +2,7 @@ pub mod text;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::time::Duration;
 
 use locrin_core::lang::Language;
@@ -61,16 +61,26 @@ pub fn read_input() -> Option<Input> {
 /// How long a hook may take before it gives up and lets the edit through.
 pub const HOOK_BUDGET_MS: u64 = 2000;
 
-/// Runs `f` on a worker thread and waits at most `HOOK_BUDGET_MS`. On timeout
-/// returns None; the process exits right after, which is what abandons the
-/// worker.
+/// What became of a watchdog worker.
 ///
-/// A worker that panics disconnects the channel, which reads here as the same
-/// None: either way the hook has no verdict to report and says so rather than
-/// holding the agent.
-pub fn watchdog<T: Send + 'static>(
-    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-) -> Option<anyhow::Result<T>> {
+/// The two ways of having no verdict are kept apart because they are different
+/// news: a timeout is a slow machine or a big file and the budget doing its
+/// job, a crash is a bug in this engine. Folding them together would let an
+/// engine panic read as a load complaint, and the panic itself is silent
+/// (`main` installs an empty panic hook), so this is the only place a crash is
+/// visible at all.
+pub enum Outcome<T> {
+    /// The worker finished inside the budget, with whatever it returned.
+    Done(anyhow::Result<T>),
+    /// The budget ran out with the worker still going.
+    Timeout,
+    /// The worker panicked, so there is no result and never will be.
+    Crashed,
+}
+
+/// Runs `f` on a worker thread and waits at most `HOOK_BUDGET_MS`. A worker
+/// that outlives the budget is abandoned by the process exit that follows.
+pub fn watchdog<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Outcome<T> {
     let (tx, rx) = sync_channel(1);
     std::thread::spawn(move || {
         // A send that fails means the receiver already timed out and left. The
@@ -78,7 +88,13 @@ pub fn watchdog<T: Send + 'static>(
         // is for.
         let _ = tx.send(f());
     });
-    rx.recv_timeout(Duration::from_millis(HOOK_BUDGET_MS)).ok()
+    match rx.recv_timeout(Duration::from_millis(HOOK_BUDGET_MS)) {
+        Ok(r) => Outcome::Done(r),
+        Err(RecvTimeoutError::Timeout) => Outcome::Timeout,
+        // The sender is dropped without ever sending only when the worker
+        // unwound past it, so a disconnect here is a panic and nothing else.
+        Err(RecvTimeoutError::Disconnected) => Outcome::Crashed,
+    }
 }
 
 /// Prints one JSON object on stdout (nothing when `v` is None) and returns the
@@ -141,18 +157,27 @@ pub fn post_edit(root: &Path, input: Input) -> i32 {
         diff: None,
     };
     match watchdog(move || run::check(&opts)) {
-        None => emit(Some(json!({
+        Outcome::Timeout => emit(Some(json!({
             "systemMessage": format!(
                 "locrin: check of {rel} did not finish in {} s; passed without checking it",
                 HOOK_BUDGET_MS / 1000
             )
         }))),
-        Some(Err(e)) => emit(Some(json!({ "systemMessage": format!("locrin: {e:#}; passed without checking {rel}") }))),
-        Some(Ok(v)) if v.blocking > 0 => {
+        // Named as the engine's own fault, not the machine's: the person
+        // reading this should file it, not blame their laptop.
+        Outcome::Crashed => emit(Some(json!({
+            "systemMessage": format!(
+                "locrin: check of {rel} failed inside the engine; passed without checking it"
+            )
+        }))),
+        Outcome::Done(Err(e)) => {
+            emit(Some(json!({ "systemMessage": format!("locrin: {e:#}; passed without checking {rel}") })))
+        }
+        Outcome::Done(Ok(v)) if v.blocking > 0 => {
             let v = v.capped(locrin_reporters::agent::CAP);
             emit(Some(json!({ "decision": "block", "reason": text::feedback(&v) })))
         }
-        Some(Ok(v)) if !v.findings.is_empty() => {
+        Outcome::Done(Ok(v)) if !v.findings.is_empty() => {
             let v = v.capped(locrin_reporters::agent::CAP);
             emit(Some(json!({
                 "hookSpecificOutput": {
@@ -164,7 +189,7 @@ pub fn post_edit(root: &Path, input: Input) -> i32 {
         // A clean file says nothing. The hook runs after every edit, and an
         // agent that is told "fine" a hundred times learns to skim what the
         // hook says.
-        Some(Ok(_)) => emit(None),
+        Outcome::Done(Ok(_)) => emit(None),
     }
 }
 
@@ -222,13 +247,23 @@ mod tests {
     }
 
     #[test]
+    fn the_watchdog_reports_a_worker_that_panics_as_a_crash() {
+        // The panic report this prints on stderr belongs to the test: the
+        // binary installs a silent panic hook, the test harness does not.
+        let crashed = watchdog(|| -> anyhow::Result<i32> { panic!("engine bug") });
+        assert!(matches!(crashed, Outcome::Crashed));
+    }
+
+    #[test]
     fn the_watchdog_gives_up_on_a_worker_that_outlasts_the_budget() {
         let slow = watchdog(|| {
             std::thread::sleep(Duration::from_millis(HOOK_BUDGET_MS + 500));
             Ok(1)
         });
-        assert!(slow.is_none());
-        let quick = watchdog(|| Ok(1)).unwrap().unwrap();
+        assert!(matches!(slow, Outcome::Timeout));
+        let Outcome::Done(Ok(quick)) = watchdog(|| Ok(1)) else {
+            panic!("a worker that returns at once is Done");
+        };
         assert_eq!(quick, 1);
     }
 }
