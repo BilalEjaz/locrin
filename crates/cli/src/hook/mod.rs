@@ -124,6 +124,29 @@ pub fn emit(v: Option<serde_json::Value>) -> i32 {
     0
 }
 
+/// Runs one of the two agent hooks and turns a panic inside it into a pass.
+///
+/// The watchdog above catches a panic on the worker thread. A panic anywhere
+/// else in the hook, before the worker is spawned or while its verdict is being
+/// turned into an answer, is on the process's own thread: it unwinds past the
+/// watchdog into `main`'s `catch_unwind` and exits 2. Claude Code reads a Stop
+/// hook's exit 2 as "block, and show stderr to the agent", which is precisely
+/// the failure spec 9 exists to prevent, and it would repeat on every stop until
+/// someone edited the settings file. So the two agent hooks answer their own
+/// panics the way they answer every other failure: tell the person, let the work
+/// through, exit 0.
+///
+/// `pre_commit` is deliberately not wrapped. Its exit code is the verdict's, and
+/// a broken engine there must stop the commit rather than wave it through.
+pub fn guarded(f: impl FnOnce() -> i32) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(code) => code,
+        Err(_) => emit(Some(json!({
+            "systemMessage": "locrin: hook failed inside the engine; passed without checking"
+        }))),
+    }
+}
+
 /// The file the payload names, once it is a file this engine can say something
 /// about: a source file it parses, that exists, and that lives inside the
 /// repository the hook was pointed at.
@@ -400,6 +423,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = canonical_root(dir.path());
         assert_eq!(target(&root, &root.join("gone.ts").display().to_string()), None);
+    }
+
+    /// The exit code is the whole point: 0 is what tells Claude Code the hook
+    /// had nothing to say, and anything else is read as the hook failing. What
+    /// it prints on stdout is pinned by the end-to-end tests, which can see it.
+    #[test]
+    fn a_guarded_hook_that_panics_still_exits_zero() {
+        // The panic report this prints on stderr belongs to the test harness,
+        // not to the binary, which installs a silent panic hook of its own.
+        assert_eq!(guarded(|| panic!("engine bug")), 0);
+        assert_eq!(guarded(|| 0), 0);
     }
 
     #[test]

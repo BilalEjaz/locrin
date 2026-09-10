@@ -307,3 +307,25 @@ the plan.
 - **Task 5, the pull request is opened by the controller after the whole-branch
   review, not by this task.** The brief's step 4 was held back deliberately; the
   measurement and the dogfood are what Task 5 delivers.
+
+- **Final review, the two agent hook arms catch their own panics.** The watchdog
+  covers a panic on the worker thread; a panic anywhere else in `post_edit` or
+  `stop` is on the process's own thread and unwinds into `main`'s
+  `catch_unwind`, which exits 2. Claude Code reads a Stop hook's exit 2 as
+  "block, and show stderr to the agent", the one failure spec 9 exists to
+  prevent, and it would repeat on every stop. `hook::guarded` wraps both arms,
+  answers a panic with the same `systemMessage` shape every other failure uses,
+  and exits 0. `pre_commit` is deliberately not wrapped: its exit code is the
+  verdict's, and a broken engine there must stop the commit.
+
+- **Final review, the pre-commit hook's directory comes from
+  `git rev-parse --git-path hooks`, not from `.git/hooks`.** The hard-coded path
+  was wrong in two ordinary situations: in a linked worktree `.git` is a file, so
+  init reported "not a git repository" to somebody standing in one, and under
+  `core.hooksPath` init wrote a file git never runs and reported `wrote` for it.
+  `git::hooks_dir` asks git, creates the directory when it is not there yet
+  (`core.hooksPath` may name one nobody has made), and returns None for every way
+  of failing, which keeps the existing "not a git repository" skip. Husky is
+  still checked first. The path reported on stdout is relative to the root where
+  the directory is under it and absolute where it is not, which is the ordinary
+  case in a worktree.

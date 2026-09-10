@@ -104,6 +104,27 @@ fn post_edit_survives_garbage_stdin() {
     assert!(err.contains("locrin"), "{err}");
 }
 
+/// The engine failing is not the agent's problem to solve, so the hook says so
+/// to the person and lets the edit through. A `locrin.toml` the config loader
+/// refuses is the cheapest way to make the check itself return an error, and the
+/// message has to name that file: it is the one thing the person can fix.
+#[test]
+fn post_edit_reports_an_engine_error_to_the_person_and_passes_the_edit() {
+    let dir = copy_fixture();
+    std::fs::write(dir.path().join("locrin.toml"), "nonsense = 1\n").unwrap();
+    let file = dir.path().join("src/dirty.ts");
+    let out = post_edit(dir.path(), &payload("post_edit_write.json", dir.path(), &file.display().to_string()));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout_of(&out);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    let obj = v.as_object().unwrap_or_else(|| panic!("not one JSON object: {text}"));
+    // Only `systemMessage`: an engine error must not reach the agent as a block
+    // or as findings, because there are none to act on.
+    assert_eq!(obj.keys().collect::<Vec<_>>(), vec!["systemMessage"], "{text}");
+    let message = obj["systemMessage"].as_str().unwrap();
+    assert!(message.contains("locrin.toml"), "{message}");
+}
+
 /// Claude Code sends native separators, so on Windows the payload carries a
 /// path full of backslashes. Nothing translates them; this proves it.
 #[test]

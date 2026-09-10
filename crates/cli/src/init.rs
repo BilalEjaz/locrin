@@ -4,7 +4,8 @@ use std::time::Instant;
 use anyhow::{bail, Context};
 use locrin_core::baseline::BASELINE_FILE;
 use locrin_core::config::{Config, CONFIG_FILE};
-use locrin_core::walk::{source_files, WalkOptions};
+use locrin_core::parse::rel_path;
+use locrin_core::walk::{canonical_root, source_files, WalkOptions};
 use serde_json::{json, Map, Value};
 
 use crate::run;
@@ -18,9 +19,11 @@ pub enum Touch {
     Skipped(String),
 }
 
-/// Everything one `init` run has to say, so the caller decides how to print it.
+/// What one `init` run has to say once it has finished, so the caller decides
+/// how to print it. The list of files touched is not in here: it is owed even
+/// when the run does not reach this type, so it is handed in by the caller
+/// instead. See [`run`].
 pub struct Report {
-    pub touched: Vec<(String, Touch)>,
     pub files_indexed: usize,
     pub baseline_entries: Option<usize>,
 }
@@ -73,10 +76,21 @@ const STOP_COMMAND: &str = "locrin hook stop";
 /// scan and the baseline. Nothing here overwrites a file locrin did not write,
 /// and a second run reports `Unchanged` for every step.
 ///
+/// `touched` is filled in as the run goes, and it belongs to the caller for the
+/// same reason a returned value would not do: once the first file is on disk the
+/// report is owed whatever happens next, and a scan that cannot run must not
+/// leave a `locrin.toml` and a `.claude/settings.json` behind that nothing ever
+/// named. The caller prints the lines it has and then reports the error.
+///
 /// `progress` receives the lines a person watching the first scan needs; the
 /// caller decides where they go, which is not stdout: they name no file the
 /// command touched.
-pub fn run(root: &Path, offline: bool, progress: &mut dyn FnMut(&str)) -> anyhow::Result<Report> {
+pub fn run(
+    root: &Path,
+    offline: bool,
+    touched: &mut Vec<(String, Touch)>,
+    progress: &mut dyn FnMut(&str),
+) -> anyhow::Result<Report> {
     // Every file init reads is read and decided here, before the first byte is
     // written. The report on stdout is the only record of what the command did,
     // so a run that aborts halfway would leave files behind that nothing ever
@@ -86,8 +100,6 @@ pub fn run(root: &Path, offline: bool, progress: &mut dyn FnMut(&str)) -> anyhow
     let config = Config::load(root)?;
     let settings = plan_merge(root, SETTINGS_FILE, merge_settings)?;
     let mcp = plan_merge(root, MCP_FILE, merge_mcp)?;
-
-    let mut touched = Vec::new();
 
     let config_path = root.join(CONFIG_FILE);
     if config_path.exists() {
@@ -114,16 +126,16 @@ pub fn run(root: &Path, offline: bool, progress: &mut dyn FnMut(&str)) -> anyhow
     let started = Instant::now();
     let (files, _changed) = run::scan(root, offline)?;
     let elapsed = started.elapsed().as_secs_f64();
-    let mut report = Report { touched, files_indexed: files, baseline_entries: None };
+    let mut report = Report { files_indexed: files, baseline_entries: None };
     progress(&format!("indexed {} file(s) in {elapsed:.1} s", report.files_indexed));
 
     // The scan above has warmed the findings cache, so this second pass over the
     // repository is served from it.
     if root.join(BASELINE_FILE).exists() {
-        report.touched.push((BASELINE_FILE.to_string(), Touch::Unchanged));
+        touched.push((BASELINE_FILE.to_string(), Touch::Unchanged));
     } else {
         let entries = run::baseline_create(root, offline)?;
-        report.touched.push((BASELINE_FILE.to_string(), Touch::Wrote));
+        touched.push((BASELINE_FILE.to_string(), Touch::Wrote));
         report.baseline_entries = Some(entries);
     }
     Ok(report)
@@ -183,17 +195,26 @@ fn write_planned(root: &Path, planned: Planned) -> anyhow::Result<(String, Touch
 /// A hook whose text is exactly the one locrin writes is locrin's own, so a
 /// second run reports it unchanged rather than skipping the file it installed a
 /// moment ago.
+///
+/// Where the hook goes is git's answer, not `.git/hooks`: see
+/// [`crate::git::hooks_dir`]. Husky is still asked first, because a repository
+/// that runs its hooks through husky owns whatever directory git names.
+///
+/// The path reported is relative to `root` where the directory is under it, and
+/// absolute where it is not, which is the ordinary case in a worktree: the hooks
+/// live in the main checkout. The two skips name `.git/hooks/pre-commit`
+/// literally, because in neither case is there a resolved directory to name.
 fn install_pre_commit(root: &Path) -> anyhow::Result<(String, Touch)> {
-    let rel = PRE_COMMIT_FILE.to_string();
     if root.join(".husky").is_dir() {
         let why = "husky detected: add `locrin hook pre-commit` to .husky/pre-commit";
-        return Ok((rel, Touch::Skipped(why.to_string())));
+        return Ok((PRE_COMMIT_FILE.to_string(), Touch::Skipped(why.to_string())));
     }
-    if !root.join(".git/hooks").is_dir() {
+    let Some(dir) = crate::git::hooks_dir(root) else {
         let why = "not a git repository: no pre-commit hook installed";
-        return Ok((rel, Touch::Skipped(why.to_string())));
-    }
-    let path = root.join(PRE_COMMIT_FILE);
+        return Ok((PRE_COMMIT_FILE.to_string(), Touch::Skipped(why.to_string())));
+    };
+    let path = dir.join("pre-commit");
+    let rel = rel_path(&canonical_root(root), &path);
     if path.exists() {
         let current = std::fs::read_to_string(&path).unwrap_or_default();
         if current == PRE_COMMIT_SCRIPT {

@@ -172,9 +172,41 @@ pub fn has_head(root: &Path) -> bool {
     git_command(root).args(["rev-parse", "--verify", "--quiet", "HEAD"]).output().is_ok_and(|out| out.status.success())
 }
 
+/// The directory git will look in for this checkout's hooks, or None when there
+/// is no repository to install one in.
+///
+/// `.git/hooks` is the answer often enough to look like the answer, and it is
+/// wrong in two ordinary situations. In a linked worktree `.git` is a file, so
+/// the guess reports "not a git repository" to somebody standing in a perfectly
+/// good one; with `core.hooksPath` set, the guess writes a file git will never
+/// run and calls it installed, which is worse than not installing it at all.
+/// Only git knows, so git is asked.
+///
+/// Every way of failing is one answer, as with [`has_head`]: the caller has
+/// something to say about a repository it cannot find, and no use for the
+/// difference between git missing and git refusing.
+///
+/// The path git prints is relative to the directory git ran in, so it is joined
+/// onto that directory rather than onto anything else, and the result is
+/// canonicalised so the caller can compare it with a root. It is also created:
+/// `core.hooksPath` may name a directory nobody has made yet, and a worktree's
+/// own admin directory need not hold one either.
+pub fn hooks_dir(root: &Path) -> Option<PathBuf> {
+    let printed = String::from_utf8(git(root, &["rev-parse", "--git-path", "hooks"]).ok()?).ok()?;
+    let printed = printed.trim();
+    if printed.is_empty() {
+        return None;
+    }
+    let dir = root.join(printed);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(canonical_root(&dir))
+}
+
 /// Paths staged for the next commit (added, copied, modified, renamed), relative
-/// to the repository top level, in git's order. Works on an unborn branch, where
-/// git diffs the index against the empty tree.
+/// to `root`, in git's order. Paths outside `root` are dropped: the repository
+/// top level may sit above the root Locrin was pointed at, and a staged file
+/// beyond it is not this run's business. Works on an unborn branch, where git
+/// diffs the index against the empty tree.
 ///
 /// This is the pre-commit hook's scope, and it is the index and not the working
 /// tree: what is about to become a commit is what the gate answers for.

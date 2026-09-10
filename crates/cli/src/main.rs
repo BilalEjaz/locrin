@@ -172,8 +172,14 @@ fn real_main() -> anyhow::Result<i32> {
         Cmd::Init { offline } => {
             // Progress goes to stderr: it names no file the command touched, and
             // stdout is the list of files it did.
-            let report = init::run(&root, offline, &mut |line| eprintln!("{line}"))?;
-            for (path, touch) in &report.touched {
+            //
+            // The list is printed before the result is unwrapped, so a run that
+            // fails after its first write still says what is on disk. That is the
+            // moment the list is worth most: nothing else in the repository
+            // names those files as locrin's.
+            let mut touched = Vec::new();
+            let result = init::run(&root, offline, &mut touched, &mut |line| eprintln!("{line}"));
+            for (path, touch) in &touched {
                 match touch {
                     init::Touch::Wrote => println!("wrote {path}"),
                     init::Touch::Updated => println!("updated {path}"),
@@ -181,7 +187,7 @@ fn real_main() -> anyhow::Result<i32> {
                     init::Touch::Skipped(why) => println!("skipped {path}: {why}"),
                 }
             }
-            if let Some(n) = report.baseline_entries {
+            if let Some(n) = result?.baseline_entries {
                 println!("baseline written with {n} finding(s)");
             }
             Ok(0)
@@ -212,11 +218,11 @@ fn real_main() -> anyhow::Result<i32> {
             let Some(input) = hook::read_input() else { return Ok(0) };
             // Claude Code runs a hook in the project directory, so the current
             // directory is the root unless --root says otherwise.
-            Ok(hook::post_edit(&root, input))
+            Ok(hook::guarded(|| hook::post_edit(&root, input)))
         }
         Cmd::Hook { cmd: HookCmd::Stop } => {
             let Some(input) = hook::read_input() else { return Ok(0) };
-            Ok(hook::stop(&root, input))
+            Ok(hook::guarded(|| hook::stop(&root, input)))
         }
         // The only hook whose failure is not swallowed: an error here reaches
         // `main` and exits 2, so a broken engine stops the commit instead of
