@@ -77,6 +77,16 @@ const STOP_COMMAND: &str = "locrin hook stop";
 /// caller decides where they go, which is not stdout: they name no file the
 /// command touched.
 pub fn run(root: &Path, offline: bool, progress: &mut dyn FnMut(&str)) -> anyhow::Result<Report> {
+    // Every file init reads is read and decided here, before the first byte is
+    // written. The report on stdout is the only record of what the command did,
+    // so a run that aborts halfway would leave files behind that nothing ever
+    // named: a `locrin.toml` with a typo in it, or a `.claude/settings.json`
+    // that is not a JSON object, has to fail while there is still nothing to
+    // report.
+    let config = Config::load(root)?;
+    let settings = plan_merge(root, SETTINGS_FILE, merge_settings)?;
+    let mcp = plan_merge(root, MCP_FILE, merge_mcp)?;
+
     let mut touched = Vec::new();
 
     let config_path = root.join(CONFIG_FILE);
@@ -87,16 +97,19 @@ pub fn run(root: &Path, offline: bool, progress: &mut dyn FnMut(&str)) -> anyhow
         touched.push((CONFIG_FILE.to_string(), Touch::Wrote));
     }
 
-    touched.push(merge_file(root, SETTINGS_FILE, merge_settings)?);
-    touched.push(merge_file(root, MCP_FILE, merge_mcp)?);
+    touched.push(write_planned(root, settings)?);
+    touched.push(write_planned(root, mcp)?);
     touched.push(install_pre_commit(root)?);
 
     // The count is walked here rather than taken from the scan because the scan
     // reports it only once it is over: the first scan on a cold tree is the OS
     // reading the repository, and a person watching a blank line for half a
     // minute assumes a hang. A second walk costs milliseconds against that.
-    let excludes = Config::load(root)?.excludes;
-    let n = source_files(root, &WalkOptions { excludes })?.len();
+    //
+    // The config was loaded before any write, when `locrin.toml` was whatever
+    // the operator had. That is the same value the template above would load as,
+    // because every setting in it is commented out.
+    let n = source_files(root, &WalkOptions { excludes: config.excludes })?.len();
     progress(&format!("indexing {n} source file(s) under {}", root.display()));
     let started = Instant::now();
     let (files, _changed) = run::scan(root, offline)?;
@@ -116,27 +129,45 @@ pub fn run(root: &Path, offline: bool, progress: &mut dyn FnMut(&str)) -> anyhow
     Ok(report)
 }
 
-/// Reads `rel`, runs it through `merge`, and writes the result back only when
-/// the merge changed something. Not writing is what makes a second run leave the
-/// file's bytes alone even where the operator has reformatted it.
-fn merge_file(
+/// A merge that has been decided but not yet written: what the file would
+/// become, whether that differs from what is there, and whether it was there at
+/// all. Deciding is separate from writing so that every file init reads can be
+/// checked while the repository is still untouched.
+struct Planned {
+    rel: &'static str,
+    text: String,
+    changed: bool,
+    existed: bool,
+}
+
+/// Reads `rel` and runs it through `merge`. Reads and parses only: a merge that
+/// cannot be made is an error here, before init has written anything.
+fn plan_merge(
     root: &Path,
-    rel: &str,
+    rel: &'static str,
     merge: fn(Option<&str>) -> anyhow::Result<(String, bool)>,
-) -> anyhow::Result<(String, Touch)> {
+) -> anyhow::Result<Planned> {
     let path = root.join(rel);
     let existing = match path.exists() {
         true => Some(std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?),
         false => None,
     };
     let (text, changed) = merge(existing.as_deref())?;
-    let touch = match (existing.is_some(), changed) {
+    Ok(Planned { rel, text, changed, existed: existing.is_some() })
+}
+
+/// Writes a planned merge back, but only when it changed something. Not writing
+/// is what makes a second run leave the file's bytes alone even where the
+/// operator has reformatted it.
+fn write_planned(root: &Path, planned: Planned) -> anyhow::Result<(String, Touch)> {
+    let path = root.join(planned.rel);
+    let touch = match (planned.existed, planned.changed) {
         (true, false) => Touch::Unchanged,
         (had_file, _) => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
             }
-            std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(&path, planned.text).with_context(|| format!("writing {}", path.display()))?;
             if had_file {
                 Touch::Updated
             } else {
@@ -144,7 +175,7 @@ fn merge_file(
             }
         }
     };
-    Ok((rel.to_string(), touch))
+    Ok((planned.rel.to_string(), touch))
 }
 
 /// Installs the git pre-commit hook, or says who owns it instead.

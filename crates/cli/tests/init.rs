@@ -43,6 +43,14 @@ fn init(dir: &Path) -> Output {
     out
 }
 
+/// The same run, expected to fail. Kept apart from `init` so a test that pins
+/// the failure path cannot pass by accident on a run that succeeded.
+fn failing_init(dir: &Path) -> Output {
+    let out = locrin(dir).args(["init", "--offline"]).output().unwrap();
+    assert_ne!(out.status.code(), Some(0), "init succeeded:\n{}", String::from_utf8_lossy(&out.stdout));
+    out
+}
+
 fn stdout_of(out: &Output) -> String {
     String::from_utf8(out.stdout.clone()).unwrap()
 }
@@ -170,4 +178,38 @@ fn init_does_not_reset_an_existing_baseline() {
     assert!(!stdout.contains("baseline written with"), "{stdout}");
     let text = std::fs::read_to_string(&baseline).unwrap();
     assert!(text.contains("abc123"), "init replaced a baseline it did not write: {text}");
+}
+
+/// The report on stdout is the only record of what init did, so a run that
+/// cannot finish must not have created anything: files written before the
+/// failure would never be named anywhere.
+#[test]
+fn init_with_a_broken_config_writes_nothing() {
+    let dir = temp_repo();
+    git(dir.path(), &["init", "-q"]);
+    std::fs::write(dir.path().join("locrin.toml"), "nonsense = 1\n").unwrap();
+
+    let out = failing_init(dir.path());
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("locrin.toml"), "the error does not name the file to fix:\n{stderr}");
+    for rel in [".claude/settings.json", ".mcp.json", ".git/hooks/pre-commit", "locrin-baseline.json"] {
+        assert!(!dir.path().join(rel).exists(), "{rel} was written by a run that failed");
+    }
+}
+
+/// Same rule for the other file init reads before it decides: the settings file
+/// is checked before the config template is written, not after.
+#[test]
+fn init_with_a_non_object_settings_file_writes_nothing() {
+    let dir = temp_repo();
+    git(dir.path(), &["init", "-q"]);
+    std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+    std::fs::write(dir.path().join(".claude/settings.json"), "[]").unwrap();
+
+    let out = failing_init(dir.path());
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains(".claude/settings.json"), "the error does not name the file to fix:\n{stderr}");
+    for rel in ["locrin.toml", ".mcp.json"] {
+        assert!(!dir.path().join(rel).exists(), "{rel} was written by a run that failed");
+    }
 }
