@@ -577,8 +577,8 @@ machine:
 The branch head and the commit it branched from are the same speed inside the
 spread of repeated runs of either one, and the two commits between them are too.
 So this branch did not make the cold scan slower: the byte scan Task 2 adds per
-parse, the error walk Task 3 adds per parse and the symbol extract Task 1 adds
-per finding are all inside the noise of a 5 s measurement over 1846 files.
+parse, the error walk Task 3 adds per parse and the line scan Task 1 adds per
+finding are all inside the noise of a 5 s measurement over 1846 files.
 
 What the table above does say, and what stands as the concern, is that a cold
 scan of this checkout on this machine is now around 5.4 to 6.3 s against spec
