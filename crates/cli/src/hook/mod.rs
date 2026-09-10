@@ -290,6 +290,54 @@ pub fn stop(root: &Path, input: Input) -> i32 {
     }
 }
 
+/// Checks the files staged for the next commit and returns the verdict's exit
+/// code, so git lets the commit through or stops it.
+///
+/// The scope is the index, not the working tree: a commit carries what was
+/// staged, and half-finished work beside it is not what the author is asking to
+/// record. That is the one thing this hook has that `check --base HEAD` does
+/// not.
+///
+/// Two things set it apart from the agent hooks. There is no watchdog: a commit
+/// is not an agent turn, nobody is waiting on a two-second budget, and the person
+/// asked for the gate. And the exit code is the verdict rather than always 0, so
+/// an engine error propagates to `main`'s exit 2 and a broken engine stops the
+/// commit rather than waving it through as a pass. Someone who disagrees with the
+/// gate has `git commit --no-verify`, which is a deliberate act and leaves a
+/// trace in the shell history; a hook that silently passed would leave none.
+pub fn pre_commit(root: &Path) -> anyhow::Result<i32> {
+    let root = canonical_root(root);
+    let staged = crate::git::staged_files(&root)?;
+    let paths: Vec<PathBuf> = staged
+        .into_iter()
+        .map(|rel| root.join(rel))
+        // A file staged and then removed from the working tree is still a staged
+        // change, and there is nothing left on disk to read: `explicit_files`
+        // refuses a named path that is not there, which would turn a legitimate
+        // commit into an engine error.
+        .filter(|p| p.is_file())
+        .collect();
+    if paths.is_empty() {
+        // `git commit` runs this before it notices the stage is empty, so this
+        // is a normal thing to hit and not a complaint.
+        eprintln!("locrin: nothing staged to check");
+        return Ok(0);
+    }
+    let opts = run::Options {
+        root,
+        paths,
+        changed_only: false,
+        json: false,
+        // A commit is as interactive as an edit is: nobody waits on a network
+        // fetch to find out whether their commit is allowed.
+        offline: true,
+        diff: None,
+    };
+    let verdict = run::check(&opts)?;
+    print!("{}", locrin_reporters::terminal::render(&verdict));
+    Ok(verdict.exit_code())
+}
+
 /// Records the round, or says why it could not.
 ///
 /// A counter that cannot be written is not worth failing a stop over: the check

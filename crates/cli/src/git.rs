@@ -1,7 +1,8 @@
-//! The two git-derived scopes: a pull request's working tree against its base
-//! (`--base`) and the commits since a deploy tag (`--since`). Paths come back
-//! from git relative to the repository top level, which may sit above the root
-//! Locrin was pointed at, so every path is re-rooted here.
+//! The git-derived scopes: a pull request's working tree against its base
+//! (`--base`), the commits since a deploy tag (`--since`), and what is staged for
+//! the next commit (the pre-commit hook). Paths come back from git relative to
+//! the repository top level, which may sit above the root Locrin was pointed at,
+//! so every path is re-rooted here.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -169,4 +170,112 @@ pub fn changed_files(root: &Path, scope: &DiffScope) -> anyhow::Result<Vec<Strin
 /// hook that reports a problem instead of checking the code.
 pub fn has_head(root: &Path) -> bool {
     git_command(root).args(["rev-parse", "--verify", "--quiet", "HEAD"]).output().is_ok_and(|out| out.status.success())
+}
+
+/// Paths staged for the next commit (added, copied, modified, renamed), relative
+/// to the repository top level, in git's order. Works on an unborn branch, where
+/// git diffs the index against the empty tree.
+///
+/// This is the pre-commit hook's scope, and it is the index and not the working
+/// tree: what is about to become a commit is what the gate answers for.
+///
+/// Unlike `changed_files` this does not drop a path whose file is not on disk. A
+/// deletion is already excluded by the filter git applies, but a file staged and
+/// then removed from the working tree still comes back here, and it is the
+/// caller that decides what to do about one.
+pub fn staged_files(root: &Path) -> anyhow::Result<Vec<String>> {
+    let top = top_level(root)?;
+    let names = nul_separated(&git(&top, &["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"])?);
+    Ok(names
+        .into_iter()
+        .filter_map(|n| {
+            // The top level may sit above the root Locrin was pointed at, so a
+            // staged path outside that root is not this run's business.
+            let abs = top.join(&n);
+            abs.starts_with(root).then(|| rel_path(root, &abs))
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// git as these tests drive it. The identity and the signing setting are
+    /// pinned so a machine configured for a real developer still commits, and
+    /// line endings are left alone so the bytes committed are the bytes written.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.autocrlf=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// An empty repository at a canonical root, which is what every path
+    /// comparison in this module is written against.
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical_root(dir.path());
+        run_git(&root, &["init", "-q"]);
+        (dir, root)
+    }
+
+    /// The first commit a repository ever makes is staged on an unborn branch,
+    /// and a pre-commit hook has to survive it: there is no HEAD to diff the
+    /// index against, so git diffs it against the empty tree.
+    #[test]
+    fn staged_files_lists_only_what_is_staged_on_an_unborn_branch() {
+        let (_dir, root) = repo();
+        std::fs::write(root.join("a.ts"), "export const a = 1;\n").unwrap();
+        std::fs::write(root.join("b.ts"), "export const b = 2;\n").unwrap();
+        run_git(&root, &["add", "a.ts"]);
+        // b.ts is in the working tree and not in the index, which is exactly the
+        // difference this function exists to draw.
+        assert_eq!(staged_files(&root).unwrap(), vec!["a.ts".to_string()]);
+    }
+
+    #[test]
+    fn staged_files_names_a_subdirectory_path_from_the_top_level() {
+        let (_dir, root) = repo();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.ts"), "export const a = 1;\n").unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-qm", "base"]);
+        std::fs::write(root.join("src/a.ts"), "export const a = 2;\n").unwrap();
+        run_git(&root, &["add", "src/a.ts"]);
+        // One spelling, with forward slashes on every platform, which is the
+        // spelling a finding and the index both use.
+        assert_eq!(staged_files(&root).unwrap(), vec!["src/a.ts".to_string()]);
+    }
+
+    /// A file staged and then removed from the working tree is still a staged
+    /// change, so it is still listed. Dropping it here would hide the decision
+    /// from the caller, which is the one place it can be made.
+    #[test]
+    fn staged_files_keeps_a_staged_path_whose_file_is_gone() {
+        let (_dir, root) = repo();
+        std::fs::write(root.join("a.ts"), "export const a = 1;\n").unwrap();
+        run_git(&root, &["add", "a.ts"]);
+        std::fs::remove_file(root.join("a.ts")).unwrap();
+        assert_eq!(staged_files(&root).unwrap(), vec!["a.ts".to_string()]);
+    }
+
+    #[test]
+    fn staged_files_is_empty_when_nothing_is_staged() {
+        let (_dir, root) = repo();
+        std::fs::write(root.join("a.ts"), "export const a = 1;\n").unwrap();
+        assert!(staged_files(&root).unwrap().is_empty());
+    }
 }

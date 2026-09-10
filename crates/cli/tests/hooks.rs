@@ -238,3 +238,102 @@ fn stop_uses_changed_scope_without_a_head() {
     // it.
     assert!(!reason.contains("src/dirty.ts"), "{reason}");
 }
+
+/// The pre-commit hook as git runs it: no payload on stdin, the repository as
+/// the working directory, and the exit code is the whole answer.
+fn pre_commit(dir: &Path) -> Output {
+    locrin(dir).args(["hook", "pre-commit"]).output().unwrap()
+}
+
+/// The fixture repository as a git repository with `paths` staged and nothing
+/// committed, which is the state a pre-commit hook runs in: the index is what is
+/// about to become a commit, and the rest of the working tree is not its
+/// business.
+fn staged_fixture(paths: &[&str]) -> tempfile::TempDir {
+    let dir = copy_fixture();
+    git(dir.path(), &["init", "-q"]);
+    for p in paths {
+        git(dir.path(), &["add", p]);
+    }
+    dir
+}
+
+fn stderr_of(out: &Output) -> String {
+    String::from_utf8(out.stderr.clone()).unwrap()
+}
+
+#[test]
+fn pre_commit_blocks_when_a_staged_file_blocks() {
+    let dir = staged_fixture(&["src/dirty.ts"]);
+    let out = pre_commit(dir.path());
+    // 1 and not 0: unlike the agent hooks, this one's exit code is the verdict,
+    // and a non-zero one is how git is told to stop the commit.
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.starts_with("BLOCK"), "{text}");
+    assert!(text.contains("leftover-debug"), "{text}");
+    assert!(text.contains("src/dirty.ts"), "{text}");
+}
+
+#[test]
+fn pre_commit_passes_a_clean_stage() {
+    let dir = staged_fixture(&["src/clean.ts"]);
+    let out = pre_commit(dir.path());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.starts_with("PASS  0 finding(s)"), "{text}");
+}
+
+/// A file the engine does not parse is staged, so the run has nothing to report
+/// for it. It still runs: the lockfile is not source either, and it is exactly
+/// the file a commit most wants checked.
+#[test]
+fn pre_commit_ignores_a_staged_file_that_is_not_source() {
+    let dir = staged_fixture(&["package.json"]);
+    let out = pre_commit(dir.path());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.starts_with("PASS  0 finding(s)"), "{text}");
+    assert!(!text.contains("src/dirty.ts"), "{text}");
+}
+
+/// `git commit` runs the hook before it notices there is nothing to commit, and
+/// so does `git commit --amend`. Saying so is better than printing a verdict
+/// about nothing.
+#[test]
+fn pre_commit_says_when_nothing_is_staged() {
+    let dir = staged_fixture(&[]);
+    let out = pre_commit(dir.path());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(stderr_of(&out), "locrin: nothing staged to check\n");
+}
+
+/// The working tree is full of findings the commit does not carry, and the gate
+/// answers for the commit. Both `src/dirty.ts` and the file written below block
+/// a whole-repository check, and neither is staged.
+#[test]
+fn pre_commit_ignores_unstaged_dirt() {
+    let dir = staged_fixture(&["src/clean.ts"]);
+    std::fs::write(dir.path().join("src/extra.ts"), "export const n = 1;\nconsole.log(n);\n").unwrap();
+    let out = pre_commit(dir.path());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.starts_with("PASS  0 finding(s)"), "{text}");
+    assert!(!text.contains("src/extra.ts"), "{text}");
+    assert!(!text.contains("src/dirty.ts"), "{text}");
+}
+
+/// A file staged and then removed from the working tree names a path that is not
+/// there, and a named path that does not exist is an error the run refuses to
+/// start on. The commit is a legitimate one, so the hook drops the path rather
+/// than failing over it.
+#[test]
+fn pre_commit_skips_a_staged_path_whose_file_is_gone() {
+    let dir = staged_fixture(&["src/clean.ts"]);
+    std::fs::remove_file(dir.path().join("src/clean.ts")).unwrap();
+    let out = pre_commit(dir.path());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(stderr_of(&out), "locrin: nothing staged to check\n");
+}

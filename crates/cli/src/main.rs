@@ -116,6 +116,14 @@ enum HookCmd {
     /// file an edit touched, and it sends the agent back at most three times per
     /// session. Offline for the same reason as post-edit.
     Stop,
+    /// Check the files staged for the next commit and block the commit when one
+    /// of them blocks
+    ///
+    /// The git pre-commit hook. It reads nothing on stdin, prints the same
+    /// verdict `locrin check` prints, and its exit code is the verdict's: 0 to
+    /// let the commit through, 1 to stop it, 2 when the engine itself failed.
+    /// Offline for the same reason as the other two.
+    PreCommit,
 }
 
 fn real_main() -> anyhow::Result<i32> {
@@ -182,6 +190,11 @@ fn real_main() -> anyhow::Result<i32> {
             let Some(input) = hook::read_input() else { return Ok(0) };
             Ok(hook::stop(&root, input))
         }
+        // The only hook whose failure is not swallowed: an error here reaches
+        // `main` and exits 2, so a broken engine stops the commit instead of
+        // waving it through as a pass. The operator who disagrees has
+        // `git commit --no-verify`.
+        Cmd::Hook { cmd: HookCmd::PreCommit } => hook::pre_commit(&root),
     }
 }
 
