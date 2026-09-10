@@ -38,27 +38,50 @@ pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05
 
 /// Serves one connection: reads newline-delimited JSON-RPC from `reader`, writes
 /// one message per line to `writer`, flushing after each, until EOF. Never
-/// panics on input: every malformed line gets a JSON-RPC error and the loop
-/// continues. Returns when stdin closes.
+/// panics on input and never abandons the session over one bad message: a line
+/// that is not JSON, or not even UTF-8, is answered with a `-32700` parse error
+/// and the loop continues, and a blank line is skipped without an answer. Only a
+/// reader or writer that has actually broken comes back as `Err`. Returns when
+/// stdin closes.
 pub fn serve<R: BufRead, W: Write>(
-    reader: R,
+    mut reader: R,
     mut writer: W,
     handler: &mut dyn Handler,
     name: &str,
     version: &str,
 ) -> anyhow::Result<()> {
-    for line in reader.lines() {
-        // A stream that cannot be read is not a protocol problem and there is
-        // no one left to answer, so it ends the connection rather than
-        // producing an error message.
-        let line = line?;
-        if let Some(message) = handle(&line, handler, name, version) {
-            writeln!(writer, "{}", serde_json::to_string(&message)?)?;
-            // The client is waiting on this line before it sends the next one,
-            // so a buffered response is a deadlock.
-            writer.flush()?;
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        // Bytes rather than `lines()`, which turns a line that is not UTF-8
+        // into a read error and ends the session. Such a line is a message the
+        // server cannot understand, which the protocol has an answer for, and
+        // taking the bytes first leaves the stream in sync for the next one.
+        // A read that returns nothing is EOF, the one way out of this loop.
+        if reader.read_until(b'\n', &mut buffer)? == 0 {
+            return Ok(());
+        }
+        let Ok(line) = std::str::from_utf8(&buffer) else {
+            write_message(&mut writer, &error(Value::Null, -32700, "parse error"))?;
+            continue;
+        };
+        // A bare newline is a separator, not a message: a client that ended its
+        // last line and nothing more is owed silence, not an error it never
+        // asked for and would have to explain away.
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(message) = handle(line, handler, name, version) {
+            write_message(&mut writer, &message)?;
         }
     }
+}
+
+/// One message, one line, flushed. The client is waiting on this line before it
+/// sends the next one, so a buffered response is a deadlock.
+fn write_message<W: Write>(writer: &mut W, message: &Value) -> anyhow::Result<()> {
+    writeln!(writer, "{}", serde_json::to_string(message)?)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -220,6 +243,24 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_null_id_is_a_notification_too() {
+        // JSON-RPC 2.0 discourages a null id and MCP forbids one on a request,
+        // so there is no correlation to answer even though the key is present.
+        let line = r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#;
+        assert!(handle(line, &mut Fake, "locrin", "0.1.0").is_none(), "answered a null id: {line}");
+    }
+
+    #[test]
+    fn a_message_with_neither_method_nor_id_is_an_invalid_request() {
+        // Malformed beats notification: a message with no method never asked
+        // for anything, so it is owed the reason rather than silence.
+        let r = ask(r#"{"jsonrpc":"2.0"}"#);
+        assert_eq!(r["id"], Value::Null);
+        assert_eq!(r["error"]["code"], -32600);
+        assert_eq!(r["error"]["message"], "invalid request");
+    }
+
+    #[test]
     fn tools_list_describes_every_tool() {
         let r = ask(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#);
         let tools = r["result"]["tools"].as_array().expect("a tools array");
@@ -251,19 +292,13 @@ mod tests {
     #[test]
     fn a_panicking_tool_is_is_error_and_the_next_call_still_works() {
         let mut fake = Fake;
-        // The default hook would print the unwind to stderr and muddy an
-        // otherwise clean run; the caught panic is what is under test, not the
-        // message it printed on the way out.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let boom = handle(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"boom","arguments":{}}}"#,
             &mut fake,
             "locrin",
             "0.1.0",
-        );
-        std::panic::set_hook(previous);
-        let boom = boom.expect("a panicking tool still answers");
+        )
+        .expect("a panicking tool still answers");
         assert_eq!(boom["result"]["isError"], true);
         assert_eq!(boom["result"]["content"][0]["text"], "internal engine failure");
 
@@ -282,6 +317,23 @@ mod tests {
         let r = ask(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#);
         assert_eq!(r["error"]["code"], -32602);
         assert_eq!(r["error"]["message"], "unknown tool: nope");
+    }
+
+    #[test]
+    fn tools_call_without_a_name_is_invalid_params() {
+        let r = ask(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{}}"#);
+        assert_eq!(r["error"]["code"], -32602);
+        assert_eq!(r["error"]["message"], "invalid params");
+    }
+
+    #[test]
+    fn tools_call_without_arguments_calls_the_tool_with_an_empty_object() {
+        // An absent `arguments` is not a protocol error: the tool is called
+        // with `{}` and says in its own words what a missing key means to it.
+        let r = ask(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"echo"}}"#);
+        assert!(r.get("error").is_none(), "a missing arguments object is not a protocol error");
+        assert_eq!(r["result"]["content"][0]["text"], "");
+        assert!(r["result"].get("isError").is_none());
     }
 
     #[test]
@@ -330,5 +382,58 @@ mod tests {
         assert_eq!(ids, vec![json!(1), json!(2), json!("three"), json!(4)]);
         let ping: Value = serde_json::from_str(lines[3]).expect("the ping response parses");
         assert_eq!(ping["result"], json!({}));
+    }
+
+    #[test]
+    fn serve_answers_a_line_that_is_not_utf8_and_keeps_the_session() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        input.push(b'\n');
+        // 0xFF cannot appear in UTF-8 at all, so this is a line no decoder will
+        // ever hand back as a string, not merely one that is not JSON.
+        input.extend_from_slice(&[b'{', 0xFF, b'}']);
+        input.push(b'\n');
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#);
+        input.push(b'\n');
+
+        let mut out: Vec<u8> = Vec::new();
+        serve(Cursor::new(input), &mut out, &mut Fake, "locrin", "0.1.0")
+            .expect("a line the server cannot read is not a broken stream");
+
+        let out = String::from_utf8(out).expect("utf-8 out");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "the bad line is answered and the session carries on");
+        let bad: Value = serde_json::from_str(lines[1]).expect("the parse error parses");
+        assert_eq!(bad["id"], Value::Null);
+        assert_eq!(bad["error"]["code"], -32700);
+        let after: Value = serde_json::from_str(lines[2]).expect("the next response parses");
+        assert_eq!(after["id"], json!(2), "the stream stayed in sync past the bad line");
+    }
+
+    #[test]
+    fn serve_skips_blank_lines_in_silence() {
+        // A keepalive newline or a trailing separator is not a message, and an
+        // error nobody asked for is the client's problem to explain away.
+        for separator in ["\n", "\r\n"] {
+            let input = [
+                r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+                "",
+                r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+                "",
+                "",
+            ]
+            .join(separator);
+            let mut out: Vec<u8> = Vec::new();
+            serve(Cursor::new(input), &mut out, &mut Fake, "locrin", "0.1.0").expect("the pipe runs to EOF");
+
+            let out = String::from_utf8(out).expect("utf-8 out");
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(lines.len(), 2, "a blank line answered, separator {separator:?}");
+            let ids: Vec<Value> = lines
+                .iter()
+                .map(|l| serde_json::from_str::<Value>(l).expect("every line parses as one message")["id"].clone())
+                .collect();
+            assert_eq!(ids, vec![json!(1), json!(2)]);
+        }
     }
 }
