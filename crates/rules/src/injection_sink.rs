@@ -86,12 +86,21 @@ const SQL_PROPERTIES: [&str; 7] = ["query", "raw", "execute", "exec", "$queryRaw
 /// `select` or `delete` is written, and the statement then opens with the `with`
 /// rather than with the verb: `with recent as (...) delete from sessions where
 /// id in (select id from recent)` is SQL by any reading and opened with a word
-/// this list did not hold. `merge`, `explain`, `grant`, `revoke` and `set` are
-/// the other statement openers a repository writes.
-const SQL_KEYWORDS: [&str; 20] = [
+/// this list did not hold. `merge`, `explain`, `grant` and `revoke` are the
+/// other statement openers a repository writes.
+///
+/// `set` is not here. It opens a statement in both languages, and a shell script
+/// opens with `set -e` far more often than a query opens with `set`; see
+/// [`sets_a_database_setting`].
+const SQL_KEYWORDS: [&str; 19] = [
     "select", "insert", "update", "delete", "create", "drop", "alter", "replace", "pragma", "attach", "begin",
-    "commit", "truncate", "vacuum", "with", "merge", "explain", "grant", "revoke", "set",
+    "commit", "truncate", "vacuum", "with", "merge", "explain", "grant", "revoke",
 ];
+
+/// The words a database `set` names when it is not assigning a setting by name:
+/// `set search_path to ...`, `set session ...`, `set local ...`, `set role ...`,
+/// `set transaction ...`. See [`sets_a_database_setting`].
+const SQL_SETTINGS: [&str; 5] = ["search_path", "session", "local", "role", "transaction"];
 
 /// How the argument was built, which is all the evidence a syntax tree offers.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -258,19 +267,57 @@ fn literal_text(node: Node, src: &str) -> String {
 /// often than it is a shell wrapper, so SQL is the answer to fall back on. See
 /// the module doc.
 ///
-/// Only the first word is asked. A statement is named by the verb it opens
-/// with, and a command line is too: `kubectl delete pod ${name}` and
-/// `git update-index --refresh` are commands whose second word happens to be a
-/// SQL keyword, and asking the whole string filed both under `CWE-89` with a
+/// Only the first word is asked, with one exception. A statement is named by the
+/// verb it opens with, and a command line is too: `kubectl delete pod ${name}`
+/// and `git update-index --refresh` are commands whose second word happens to be
+/// a SQL keyword, and asking the whole string filed both under `CWE-89` with a
 /// fix about parameter placeholders. The first word answers `select ... where
 /// id = ${id}` exactly as well and answers those correctly too.
+///
+/// The exception is `set`, which opens a statement in both languages. See
+/// [`sets_a_database_setting`] for what decides it.
 fn carries_sql(node: Node, src: &str) -> bool {
     let carried = literal_text(node, src).to_ascii_lowercase();
     let mut words = carried.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty());
     match words.next() {
         None => true,
+        Some("set") => sets_a_database_setting(&carried),
         Some(first) => SQL_KEYWORDS.contains(&first),
     }
+}
+
+/// Whether text opening with `set` sets a database setting rather than a shell
+/// option.
+///
+/// `set` is the one opener the two languages share, and the shell wins on
+/// frequency: `set -e && rm -rf ${path}` is how a repository writes a build
+/// script, and reading it as SQL filed a shell injection under `CWE-89` with a
+/// fix telling the developer to use query placeholders.
+///
+/// So the second word decides, in the two forms Postgres accepts. Either it is
+/// one of [`SQL_SETTINGS`] (`set role ${r}`, `set session ...`), or it is a
+/// setting's own name followed by `to` or `=` (`set statement_timeout = '5s'`).
+/// A shell option starts with a dash and is neither, and a bare `set` says
+/// nothing in either language and is not claimed for SQL.
+///
+/// `carried` is already lower case; the caller has already established that the
+/// first word is `set`.
+fn sets_a_database_setting(carried: &str) -> bool {
+    let Some(after) = carried.trim_start().strip_prefix("set") else { return false };
+    let after = after.trim_start();
+    let name: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')).collect();
+    if name.is_empty() {
+        return false;
+    }
+    if SQL_SETTINGS.contains(&name.as_str()) {
+        return true;
+    }
+    // `name` is ASCII, so its character count is its byte length.
+    let rest = after[name.len()..].trim_start();
+    if let Some(tail) = rest.strip_prefix("to") {
+        return !tail.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+    }
+    rest.starts_with('=')
 }
 
 /// Whether a value is a regular expression written here: a literal, or
@@ -671,6 +718,27 @@ mod tests {
         );
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].cwe.as_deref(), Some("CWE-89"), "{:?}", out[0]);
+    }
+
+    /// `set` opens a SQL statement and a shell script alike, so the word on its
+    /// own cannot decide. A database `set` names a setting or assigns one; `set
+    /// -e` is a shell option, and reading it as SQL filed a shell injection
+    /// under CWE-89 with a fix about query placeholders.
+    #[test]
+    fn set_is_sql_only_when_the_second_word_is_a_setting() {
+        assert!(carried("`set search_path to ${schema}`"));
+        assert!(carried("`SET ROLE ${role}`"), "any casing");
+        assert!(carried("`set local statement_timeout = ${ms}`"));
+        assert!(carried("`set session characteristics as transaction read only`"));
+        assert!(carried("`set transaction isolation level ${level}`"));
+        assert!(carried("`set statement_timeout = '${ms}s'`"), "an assignment names its own setting");
+        assert!(carried("`set statement_timeout='${ms}s'`"), "with or without the spaces");
+        assert!(carried("`set work_mem to '${mb}MB'`"));
+
+        assert!(!carried("`set -e && rm -rf ${x}`"), "a shell option is not a setting");
+        assert!(!carried("`set -- ${args}`"));
+        assert!(!carried("`set +x; curl ${url}`"));
+        assert!(!carried("`set`"), "a bare set says nothing either way");
     }
 
     /// The tie-break in place: an `exec` on an object this file cannot place is
