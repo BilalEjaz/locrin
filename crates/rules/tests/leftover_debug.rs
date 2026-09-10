@@ -39,6 +39,34 @@ fn two_identical_debug_lines_in_one_function_get_two_ids() {
     assert_eq!(ids.len(), out.len(), "no two findings of this rule share an id");
 }
 
+/// tree-sitter's lexer treats byte 0 as end of input, so a file holding a NUL
+/// as a composite-key separator inside a template literal used to parse as if
+/// it ended at that byte: the tree carried errors and every rule skipped the
+/// whole file, silently. The fixture holds a real NUL on line 2 and a debug
+/// line after it, so a finding on line 3 is proof the rules saw the file.
+#[test]
+fn a_nul_in_a_template_literal_does_not_exclude_the_file() {
+    use common::parse_dir;
+    use locrin_rules::line_text;
+
+    // The bucket is `nul_byte` rather than `nul`: NUL is a reserved DOS device
+    // name, and a directory called that cannot be walked on Windows.
+    let root = fixture("leftover_debug", "nul_byte");
+
+    let files = parse_dir(&root);
+    let file = files.iter().find(|f| f.rel == "key.ts").expect("the fixture file is walked and read");
+    // A lone NUL is a valid UTF-8 scalar, so `read_to_string` keeps it: what
+    // used to break was the parse, not the read.
+    assert!(file.source.contains('\0'), "the fixture must hold a real NUL byte, not the escape");
+    assert!(!file.has_error, "no parse errors, so no `excluded from rules` warning");
+    // Readers still see the file as written; only the parser got a copy.
+    assert!(line_text(file, 2).contains('\0'), "line 2 keeps its NUL: {:?}", line_text(file, 2));
+
+    let out = run_on(Box::new(LeftoverDebug::default()), &root, &Config::default());
+    assert_eq!(hits(&out), vec![("key.ts".to_string(), 3)]);
+    assert_eq!(out[0].evidence, "console.log(\"key\", k);");
+}
+
 #[test]
 fn ignores_error_warn_and_allowed_paths() {
     let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "clean"), &Config::default());

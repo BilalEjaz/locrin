@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -15,11 +16,29 @@ pub struct ParsedFile {
     pub has_error: bool,
 }
 
+/// The bytes to hand the parser.
+///
+/// tree-sitter's lexer treats byte 0 as end of input, so a source holding a NUL
+/// (a composite-key separator in a template literal is the case that found this)
+/// would parse as if it ended there. The parser is handed a copy with every NUL
+/// replaced by 0x01, one byte for one byte so every span still indexes the
+/// original; every reader keeps the file as written.
+///
+/// 0x01 is a control character no grammar rule matches specially, and it is as
+/// valid as any other character inside a string or a template. Borrowed rather
+/// than copied for the overwhelming majority of files, which hold no NUL.
+fn parser_bytes(source: &str) -> Cow<'_, [u8]> {
+    if !source.as_bytes().contains(&0) {
+        return Cow::Borrowed(source.as_bytes());
+    }
+    Cow::Owned(source.as_bytes().iter().map(|&b| if b == 0 { 1 } else { b }).collect())
+}
+
 pub fn parse_source(path: &Path, rel: &str, source: String) -> Option<ParsedFile> {
     let language = Language::from_path(path)?;
     let mut parser = Parser::new();
     parser.set_language(&language.grammar()).expect("grammar version matches tree-sitter runtime");
-    let tree = parser.parse(source.as_bytes(), None)?;
+    let tree = parser.parse(parser_bytes(&source).as_ref(), None)?;
     let has_error = tree.root_node().has_error();
     Some(ParsedFile { path: path.to_path_buf(), rel: rel.to_string(), language, source, tree, has_error })
 }
@@ -76,6 +95,41 @@ mod tests {
         let p = parse_source(Path::new("x/Row.jsx"), "x/Row.jsx", src).unwrap();
         assert_eq!(p.language, Language::JavaScript);
         assert!(!p.has_error);
+    }
+
+    /// A NUL byte inside a template literal is what FastLift writes as a
+    /// composite-key separator, and tree-sitter's lexer reads byte 0 as end of
+    /// input, so the file used to parse as if it stopped there and every rule
+    /// skipped it. The parser sees a substitute; every reader keeps the NUL.
+    ///
+    /// The brief pairs this with a `line_text` assertion, which lives in the
+    /// rules crate and so cannot be called from here without a dependency
+    /// cycle; the rules e2e over `fixtures/leftover_debug/nul_byte` makes it.
+    #[test]
+    fn a_nul_inside_a_template_literal_parses() {
+        let src = "const a = 1, b = 2;\nconst k = `${a}\0${b}`;\n".to_string();
+        let p = parse_source(Path::new("x/key.ts"), "x/key.ts", src).unwrap();
+        assert!(!p.has_error, "tree: {}", p.tree.root_node().to_sexp());
+        // Every reader slices `source` by the byte ranges the tree reports, so
+        // the file has to stay exactly as written, NUL and all.
+        assert_eq!(p.source, "const a = 1, b = 2;\nconst k = `${a}\0${b}`;\n");
+        // One byte for one byte: the node covering the substituted byte has to
+        // slice the original back out as the NUL that was written there.
+        let at = p.source.find('\0').unwrap();
+        let node = p.tree.root_node().descendant_for_byte_range(at, at + 1).unwrap();
+        assert!(
+            p.source[node.byte_range()].contains('\0'),
+            "sliced {:?} out of the original",
+            &p.source[node.byte_range()]
+        );
+    }
+
+    /// The copy is the exception, not the rule: a file with no NUL, which is
+    /// every file but a handful, is handed to the parser without being copied.
+    #[test]
+    fn parser_bytes_borrows_when_there_is_no_nul() {
+        assert!(matches!(parser_bytes("const a = 1;\n"), Cow::Borrowed(_)));
+        assert_eq!(parser_bytes("a\0b").as_ref(), b"a\x01b");
     }
 
     #[test]

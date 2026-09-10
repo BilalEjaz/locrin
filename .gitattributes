@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# The whole point of this fixture is the literal NUL byte it holds, so nothing
+# may filter, convert, or diff it: keep its bytes exactly as they were written.
+crates/rules/tests/fixtures/leftover_debug/nul_byte/key.ts binary
