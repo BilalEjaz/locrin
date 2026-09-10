@@ -258,3 +258,404 @@ raise the target") was followed and the target did not move. What is worth
 carrying forward is the method rather than the number: the first cold run after
 a long gap measures the page cache, so a cold benchmark is only meaningful from
 the second run on.
+
+## Part B: the security pack (plan 3 part B)
+
+Spec 10.2 gate for the ten security rules, measured on the same five corpus
+repositories, by the same standard, so the two halves of this document can be
+read against each other.
+
+### Method
+
+Binary: `target/release/locrin.exe`, built from `engine/security` at `d5d0865`
+(Task 16 part 1, the directory-argument lockfile fix). Command per repository:
+`locrin --root <repo> check --offline`, terminal reporter, uncapped, with a
+fresh `LOCRIN_CACHE_DIR` per repository and nothing written into the repository
+itself. A second pass with `--sarif` over the same warm cache produced the
+machine-readable finding list the labelling works from. None of the five has a
+`locrin.toml`, so every rule ran on its shipped defaults, and every one of the
+ten was on by default at `d5d0865`.
+
+`vulnerable-dependency` is the exception to `--offline`. It answers from a
+cached advisory snapshot, no corpus repository had one, and offline with no
+snapshot the rule skips with a warning, which is what all five printed. It was
+therefore measured once online, on fasting-app only, with its own fresh cache.
+That is the only network call any measurement in this document made.
+
+Several rules were tightened after the task that first measured them, so every
+count below was re-run at `d5d0865` rather than copied forward. The labels are
+the ones the task reports argued for; where a label is restated here against
+this document's verdict standard rather than the task's, it says so.
+
+One rule changed default after this measurement: `injection-sink` ships off, at
+`6e583e9`, for the reason in the Gate section. The counts below are what the
+engine says with all ten on. With the shipped defaults it says 28 findings
+fewer, all `injection-sink`: fasting-app 724 and strongspan 142, which are
+exactly the Part A numbers. No repository's verdict depends on any Part B rule.
+
+| Repository | Indexed files | Verdict | Findings (all rules) | Wall |
+| --- | --- | --- | --- | --- |
+| fasting-app | 1846 | BLOCK | 727 (9 high, 99 medium, 619 low) | 6182 ms |
+| strongspan | 358 | BLOCK | 167 (26 high, 1 medium, 140 low) | 1448 ms |
+| teyji | 207 | BLOCK | 36 (7 high, 0 medium, 29 low) | 668 ms |
+| autoqa | 258 | BLOCK | 54 (17 high, 0 medium, 37 low) | 649 ms |
+| fastlift-admin | 5 | ADVISORY | 8 (0 high, 1 medium, 7 low) | 258 ms |
+
+The wall column is not the performance number, for the reason Part A gives. The
+benchmark section is.
+
+Findings from the ten rules under measurement, per repository:
+
+| Rule | fasting-app | strongspan | teyji | autoqa | fastlift-admin | Total |
+| --- | --- | --- | --- | --- | --- | --- |
+| secret-exposed | 0 | 0 | 0 | 0 | 0 | 0 |
+| weak-crypto | 0 | 0 | 1 | 0 | 0 | 1 |
+| injection-sink | 3 | 25 | 0 | 0 | 0 | 28 |
+| html-injection | 0 | 0 | 1 | 0 | 0 | 1 |
+| vulnerable-dependency (offline) | 0 | 0 | 0 | 0 | 0 | 0 |
+| vulnerable-dependency (online) | 54 | not run | not run | not run | not run | 54 |
+| supabase-service-role-in-client | 0 | 0 | 0 | 0 | 0 | 0 |
+| supabase-table-without-rls | 0 | 0 | 0 | 0 | 0 | 0 |
+| express-route-without-auth | 0 | 0 | 0 | 0 | 0 | 0 |
+| express-cors-wildcard-on-authenticated | 0 | 0 | 0 | 0 | 0 | 0 |
+| express-cookie-insecure | 0 | 0 | 0 | 0 | 0 | 0 |
+
+### Result at a glance
+
+The verdict standard is Part A's, unchanged: a finding is true when a maintainer
+reading it would change the code, and false when the correct answer is "no, this
+is intentional and already decided".
+
+| Rule | Findings | Sampled | True positives | Gate (17/20) | Default |
+| --- | --- | --- | --- | --- | --- |
+| secret-exposed | 0 | 0 | not measurable | unmeasured, fixture evidence only | on (locked) |
+| weak-crypto | 1 | 1 | 0/1 | unmeasured, sample too small | on |
+| injection-sink | 28 | 28 (all) | 2/28 | FAIL | off |
+| html-injection | 1 | 1 | 1/1 | unmeasured, sample too small | on |
+| vulnerable-dependency | 54 | 54 against OSV, 5 by hand | 54/54 | PASS | on |
+| supabase-service-role-in-client | 0 | 0 | not measurable | unmeasured, fixture evidence only | on |
+| supabase-table-without-rls | 0 | 0 | not measurable | unmeasured, fixture evidence only | on |
+| express-route-without-auth | 0 | 0 | not measurable | unmeasured, rule never ran | on |
+| express-cors-wildcard-on-authenticated | 0 | 0 | not measurable | unmeasured, no Express in the corpus | on |
+| express-cookie-insecure | 0 | 0 | not measurable | unmeasured, no Express in the corpus | on |
+
+Six of the ten produced nothing at all, and one produced nothing offline. The
+corpus measures three of them.
+
+### secret-exposed: 0 findings, and the zero was checked
+
+Zero across 2674 indexed files. `secret-exposed` is `locked` (spec 4.3), so a
+false positive here is a STOP for the founder and there is none.
+
+A zero from a locked rule is worth a probe rather than a shrug, so it got the
+same treatment Task 14 gave the Supabase zeros. A scratch repository outside
+every corpus checkout, holding one file with a GitHub token shaped value, is
+reported at its real line as `GitHub token credential: ghp_...(40 chars)`: the
+provider and a mask, never the secret, which is the Global Constraints rule. The
+same file's `AKIAIOSFODNN7EXAMPLE` is correctly silent, because that is AWS's own
+documentation key and the value carries `EXAMPLE`, which `LINE_PLACEHOLDER`
+rejects. So the zero is 2674 files with no committed credential in them and not
+a rule that never ran.
+
+Unmeasured by the gate's definition, and it could not ship off in any case.
+
+### weak-crypto: 1 finding, 0 true
+
+| Repo | File | Line | Verdict | Reason |
+| --- | --- | --- | --- | --- |
+| teyji | packages/api/src/router.integration.test.ts | 215 | false | A throwaway discount code minted by a helper inside an integration test, built from `Date.now()` and `Math.random()`. The claim is literally accurate and in shipped code it would be a real finding; in a fixture nobody acts on it |
+
+Unchanged from Task 9's second run and from Task 10's re-measure. One finding is
+a twentieth of the gate's sample, so the rule can neither reach 17/20 nor fail
+it here: unmeasured, and it ships on, the same standing Part A gave
+`test-newly-skipped`. Forms 1 and 3 (MD5 and SHA-1, static IV) have nothing to
+find on this corpus, which Task 9 checked rather than assumed.
+
+### injection-sink: 2 true of 28
+
+Every one of the 28 was labelled rather than a sample of 20, because 28 is close
+enough to 20 that a sample would only hide which cluster it drew from.
+
+| Repo | File | Line(s) | Verdict | Reason |
+| --- | --- | --- | --- | --- |
+| fasting-app | src/services/v1ImportWiring.ts | 92 | true | `UPDATE "${table}" SET ${assignments} WHERE id = ?`. The values are parameterised, but `table` and the column names in `assignments` come from `Object.keys(row)` on a row of an imported v1 payload, so an attacker-chosen key carrying a double quote breaks out of the quoted identifier. An allow-list of tables and columns is the fix and a maintainer would write one |
+| fasting-app | src/services/v1ImportWiring.ts | 97 | true | The same shape on the `INSERT` arm |
+| fasting-app | scripts/test-all.js | 32 | false | `spawnSync` with `shell: true`, under a five line comment saying the shell is required for `npm.cmd` on Windows, that argv plus shell raises DEP0190, and that "the script names are the two hardcoded constants above, never user input". Intentional and already written down |
+| strongspan | src/db/\_\_tests\_\_/migration-upgrade-path.test.ts | 46 | false | `db.exec(stmt)` where `stmt` is one statement of a committed drizzle migration file split on the statement separator. Applying a migration is what the code is for |
+| strongspan | src/app/workout/\_\_tests\_\_/complete-outcomes.test.tsx | 171 | false | jest seeding the mocked SQLite with an `INSERT` interpolating file-level constants |
+| strongspan | src/services/\_\_tests\_\_/finish.test.ts | 151 | false | The same shape |
+| strongspan | src/services/\_\_tests\_\_/history-stability.test.ts | 149, 158 | false | The same shape |
+| strongspan | src/services/\_\_tests\_\_/sessions.test.ts | 157, 411, 416, 421, 425, 449, 453, 459, 463, 480, 484, 513, 518, 535, 540, 559, 574, 579, 583, 588 | false | The same shape, twenty times in one file |
+
+#### The dominant false-positive pattern
+
+**SQL assembled in a test fixture from constants declared in the same file.** 24
+of the 26 false findings are one idiom: a jest suite mocks the database module,
+reaches through to the SQLite handle, and seeds a row with an `INSERT` that
+interpolates `ENROLLMENT_ID`, `DAY_ID`, `LOCAL_DATE` and `NOW_MS`, all `const`
+declarations at the top of the same file. There is no attacker, no request and
+no reachable value: the interpolated expressions are literals one screen up. The
+rule's claim is accurate every time and the security finding it implies is
+absent every time.
+
+The two that are not that idiom are the same thing viewed differently: a
+migration runner executing a committed `.sql` file, and a build script whose
+comment already answers the question. Across all 26 the answer is "yes, on
+purpose, and here is why", which is exactly the verdict standard's definition of
+false.
+
+Task 10 already met this cluster and made a contained ruling: a SQL-family
+finding inside a test file drops to Medium confidence. That was right about how
+the finding should read and it does not touch how many there are or what blocks
+the run, because confidence is not severity. `injection-sink` is High severity,
+so on strongspan the 25 test findings took the repository from 1 High finding to
+26 and buried its one real one.
+
+Separating a fixture's SQL from a route handler's needs the origin of the
+interpolated expression rather than its shape, which is cross-function taint and
+is release two by the plan's own scope statement (spec 4.2). It is not a
+contained lever of the kind Tasks 7b, 7c and 10 pulled, so none was pulled here.
+
+### html-injection: 1 finding, 1 true
+
+| Repo | File | Line | Verdict | Reason |
+| --- | --- | --- | --- | --- |
+| teyji | apps/web/lib/ui-host.tsx | 182 | true | `<style dangerouslySetInnerHTML={{ __html: seam.css }} />`. The string is generated CSS rather than user text, so nothing is exploitable today, but the sink is real and the finding is the kind a reviewer reads once and answers with a `locrin:allow` or a sanitiser at the seam. Task 11's label, kept |
+
+One finding, so unmeasured at the gate's sample size in either direction. It
+ships on, and it produced no noise on 2674 files.
+
+### vulnerable-dependency: 54 findings on fasting-app, 54 agree with OSV
+
+Offline with no snapshot the rule skips, which every corpus run confirmed with
+`warning: no cached advisory snapshot; vulnerable-dependency skipped` on stderr.
+Measured online, once, on fasting-app's `package-lock.json`: 54 findings, 42 at
+High severity and 12 at Medium, over 33 distinct advisories, from a lockfile
+whose npm tree carries three versions of `@xmldom/xmldom`.
+
+Five were hand-checked against OSV's own record for the advisory
+(`https://osv.dev/vulnerability/<id>`, read with `urllib` against the same
+document that page renders), read-only:
+
+| Advisory | Package | Installed | OSV severity | OSV fixed | Rule agrees? |
+| --- | --- | --- | --- | --- | --- |
+| GHSA-2883-xcg3-v3hh | js-yaml | 3.15.1 | HIGH | 3.15.2 for the 3.x range (4.3.2 for 4.x) | affected yes, severity yes, fixed version **no**: says 4.3.2 |
+| GHSA-jqff-g426-hqxp | fast-uri | 3.1.5 | HIGH | 3.1.6 for the 3.x range (2.4.5 for 2.x) | affected yes, severity yes, fixed version **no**: says 2.4.5, a downgrade |
+| GHSA-6g55-p6wh-862q | postcss | 8.4.49 | HIGH | 8.5.12 | yes on all three |
+| GHSA-w3rx-r6r6-pgpr | image-size | 1.2.1 | HIGH | none published | yes on all three, and the fix line says so in words |
+| GHSA-67mh-4wv8-2f99 | esbuild | 0.18.20 | MODERATE | 0.25.0 | yes on all three, and MODERATE maps to Medium as the plan says |
+
+The same check was then run over all 54 findings against OSV:
+
+- **54 of 54**: the installed version falls inside an OSV affected range for that
+  advisory and that npm package. There is no false positive in the set.
+- **0 of 54**: severity disagreements. Every rating the rule assigned is the one
+  OSV publishes, and the CRITICAL/HIGH to High, MODERATE to Medium mapping holds
+  throughout.
+- **16 of 54**: the fixed version named in the fix line comes from a different
+  range of the advisory than the range the installed version sits in. Five of
+  those are outright downgrades. See below.
+
+**54/54 true, PASS.** The rule's claim is "this installed version is affected by
+this advisory", and it is right every time.
+
+#### The fix line names the wrong fixed version on 16 of 54
+
+An advisory lists one affected range per maintained branch, each with its own
+`fixed` event, and the rule takes a fixed version without asking which range the
+installed version is in. The consequences, all reproduced:
+
+| Package | Installed | Rule says upgrade to | OSV's fix for that range |
+| --- | --- | --- | --- |
+| fast-uri | 3.1.5 | 2.4.5 | 3.1.6 |
+| @xmldom/xmldom | 0.9.10 | 0.8.15 | 0.9.12 |
+| @xmldom/xmldom | 0.8.13 | 0.9.11 | 0.8.14 |
+| @xmldom/xmldom | 0.7.13 | 0.9.11 | 0.8.14 |
+| js-yaml | 3.15.1 | 4.3.2 | 3.15.2 |
+
+Two of these tell a reader to install an older release than the one they have,
+which would not fix the advisory and would not build. The finding is still true
+and the severity is still right, so this does not move the gate, but it is a
+wrong instruction inside a correct security finding and it is the loudest thing
+this measurement found. It is a Task 13 defect and it is not fixed here, because
+Task 16 changes rule logic only where the gate forces a default. It is carried
+as concern 1 of the Task 16 report.
+
+#### Warm cost
+
+Task 13 measured the rule directly on fasting-app with a warm cache: **14.2,
+14.4, 15.6 and 16.7 ms** across four runs, against the plan's 50 ms target.
+PASS. That is a 1.6 MB `package-lock.json` read and parsed, one SQLite read of
+the batch snapshot, nine reads of cached advisory documents and the JSON parsing
+of all of it. Since the Task 13 review fix a scoped run does not pay it at all
+unless the scope names the lockfile, and since Task 16 part 1 a directory
+argument that contains the lockfile counts as naming it.
+
+### The two Supabase rules: 0 findings, both zeros checked
+
+Unmeasured, shipping on fixture evidence. Task 14 probed both zeros rather than
+assuming them, and this measurement reproduces its counts:
+
+- `supabase-service-role-in-client`: fasting-app holds 17 files naming
+  `service_role` and every one is under `supabase/functions/**`, exempt by the
+  first default `server_paths` glob. The zero is 17 correct exemptions. Task 14
+  copied one of those files to a client path in a scratch repository and the
+  rule reported it at its real line.
+- `supabase-table-without-rls`: fasting-app's 35 migrations create 33 tables and
+  enable row-level security on all 33. The zero is 33 correct answers. Task 14
+  deleted one `enable` line in a scratch copy and the rule named that table, at
+  its real `create` line, and said nothing about the other 32.
+
+Neither probe wrote into a corpus checkout.
+
+### The three Express rules: 0 findings, and the corpus cannot measure them
+
+Unmeasured, shipping on fixture evidence, and for a blunter reason than the
+Supabase pair: **there is no Express application anywhere in the corpus.** A
+`git grep` for `from "express"` and `require("express")` across all five
+checkouts returns nothing, and so does one for `res.cookie(` and `cors(`. The
+five repositories are two React Native apps, a Next.js and tRPC monorepo, a Node
+service on Railway and a Cloudflare Worker.
+
+`express-route-without-auth` additionally never ran at all: by Global
+Constraints it runs only when `framework.auth_middleware` is non-empty, that
+list is empty by default, and none of the five has a `locrin.toml`. Its zero is
+therefore not even an answer.
+
+These three ship on their fixtures with no corpus evidence in either direction,
+which is a weaker standing than any other rule in this document has, and the
+next repository with an Express server in it is the measurement they still owe.
+
+### Gate
+
+Applying the plan's rule (Global Constraints: "Under 17/20 the rule ships
+`enabled_by_default() == false` with the reason in its doc comment and in the
+precision report", and "A rule that produces no findings on the corpus is
+unmeasured and ships on fixture evidence, stated as such"):
+
+- **`injection-sink`: 2/28, ships off by default.** The only Part B rule the
+  corpus measures at anything near the gate's sample size, and it is not close:
+  any 20 of the 28 lands at 2/20 or below. It keeps its registry entry, its
+  fixtures and every test, so `all_rules()` still lists 21 and the SARIF `rules`
+  array still describes all 21; its tests turn it on through
+  `rule_on("injection-sink")`, which is what `dead-file` and `swallowed-error`
+  already do. A repository that wants it writes
+
+  ```toml
+  [rules.injection-sink]
+  enabled = true
+  ```
+
+  and gets exactly the behaviour measured above.
+- **`vulnerable-dependency`: 54/54, ships on.** The only Part B rule that passes
+  the gate on measured evidence rather than on an absence, and it passes it
+  against an independent source. The fixed-version defect above is a separate
+  bug against a rule whose findings are right.
+- **`secret-exposed`: 0 findings, ships on, locked.** No miss, so no STOP. The
+  zero was probed.
+- **`weak-crypto`: 1 finding, 0 true, ships on.** A sample of one cannot fail a
+  17/20 gate, and Task 9 recorded it that way at the time. Unmeasured.
+- **`html-injection`: 1 finding, 1 true, ships on.** Unmeasured, same reason.
+- **Both Supabase rules: 0 findings, ship on.** Unmeasured, with both zeros
+  probed as correct answers rather than silence.
+- **All three Express rules: 0 findings, ship on.** Unmeasured, and the corpus
+  contains no Express application, so this is an absence of evidence and not
+  evidence of precision. Stated here so that nobody later reads the zero as a
+  pass.
+
+What Part B ships, then, is one rule measured and passing, one measured and
+turned off, and eight standing on their fixtures. That is a thinner evidence
+base than Part A's, and the reason is the corpus rather than the rules: five
+repositories by one founder, none of them an Express server, none with a
+committed credential, all of them with row-level security already on.
+
+### Benchmarks after Part B
+
+`cargo test --release -p locrin-cli -- --ignored --nocapture`, on `d5d0865`.
+Bench repository `<home>/fasting-app`, fresh temporary cache per
+benchmark, on an idle machine (no cargo, rustc or locrin process running before
+the first run).
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 6190 ms | 6088 ms | 6209 ms | **FAIL** |
+| warm single-file check | under 300 ms | 331 ms | 319 ms | 333 ms | **FAIL** |
+| warm 30-file check | under 1000 ms | 504 ms | 442 ms | 448 ms | PASS |
+| startup (`--help`) | under 50 ms | 29 ms | 26 ms | 32 ms | PASS |
+
+Four cold attempts, all four reported: **6610**, 6190, 6088, 6209 ms. The first
+is discarded by the method Part A established (the first cold run after a build
+pays the page cache) and the other three sit inside 121 ms of each other.
+
+**Startup is 26 to 32 ms with `ureq` linked**, against the 50 ms target, so the
+one target this plan put at risk by adding a network client is not the one that
+went red. Neither target was lowered.
+
+#### Two gates are red, and they are red for two different reasons
+
+The honest way to separate the engine from the machine is to measure the branch
+base on the same machine in the same session, so the benchmark was also run at
+`8fe38e0`, the merge base of `engine/security`, in a detached worktree:
+
+| Benchmark | Target | `8fe38e0` (base) | `d5d0865` (HEAD) | Part B costs |
+| --- | --- | --- | --- | --- |
+| cold index | 5000 ms | 5459 / 5120 / 5062 | 6610 / 6190 / 6088 / 6209 | about 1000 ms |
+| warm single-file | 300 ms | 226 / 223 / 227 | 362 / 331 / 319 / 333 | about 100 ms |
+| warm 30-file | 1000 ms | 319 / 326 / 318 | 453 / 504 / 442 / 448 | about 130 ms |
+| startup | 50 ms | 31 / 29 / 29 | 30 / 29 / 26 / 32 | nothing |
+
+So:
+
+1. **The cold gate is red on the base as well.** `8fe38e0` contains none of Part
+   B and it measures 5062 to 5459 ms today against the 3750 to 3790 ms Part A
+   recorded for the same code on its own day. That is the measuring-box drift
+   this ledger has now recorded four times (Task 1's commit at 3607 ms one
+   morning and 4996 ms the same afternoon; Task 13 saw 4669 to 5158 ms). About
+   1300 ms of the red is the machine.
+2. **The warm single-file gate is red and the machine has nothing to do with
+   it.** The base passes it today with 73 ms of headroom and HEAD misses it by
+   19 to 62 ms. This one is Part B's.
+
+#### What Part B costs, isolated
+
+Controlled measurements, all on this machine, all with fresh caches:
+
+| Root | `8fe38e0` | `d5d0865` |
+| --- | --- | --- |
+| an empty directory | 68 / 69 / 61 / 64 ms | 70 / 65 / 65 / 60 ms |
+| a directory holding one 1-line `.ts` file | 76 / 61 / 51 / 63 ms | 174 / 173 / 148 / 142 ms |
+| fastlift-admin (5 files) | 94 / 101 / 119 ms | 220 / 201 / 217 ms |
+| teyji (207 files) | 422 / 406 / 426 ms | 611 / 620 / 590 ms |
+
+An empty repository costs exactly what it did. **The first source file costs
+about 90 ms more, and every file after it about 0.35 ms more.** Part B's cost is
+therefore almost all a fixed, once-per-process charge paid the first time a file
+rule runs, plus a small per-file charge: 90 plus 1846 times 0.35 is about 730
+ms, and teyji's 190 ms gap is 90 plus 207 times 0.35, which is 162 ms. Both
+match.
+
+The fixed charge is `secrets::patterns::compiled()`. It builds **160 individual
+`Regex` values and then a 160-pattern `RegexSet` over the same 160 patterns**,
+behind a `OnceLock`. Once per process is the right granularity for a long-lived
+server and the wrong one for a CLI: every `locrin check` is a new process, so a
+pre-commit hook pays the whole 90 ms on every commit, and it pays it whether or
+not any file holds anything a secret pattern could match.
+
+The obvious repair, not made here because Task 16 changes rule logic only where
+the gate forces a default: keep the `RegexSet`, which is the cheap membership
+test the rule runs first anyway, and compile the individual `Regex` for a
+pattern only once the set says that pattern matched. The rule's own module doc
+already describes the set as the fast path.
+
+With that fixed the warm single-file gate returns to about 230 ms and the cold
+scan drops by roughly 90 ms, which leaves the cold gate needing the machine
+question answered separately. Both are carried as concerns 2 and 3 of the Task
+16 report, with the targets untouched.
+
+#### Registry
+
+`all_rules()` lists **21** ids, asserted in order by `crates/rules/src/lib.rs`,
+and the SARIF `tool.driver.rules` array carries **21** entries, asserted end to
+end at `crates/cli/tests/cli.rs:777`. 16 file rules and 5 graph rules. Turning
+`injection-sink` off changes neither number, by design: a rule that is off is
+still described.
