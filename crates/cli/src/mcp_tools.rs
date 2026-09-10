@@ -102,7 +102,7 @@ impl Tools {
         // into an empty database. An upgraded binary meets exactly that on its
         // first run, and the empty rebuild would answer "nothing exists" with
         // a file sitting on disk. Refuse again once the database is open.
-        if index.all_files().map_err(engine)?.is_empty() {
+        if !index.has_files().map_err(engine)? {
             return Err(ToolError("index is empty: run locrin scan first".into()));
         }
         let hits = symbols::search(&index, &Query { name, intent, params }, SEARCH_LIMIT).map_err(engine)?;
@@ -158,7 +158,11 @@ impl Tools {
         if reason.trim().is_empty() {
             return Err(ToolError("reason must not be empty".into()));
         }
-        if !run::baseline_accept_as(&self.root, &id, &reason, AGENT_AUTHOR, self.offline).map_err(engine)? {
+        // Recording, like `explain_finding`'s pass: the agent was shown this
+        // finding by a `check_changes` that recorded, so the index is current
+        // and re-reading the repository into a throwaway one would be a cold
+        // parse per acceptance. See [`run::baseline_accept_as`].
+        if !run::baseline_accept_as(&self.root, &id, &reason, AGENT_AUTHOR, self.offline, true).map_err(engine)? {
             return Err(ToolError(format!("no current finding with id {id}")));
         }
         let after = Baseline::load(&self.root).map_err(engine)?.entries.len();
@@ -185,13 +189,23 @@ impl Tools {
         let config = Config::load(&self.root).map_err(engine)?;
         let baseline = Baseline::load(&self.root).map_err(engine)?;
 
+        let mut index = json!({
+            "path": index_path.display().to_string(),
+            "exists": exists,
+            "files": files,
+            "schema": SCHEMA_VERSION,
+        });
+        // A database that is there and holds nothing is what an upgraded binary
+        // leaves behind when `Index::open` rebuilds an index it cannot read, and
+        // `exists: true` with a count of zero reads as a bug rather than as
+        // something to do. Say what to do. No index at all already says it
+        // through `exists: false`.
+        if exists && files == 0 {
+            index["hint"] = json!("index is empty; run locrin scan");
+        }
+
         Ok(json!({
-            "index": {
-                "path": index_path.display().to_string(),
-                "exists": exists,
-                "files": files,
-                "schema": SCHEMA_VERSION,
-            },
+            "index": index,
             "config": {
                 "path": config_path.display().to_string(),
                 "present": present,

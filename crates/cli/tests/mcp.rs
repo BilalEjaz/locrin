@@ -3,6 +3,7 @@ mod common;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::time::Instant;
 
 use common::{copy_fixture, locrin, walkdir};
 use serde_json::{json, Value};
@@ -157,7 +158,7 @@ fn check_changes_rejects_paths_with_base() {
 }
 
 #[test]
-fn find_existing_ranks_by_name_tokens() {
+fn find_existing_finds_by_name_tokens() {
     let dir = copy_fixture();
     let mut io = session(dir.path());
     handshake(&mut io);
@@ -269,6 +270,41 @@ fn accept_finding_then_explain_shows_the_acceptance() {
     let empty = call(&mut io, 6, "accept_finding", json!({"id": id, "reason": ""}));
     assert_eq!(empty["isError"], true, "{empty}");
     assert!(text(&empty).contains("reason"), "{empty}");
+    finish(io);
+}
+
+/// An agent accepts a finding it was shown by a `check_changes` that recorded,
+/// so the accept's own pass records too instead of parsing the whole repository
+/// into a throwaway index. What it must leave behind is nothing anyone can see:
+/// the same index with the same file count, and a call that costs about what a
+/// warm check costs rather than a cold one.
+///
+/// The bound is deliberately loose. The fixture is small enough that a cold pass
+/// over it is fast too, so the real evidence is the code path and the unit test
+/// in `run.rs` that pins which side records; the elapsed time is printed so a
+/// reviewer can see the order of magnitude the loop actually pays.
+#[test]
+fn accept_finding_reuses_the_recorded_index() {
+    let dir = copy_fixture();
+    let mut io = session(dir.path());
+    handshake(&mut io);
+    let verdict = parsed(&call(&mut io, 2, "check_changes", json!({})));
+    let id = verdict["findings"][0]["id"].as_str().expect("an id").to_string();
+
+    let before = parsed(&call(&mut io, 3, "status", json!({})));
+    let files = before["index"]["files"].as_u64().expect("a file count");
+    assert!(files >= 2, "the check should have indexed the fixture: {before}");
+
+    let started = Instant::now();
+    let accepted = call(&mut io, 4, "accept_finding", json!({"id": id, "reason": "measured"}));
+    let ms = started.elapsed().as_millis();
+    println!("accept_finding after a recording check_changes: {ms} ms");
+    assert!(accepted.get("isError").is_none(), "{accepted}");
+
+    let after = parsed(&call(&mut io, 5, "status", json!({})));
+    assert_eq!(after["index"]["files"], json!(files), "the accept re-indexed a different set of files: {after}");
+    assert!(after["index"].get("hint").is_none(), "the accept emptied the index: {after}");
+    assert!(ms < 2_000, "accept_finding took {ms} ms, which is not a pass over an index that was already current");
     finish(io);
 }
 
@@ -427,6 +463,9 @@ fn a_stale_index_rebuilds_silently_for_the_server() {
     // Empty, so this is a rebuild rather than a re-stamp of the rows the old
     // schema left behind.
     assert_eq!(v["index"]["files"], 0, "{v}");
+    // An index file that is there and holds nothing is the one state where the
+    // count alone reads as a bug, so `status` says what to do about it.
+    assert_eq!(v["index"]["hint"], "index is empty; run locrin scan", "{v}");
 
     // Nothing is owed after the last response, so the rest of stdout is EOF.
     drop(io.inp.take());

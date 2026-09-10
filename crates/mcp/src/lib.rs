@@ -162,7 +162,20 @@ fn call(handler: &mut dyn Handler, params: &Value) -> Result<Value, (i64, String
     Ok(match outcome {
         Ok(Ok(text)) => json!({"content": [{"type": "text", "text": text}]}),
         Ok(Err(ToolError(text))) => json!({"content": [{"type": "text", "text": text}], "isError": true}),
-        Err(_) => json!({"content": [{"type": "text", "text": "internal engine failure"}], "isError": true}),
+        Err(payload) => {
+            // The client is told "internal engine failure" and no more, because
+            // a panic message is not something a model can act on. Somebody
+            // debugging the server needs the opposite, and the binary silences
+            // the default panic hook, so this line is the only trace the panic
+            // leaves anywhere. Stderr, because stdout is the protocol.
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            eprintln!("warning: tool {name} panicked: {message}");
+            json!({"content": [{"type": "text", "text": "internal engine failure"}], "isError": true})
+        }
     })
 }
 
@@ -310,6 +323,18 @@ mod tests {
         )
         .expect("the server is still up");
         assert_eq!(after["result"]["content"][0]["text"], "still here");
+    }
+
+    /// The panic's own message goes to stderr, which `handle` cannot show a
+    /// test: the libtest harness captures it and hands it back only under
+    /// `--nocapture`. What is asserted here is that logging it changed nothing
+    /// the client sees, and the line itself is read by running this test with
+    /// `--nocapture`.
+    #[test]
+    fn a_panicking_tool_is_still_is_error_when_the_panic_is_logged() {
+        let result = call(&mut Fake, &json!({"name": "boom", "arguments": {}})).expect("not a protocol error");
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(result["content"][0]["text"], "internal engine failure", "{result}");
     }
 
     #[test]

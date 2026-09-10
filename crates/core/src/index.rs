@@ -473,6 +473,14 @@ impl Index {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Whether the index holds any file at all. The guards that refuse to answer
+    /// from an empty index ask only this, and asking it as `EXISTS` stops at the
+    /// first row instead of building every path in a large repository.
+    pub fn has_files(&self) -> anyhow::Result<bool> {
+        let found: i64 = self.conn.prepare("SELECT EXISTS(SELECT 1 FROM files)")?.query_row([], |r| r.get(0))?;
+        Ok(found != 0)
+    }
+
     /// Records which lines of `rel` carry the allow marker, replacing whatever was
     /// stored before. The rule runner consults this for findings on files it did not
     /// parse this run, so suppression works for graph rules too.
@@ -599,6 +607,17 @@ mod tests {
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"));
         ix.upsert_file("src/a.ts", "typescript", "h2", "ok").unwrap();
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h2"));
+    }
+
+    /// The question every empty-index guard actually asks is whether there is a
+    /// row at all, so it is answered without building the list of every path.
+    #[test]
+    fn has_files_answers_without_listing_them() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert!(!ix.has_files().unwrap(), "a database nothing has been written to holds no files");
+        ix.upsert_file("src/a.ts", "typescript", "h1", "ok").unwrap();
+        assert!(ix.has_files().unwrap());
+        assert_eq!(ix.all_files().unwrap(), vec!["src/a.ts".to_string()], "the two agree on the same database");
     }
 
     /// The stat check is only ever allowed to say "definitely unchanged". A

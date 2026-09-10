@@ -245,7 +245,8 @@ pub const STOPWORDS: &[&str] = &[
 /// camelCase, PascalCase, snake_case, kebab-case and whitespace all separate,
 /// and a run of capitals stays one token until a lowercase letter starts the
 /// next word, so `DAY_RECORD_id` is day, record, id and `HTTPServer` is http,
-/// server.
+/// server. A digit ends a word the way a lowercase letter does, so
+/// `base64Encode` is base64, encode.
 ///
 /// STOPWORDS are deliberately not applied here. They belong to the intent
 /// phrase, which is prose; a symbol genuinely named `toKebab` is named `to` and
@@ -265,7 +266,11 @@ pub fn tokens(s: &str) -> Vec<String> {
             continue;
         }
         if let Some(prev) = i.checked_sub(1).and_then(|p| chars.get(p)).copied() {
-            let camel = c.is_uppercase() && prev.is_lowercase();
+            // A capital starts a word unless the character before it is a
+            // capital too, which is the acronym case the next line handles. A
+            // digit therefore ends a word like a lowercase letter does:
+            // `base64Encode` is two words and `parseV2Response` is three.
+            let camel = c.is_uppercase() && !prev.is_uppercase();
             let acronym_end =
                 c.is_uppercase() && prev.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase());
             if camel || acronym_end {
@@ -317,6 +322,10 @@ pub struct Match {
 /// parameter count matches, when both are known), name-token overlap second.
 /// Only symbols sharing at least one token with the query are returned, best
 /// first, ties by rel then line. `limit` caps the result.
+///
+/// A query with no tokens returns early rather than scanning: that is an
+/// optimisation and not a special case, because nothing can share a token with
+/// nothing and the scan would return the same empty list the slow way.
 ///
 /// Deviation from spec 6, recorded so release two knows what to replace: the
 /// spec asks for signature *vector* similarity first and name token overlap
@@ -551,6 +560,13 @@ const g = x => x;
         assert_eq!(tokens("DAY_RECORD_id"), vec!["day", "record", "id"]);
         // `to` survives: STOPWORDS apply to the intent phrase, not to a name.
         assert_eq!(tokens("to-kebab"), vec!["to", "kebab"]);
+        // A digit ends a word too, so the capital after one starts the next.
+        assert_eq!(tokens("base64Encode"), vec!["base64", "encode"]);
+        assert_eq!(tokens("parseV2Response"), vec!["parse", "v2", "response"]);
+        // The acronym rule is unchanged by that: a run of capitals is one token
+        // until the last of them starts a word.
+        assert_eq!(tokens("parseJSONFile"), vec!["parse", "json", "file"]);
+        assert_eq!(tokens("URL"), vec!["url"]);
     }
 
     const SEARCHABLE: &str = r#"export function listFoodEntries(a, b) {}
