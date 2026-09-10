@@ -18,11 +18,12 @@ pub struct ParsedFile {
 
 /// The bytes to hand the parser.
 ///
-/// tree-sitter's lexer treats byte 0 as end of input, so a source holding a NUL
+/// tree-sitter's lexer reads byte 0 as end of input: on a source holding a NUL
 /// (a composite-key separator in a template literal is the case that found this)
-/// would parse as if it ended there. The parser is handed a copy with every NUL
-/// replaced by 0x01, one byte for one byte so every span still indexes the
-/// original; every reader keeps the file as written.
+/// the template scanner stops at that byte, the parser errors on it, and one
+/// error excludes the whole file from every rule. The parser is handed a copy
+/// with every NUL replaced by 0x01, one byte for one byte so every span still
+/// indexes the original; every reader keeps the file as written.
 ///
 /// 0x01 is a control character no grammar rule matches specially, and it is as
 /// valid as any other character inside a string or a template. Borrowed rather
@@ -99,16 +100,16 @@ mod tests {
 
     /// A NUL byte inside a template literal is what FastLift writes as a
     /// composite-key separator, and tree-sitter's lexer reads byte 0 as end of
-    /// input, so the file used to parse as if it stopped there and every rule
-    /// skipped it. The parser sees a substitute; every reader keeps the NUL.
+    /// input: the template scanner stopped at that byte, the parser errored on
+    /// it, and that one error excluded the whole file from every rule. The
+    /// parser sees a substitute; every reader keeps the NUL.
     ///
-    /// The brief pairs this with a `line_text` assertion, which lives in the
-    /// rules crate and so cannot be called from here without a dependency
-    /// cycle; the rules e2e over `fixtures/leftover_debug/nul_byte` makes it.
+    /// The matching `line_text` assertion lives in the rules e2e instead: rules
+    /// depends on core, so core cannot call back into it from a unit test.
     #[test]
     fn a_nul_inside_a_template_literal_parses() {
         let src = "const a = 1, b = 2;\nconst k = `${a}\0${b}`;\n".to_string();
-        let p = parse_source(Path::new("x/key.ts"), "x/key.ts", src).unwrap();
+        let p = parse_source(Path::new("x/key.ts"), "x/key.ts", src.clone()).unwrap();
         assert!(!p.has_error, "tree: {}", p.tree.root_node().to_sexp());
         // Every reader slices `source` by the byte ranges the tree reports, so
         // the file has to stay exactly as written, NUL and all.
@@ -122,6 +123,15 @@ mod tests {
             "sliced {:?} out of the original",
             &p.source[node.byte_range()]
         );
+
+        // `.ts` is the TypeScript grammar; every `.tsx`, `.js`, `.jsx`, `.mjs`
+        // and `.cjs` file in a scanned repo goes through the TSX one, and the
+        // two share the external scanner that reads byte 0 as end of input, so
+        // the substitute has to hold on both or half a repo stays excluded.
+        for path in ["x/key.tsx", "x/key.js"] {
+            let p = parse_source(Path::new(path), path, src.clone()).unwrap();
+            assert!(!p.has_error, "{path} tree: {}", p.tree.root_node().to_sexp());
+        }
     }
 
     /// The copy is the exception, not the rule: a file with no NUL, which is

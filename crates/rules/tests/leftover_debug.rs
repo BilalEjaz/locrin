@@ -1,9 +1,10 @@
 mod common;
 
-use common::{fixture, hits, run_on};
+use common::{fixture, hits, parse_dir, run_on};
 use locrin_core::config::Config;
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_debug::LeftoverDebug;
+use locrin_rules::line_text;
 
 #[test]
 fn flags_console_log_debug_and_debugger() {
@@ -46,9 +47,6 @@ fn two_identical_debug_lines_in_one_function_get_two_ids() {
 /// line after it, so a finding on line 3 is proof the rules saw the file.
 #[test]
 fn a_nul_in_a_template_literal_does_not_exclude_the_file() {
-    use common::parse_dir;
-    use locrin_rules::line_text;
-
     // The bucket is `nul_byte` rather than `nul`: NUL is a reserved DOS device
     // name, and a directory called that cannot be walked on Windows.
     let root = fixture("leftover_debug", "nul_byte");
@@ -86,7 +84,7 @@ fn allow_comment_suppresses_and_shadowed_console_is_still_flagged() {
 /// compile that config's list instead of serving the first one's.
 #[test]
 fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
-    use common::{ctx_for, index_dir, parse_dir};
+    use common::{ctx_for, index_dir};
     use locrin_rules::Rule;
 
     let root = fixture("leftover_debug", "clean");
