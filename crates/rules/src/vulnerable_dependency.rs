@@ -140,8 +140,20 @@ impl Rule for VulnerableDependency {
                 advisory.severity,
                 short(&advisory.summary)
             );
+            // Three sentences, because the reader has to act on three different
+            // situations. There is a version to move to; or the advisory covers
+            // this version and has published no fix for the branch it is on; or
+            // the advisory's own ranges do not cover this version at all, which
+            // is the batch endpoint and the detail document disagreeing and is
+            // not the same claim as "no fix exists".
             let fix = match &advisory.fixed {
                 Some(fixed) => format!("Upgrade {} to {fixed}", package.name),
+                None if advisory.outside_every_range => {
+                    format!(
+                        "No fixed version applies to this version; review {} and pin or replace the package",
+                        advisory.id
+                    )
+                }
                 None => format!("No fixed version published; review {} and pin or replace the package", advisory.id),
             };
             // An advisory whose detail document was unavailable has no summary,

@@ -60,6 +60,17 @@ pub struct Advisory {
     /// The version that fixes the installed one: the `fixed` event of the
     /// affected range the installed version falls in, when that range names one.
     pub fixed: Option<String>,
+    /// Whether the detail document was read and held no affected range covering
+    /// the installed version, which is the batch endpoint and the document
+    /// disagreeing about what is affected.
+    ///
+    /// It separates two findings that both carry no `fixed` and cannot honestly
+    /// say the same thing. A range that holds the version and names no upgrade
+    /// is the advisory saying no fix has shipped for the branch the repository
+    /// is on; no range at all is the advisory saying nothing about this version.
+    /// False when the detail document was unavailable: nothing was read, so
+    /// nothing disagrees.
+    pub outside_every_range: bool,
     pub aliases: Vec<String>,
 }
 
@@ -94,7 +105,19 @@ pub fn check(
         return Ok(Outcome { hits: Vec::new(), warnings, snapshot_age_days: None });
     }
     let now = now_secs();
-    let cached = cached_batch(ix, &lock.hash)?;
+    // A stored row whose JSON does not parse is a row this run cannot use: it
+    // was truncated by a full disk, or written by a version of this engine that
+    // stored something else. Reading it as an answer would report zero
+    // advisories for a repository that has them, silently, so it is treated as
+    // no snapshot at all. An online run then fetches over it; an offline one
+    // says the rule was skipped, which is the honest answer.
+    let cached = match cached_batch(ix, &lock.hash)? {
+        Some((_, json)) if serde_json::from_str::<Value>(&json).is_err() => {
+            warnings.push("the cached advisory snapshot is unreadable; ignoring it".to_string());
+            None
+        }
+        row => row,
+    };
 
     let mut batch = None;
     let mut snapshot_age_days = None;
@@ -174,6 +197,7 @@ pub fn check(
                     summary: String::new(),
                     severity: "UNKNOWN".to_string(),
                     fixed: None,
+                    outside_every_range: false,
                     aliases: Vec::new(),
                 },
             };
@@ -273,11 +297,17 @@ fn vuln_detail(
 /// Whether an id can be pasted into a URL path as it stands. Advisory ids are
 /// `GHSA-...`, `CVE-...` and the like; anything else came from a response that
 /// should not be steering a request.
+///
+/// At least one letter or digit is required, which is what makes `..` and `...`
+/// fail: every character in them is on the permitted list, so the character
+/// check alone let the one spelling of "the directory above" straight through.
 fn is_safe_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    id.chars().any(|c| c.is_ascii_alphanumeric())
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advisory {
+    let (fixed, holds) = fixed_for(detail, package, version);
     let severity = detail
         .get("database_specific")
         .and_then(|d| d.get("severity"))
@@ -289,7 +319,8 @@ fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advi
         id: id.to_string(),
         summary: detail.get("summary").and_then(Value::as_str).unwrap_or_default().to_string(),
         severity,
-        fixed: first_fixed(detail, package, version),
+        fixed,
+        outside_every_range: !holds,
         aliases: detail
             .get("aliases")
             .and_then(Value::as_array)
@@ -324,8 +355,10 @@ fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advi
 /// is the range that contains it and it names no fix: the answer is `None`, and
 /// the advisory reads "No fixed version published". `None` is also the answer
 /// when no range contains the version at all, which happens when the batch
-/// endpoint and the detail document disagree about what is affected.
-fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
+/// endpoint and the detail document disagree about what is affected; the second
+/// half of the return value separates the two, and a finding whose version no
+/// range holds reads "No fixed version applies to this version" instead.
+fn fixed_for(detail: &Value, package: &str, version: &str) -> (Option<String>, bool) {
     for affected in detail.get("affected").and_then(Value::as_array).into_iter().flatten() {
         let named = affected.get("package");
         let name = named.and_then(|p| p.get("name")).and_then(Value::as_str);
@@ -336,16 +369,23 @@ fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
         for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
             match containing_range(range, version) {
                 // The range holding the installed version names the upgrade.
-                Some(Some(fixed)) => return Some(fixed),
+                Some(Some(fixed)) => return (Some(fixed), true),
                 // It holds the version and names no upgrade. There is no
                 // second opinion to look for: this is the branch the
                 // repository is on.
-                Some(None) => return None,
+                Some(None) => return (None, true),
                 None => continue,
             }
         }
     }
-    None
+    (None, false)
+}
+
+/// The upgrade half of [`fixed_for`]. The range tests read it, because the
+/// version a range names is the whole of what they pin.
+#[cfg(test)]
+fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
+    fixed_for(detail, package, version).0
 }
 
 /// Whether a SEMVER range contains `version`, and the `fixed` it names if it
@@ -785,6 +825,59 @@ mod tests {
         assert!(!is_safe_id(""));
         assert!(!is_safe_id("../../etc/passwd"));
         assert!(!is_safe_id("GHSA x"));
+        // Every character here is on the permitted list, and the segment still
+        // means "the directory above", so a letter or a digit is required.
+        assert!(!is_safe_id(".."));
+        assert!(!is_safe_id("..."));
+        assert!(!is_safe_id("-_."));
+    }
+
+    /// A stored row that does not parse cannot answer, and reading it as an
+    /// empty answer would report a repository with advisories as clean.
+    #[test]
+    fn an_unreadable_snapshot_row_is_treated_as_no_snapshot_at_all() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+        ix.conn().execute("UPDATE osv_batch SET json = '{not json'", []).unwrap();
+
+        let outcome = check(&ix, &lock, true, &refuse).unwrap();
+
+        assert!(outcome.hits.is_empty(), "a row that cannot be read is not an answer");
+        assert_eq!(
+            outcome.warnings,
+            vec![
+                "the cached advisory snapshot is unreadable; ignoring it".to_string(),
+                "no cached advisory snapshot; vulnerable-dependency skipped".to_string(),
+            ]
+        );
+        assert_eq!(outcome.snapshot_age_days, None);
+
+        // And an online run fetches over it rather than reusing it.
+        let outcome = check(&ix, &lock, false, &canned).unwrap();
+        assert_eq!(outcome.warnings, vec!["the cached advisory snapshot is unreadable; ignoring it".to_string()]);
+        assert_eq!(only_hit(&outcome).advisory.id, VULN_ID);
+    }
+
+    /// Two findings that both name no fixed version are two different claims,
+    /// and the rule says so. See [`Advisory::outside_every_range`].
+    #[test]
+    fn a_version_no_range_holds_is_told_apart_from_one_with_no_published_fix() {
+        let uri = two_branches("fast-uri", "2.4.5", "3.1.6");
+        assert!(advisory_from("GHSA-test", &uri, "fast-uri", "3.2.0").outside_every_range, "past the last fix");
+        assert!(advisory_from("GHSA-test", &uri, "other", "1.0.0").outside_every_range, "another package entirely");
+        assert!(!advisory_from("GHSA-test", &uri, "fast-uri", "3.1.5").outside_every_range, "the 3.x range holds it");
+
+        // An `introduced` with nothing closing it holds the version and names
+        // no fix, which is the advisory saying no fix has shipped.
+        let open: Value = serde_json::from_str(
+            r#"{"affected": [{"package": {"name": "p", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "2.0.0"}]}]}]}"#,
+        )
+        .unwrap();
+        let advisory = advisory_from("GHSA-test", &open, "p", "2.5.0");
+        assert_eq!(advisory.fixed, None);
+        assert!(!advisory.outside_every_range);
     }
 
     #[test]

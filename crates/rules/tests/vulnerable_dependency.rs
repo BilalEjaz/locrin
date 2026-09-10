@@ -236,3 +236,45 @@ fn a_configured_severity_overrides_every_advisorys_rating() {
     );
     assert_eq!(only(&findings).severity, Severity::Low, "the config flattens the rating it disagrees with");
 }
+
+/// An advisory whose own ranges do not cover the installed version is the batch
+/// endpoint and the detail document disagreeing, and that is a different claim
+/// from "no fix has been published for the branch this repository is on". The
+/// fix sentence has to say which one it is, because a reader acts on it.
+#[test]
+fn an_advisory_that_does_not_cover_the_installed_version_says_so() {
+    let root = fixture("vulnerable_dependency", "npm");
+    let config = locrin_core::config::Config::default();
+    // lodash 4.17.15 is what the fixture installs, and this advisory claims
+    // only the 5.x line.
+    let document = format!(
+        r#"{{
+          "id": "{VULN_ID}",
+          "summary": "Prototype Pollution in lodash",
+          "database_specific": {{"severity": "high"}},
+          "affected": [{{
+            "package": {{"name": "lodash", "ecosystem": "npm"}},
+            "ranges": [{{"type": "SEMVER", "events": [{{"introduced": "5.0.0"}}, {{"fixed": "5.1.0"}}]}}]
+          }}]
+        }}"#
+    );
+    let seed = move |ix: &Index, root: &Path| {
+        let canned = |url: &str, _body: Option<&str>| -> anyhow::Result<String> {
+            if url == osv::BATCH_URL {
+                return Ok(BATCH.to_string());
+            }
+            Ok(document.clone())
+        };
+        let lock = lockfile::read(root).unwrap().expect("the fixture directory has a lockfile");
+        assert_eq!(osv::check(ix, &lock, false, &canned).unwrap().hits.len(), 1, "one advisory to report");
+    };
+
+    let findings = run_on_seeded(Box::new(VulnerableDependency), &root, &config, &Previous::default(), seed);
+
+    let f = only(&findings);
+    assert_eq!(
+        f.fix,
+        format!("No fixed version applies to this version; review {VULN_ID} and pin or replace the package")
+    );
+    assert_eq!(f.confidence, Confidence::Medium, "an advisory with no upgrade to name is not a full instruction");
+}
