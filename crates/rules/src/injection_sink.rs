@@ -82,9 +82,15 @@ const SQL_PROPERTIES: [&str; 7] = ["query", "raw", "execute", "exec", "$queryRaw
 /// The words that make a string a query rather than a command line, used to
 /// tell the two meanings of `exec` apart when the receiver says neither. See
 /// `carries_sql`.
-const SQL_KEYWORDS: [&str; 14] = [
+/// `with` is here because a common table expression is how a non-trivial
+/// `select` or `delete` is written, and the statement then opens with the `with`
+/// rather than with the verb: `with recent as (...) delete from sessions where
+/// id in (select id from recent)` is SQL by any reading and opened with a word
+/// this list did not hold. `merge`, `explain`, `grant`, `revoke` and `set` are
+/// the other statement openers a repository writes.
+const SQL_KEYWORDS: [&str; 20] = [
     "select", "insert", "update", "delete", "create", "drop", "alter", "replace", "pragma", "attach", "begin",
-    "commit", "truncate", "vacuum",
+    "commit", "truncate", "vacuum", "with", "merge", "explain", "grant", "revoke", "set",
 ];
 
 /// How the argument was built, which is all the evidence a syntax tree offers.
@@ -642,6 +648,29 @@ mod tests {
         assert!(!carried("`git update-index --refresh ${path}`"));
         assert!(!carried("`rm -rf ${path}`"));
         assert!(carried("q"), "a value this file cannot read falls back to SQL");
+    }
+
+    /// A common table expression opens with `with` and the verb comes later, so
+    /// the first word has to know about it or the whole statement is filed as a
+    /// command line.
+    #[test]
+    fn a_statement_that_opens_with_a_cte_is_sql() {
+        assert!(carried("`with recent as (select id from s where at > ${cutoff}) delete from s where id in (select id from recent)`"));
+        assert!(carried("`WITH t AS (SELECT 1) SELECT * FROM t WHERE x = ${x}`"), "any casing");
+        assert!(carried("`merge into t using s on t.id = s.id when matched then update set v = ${v}`"));
+        assert!(carried("`explain analyze select * from t where id = ${id}`"));
+        assert!(carried("`grant select on t to ${role}`"));
+        assert!(carried("`revoke select on t from ${role}`"));
+        assert!(carried("`set search_path to ${schema}`"));
+
+        // And the sink files it under the SQL weakness rather than the shell
+        // one, which is the whole point of the word list.
+        let out = scan(
+            &InjectionSink,
+            &parsed("store.exec(`with recent as (select id from s) delete from s where id in (select id from recent) and o = ${o}`);\n"),
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].cwe.as_deref(), Some("CWE-89"), "{:?}", out[0]);
     }
 
     /// The tie-break in place: an `exec` on an object this file cannot place is

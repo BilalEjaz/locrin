@@ -15,9 +15,12 @@
 //! change its wording.
 //!
 //! This is the one Express rule that runs in a file with no `express` import,
-//! because `res.cookie(` is the shape wherever it is written: a route handler
+//! because `.cookie(` is the shape wherever it is written: a route handler
 //! exported from a file that never mentions Express sets the cookie exactly as
-//! the file that built the app does.
+//! the file that built the app does. The receiver is not part of the door, for
+//! the same reason it is not part of the call check: handlers name the response
+//! `res`, `response` and `reply`, and a door spelled `res.cookie(` would read
+//! two of those three.
 //!
 //! **Unmeasured on the corpus.** None of the five repositories the engine is
 //! measured against uses Express, so this rule has no precision sample. See the
@@ -54,7 +57,7 @@ use locrin_core::tree::{line, text};
 use tree_sitter::Node;
 
 use super::{args, imports_express, property, string_value, unwrap, walk};
-use crate::{clean_files, finding_at, line_span, Rule, RuleContext, Scope};
+use crate::{anchor_for, clean_files, finding_at, line_span, Rule, RuleContext, Scope};
 
 pub struct ExpressCookieInsecure;
 
@@ -62,7 +65,15 @@ const FIX: &str = "Pass { httpOnly: true, secure: true, sameSite: \"lax\" }";
 
 /// The call shape that puts a cookie in the response, spelled the way the
 /// second door reads a file: any file holding these characters is setting one.
-const MARKER: &str = "res.cookie(";
+///
+/// The receiver is not part of the marker, because it is not part of what
+/// [`cookie_call`] reads either. A handler calls the response `res`, `response`
+/// or `reply` depending on the house style, and a door spelled `res.cookie(`
+/// let the first two in and left the third outside for no reason the rule can
+/// defend. What keeps the door narrow is the syntax check behind it: a call
+/// with fewer than two arguments is not a cookie being set, whatever it hangs
+/// off.
+const MARKER: &str = ".cookie(";
 
 /// The two flags, each with the weakness a missing one is filed under, in the
 /// order they are reported.
@@ -125,10 +136,15 @@ fn scan(rule: &ExpressCookieInsecure, file: &ParsedFile) -> Vec<Finding> {
         let name = cookie_name(arguments[0], src);
         let at = line(n);
         for (flag, cwe) in missing {
-            // The name and the flag are both in the anchor: two cookies set in
-            // one function are two findings, and so are the two flags of one
-            // cookie, which is what lets a repository fix them one at a time.
-            let anchor = format!("cookie\x1f{name}\x1f{flag}");
+            // The enclosing symbol, the name and the flag are all in the
+            // anchor. The name and the flag make two cookies set in one handler
+            // two findings, and the two flags of one cookie two findings, which
+            // is what lets a repository fix them one at a time. The symbol is
+            // what keeps `res.cookie("session", ...)` in `login` and the same
+            // call in `refresh` apart: without it a file setting one cookie in
+            // two handlers gives them one id between them, and suppressing one
+            // suppresses both.
+            let anchor = format!("cookie\x1f{}\x1f{name}\x1f{flag}", anchor_for(file, at));
             let mut f = finding_at(
                 rule,
                 &file.rel,
@@ -167,11 +183,13 @@ impl Rule for ExpressCookieInsecure {
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
-        Ok(clean_files(ctx)
-            .filter(|f| imports_express(f) || f.source.contains(MARKER))
-            .flat_map(|file| scan(self, file))
-            .collect())
+        Ok(clean_files(ctx).filter(|f| sets_a_cookie(f)).flat_map(|file| scan(self, file)).collect())
     }
+}
+
+/// The file gate: the Express import, or the marker anywhere in the source.
+fn sets_a_cookie(file: &ParsedFile) -> bool {
+    imports_express(file) || file.source.contains(MARKER)
 }
 
 #[cfg(test)]
@@ -238,5 +256,37 @@ mod tests {
             evidence("response.cookie(`${prefix}_session`, token, { httpOnly: true });\n"),
             vec!["cookie `${prefix}_session` set without secure"]
         );
+    }
+
+    /// The second door does not ask what the response is called. A handler
+    /// exported from a file that never mentions Express and names the response
+    /// `reply` sets the cookie exactly as one that names it `res`.
+    #[test]
+    fn the_second_door_reads_any_receiver() {
+        let file = parsed("export function login(req, reply) {\n  reply.cookie(\"session\", token);\n}\n");
+        assert!(!imports_express(&file), "no express import, so the door is the marker alone");
+        assert!(sets_a_cookie(&file));
+        assert!(sets_a_cookie(&parsed("res.cookie(\"session\", token);\n")));
+        assert!(sets_a_cookie(&parsed("response.cookie(\"session\", token);\n")));
+        // A file with neither the import nor the marker stays outside.
+        assert!(!sets_a_cookie(&parsed("export const session = readSession(req);\n")));
+    }
+
+    /// The same cookie set in two handlers is two decisions, so it needs two
+    /// ids: the enclosing symbol is in the anchor.
+    #[test]
+    fn two_handlers_setting_the_same_cookie_get_two_ids() {
+        let file = parsed(concat!(
+            "export function login(req, res) {\n",
+            "  res.cookie(\"session\", token);\n",
+            "}\n",
+            "export function refresh(req, res) {\n",
+            "  res.cookie(\"session\", token);\n",
+            "}\n",
+        ));
+        let out = scan(&ExpressCookieInsecure, &file);
+        assert_eq!(out.len(), 4, "two cookies, two flags each");
+        let ids: std::collections::HashSet<&str> = out.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids.len(), 4, "four decisions, four ids");
     }
 }

@@ -44,13 +44,26 @@
 //! The token arm is not exempted with it, because a pasted key is an exposure
 //! whatever the file's types say.
 //!
+//! The exemption stops at the bundler. A line reading `process.env.NAME` or
+//! `import.meta.env.NAME` is reported however the file types the binding,
+//! because those two are not runtime lookups at all: every bundler that builds
+//! for a browser replaces them with the literal value, so the name on that line
+//! is a name that ends up in the output. That matters because the declaration
+//! and the read can be the same file. `declare global { namespace NodeJS {
+//! interface ProcessEnv { SUPABASE_SERVICE_ROLE_KEY: string } } }` is the
+//! standard way to type `process.env` in TypeScript, it is a
+//! `property_signature` like any other, and without this carve-out one such
+//! block would silence every `process.env.SUPABASE_SERVICE_ROLE_KEY!` beside
+//! it.
+//!
 //! Blind spots, all of them deliberate:
 //!
 //! - **A file that declares the binding goes quiet on the name.** A client file
 //!   that declares `interface Env { SUPABASE_SERVICE_ROLE_KEY: string }` and
 //!   then really does inline the key is reported only if the token itself is in
-//!   it. The exemption is what the declaration is worth: a name reached through
-//!   a runtime binding is not a name a bundler can inline.
+//!   it, or if the line reads it through one of the two bundler-inlined
+//!   environment objects. The exemption is what the declaration is worth: a
+//!   name reached through a runtime binding is not a name a bundler can inline.
 //! - **`serviceRole` in camel case is not a match.** The rule matches the
 //!   underscore spelling, which is the one Supabase itself uses in the payload
 //!   and in every environment variable it documents. Matching `service` next to
@@ -186,6 +199,14 @@ fn declares_the_binding(file: &ParsedFile) -> bool {
     walk(file.tree.root_node(), &file.source)
 }
 
+/// Whether the line reads the value out of one of the two environment objects
+/// a bundler inlines. `process.env.X` and `import.meta.env.X` are replaced with
+/// the literal value at build time, so the name on such a line reaches the
+/// output whatever the file's types say about the binding. See the module doc.
+fn reads_an_inlined_environment(line: &str) -> bool {
+    line.contains("process.env.") || line.contains("import.meta.env.")
+}
+
 /// What the line holds, as the evidence spells it, or `None` when it holds
 /// nothing. The name is asked first because it costs one regex over a short
 /// line; the JWT arm decodes a payload and only runs when the name is absent.
@@ -213,9 +234,16 @@ fn what(line: &str, names: bool) -> Option<String> {
 }
 
 fn scan(rule: &SupabaseServiceRoleInClient, file: &ParsedFile) -> Vec<Finding> {
-    let names = !declares_the_binding(file);
+    // The exemption costs a walk of the whole syntax tree and it can only
+    // matter in a file that names the key somewhere, so the cheap regex over
+    // the source is asked first and the walk waits behind it. Most files in a
+    // repository never reach the walk at all.
+    let declares = name_re().is_match(&file.source) && declares_the_binding(file);
     let mut out = Vec::new();
     for (i, line) in file.source.lines().enumerate() {
+        // The declaration silences the name arm, except where the line reads
+        // the value through an environment object the bundler inlines.
+        let names = !declares || reads_an_inlined_environment(line);
         let Some(what) = what(line, names) else { continue };
         // The regexes run over the untrimmed line, because a comment is
         // recognised by what it starts with and a JWT can sit at either end.
@@ -297,6 +325,36 @@ mod tests {
         // An interface that declares some other member is not a declaration of
         // this one.
         assert!(!declares_the_binding(&parsed("interface Env {\n  SUPABASE_ANON_KEY: string;\n}\n")));
+    }
+
+    /// The carve-out the review asked for. A client file can declare the
+    /// binding and read it through `process.env` in the same breath, which is
+    /// exactly what a `declare global { namespace NodeJS { interface ProcessEnv
+    /// } } }` block is for, and the read is the line that reaches the bundle.
+    #[test]
+    fn a_declared_binding_does_not_silence_a_bundler_inlined_read() {
+        let file = parsed(concat!(
+            "declare global {\n",
+            "  namespace NodeJS {\n",
+            "    interface ProcessEnv {\n",
+            "      SUPABASE_SERVICE_ROLE_KEY: string;\n",
+            "    }\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "export const admin = createClient(url, process.env.SUPABASE_SERVICE_ROLE_KEY!);\n",
+            "export const other = env.SUPABASE_SERVICE_ROLE_KEY;\n",
+        ));
+        assert!(declares_the_binding(&file), "the block is a property_signature like any other");
+        let out = scan(&SupabaseServiceRoleInClient, &file);
+        let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
+        assert_eq!(lines, vec![9], "the process.env read, and neither the declaration nor the runtime read");
+
+        // `import.meta.env` is the same bargain on the other bundler.
+        let file = parsed(
+            "type Env = { SUPABASE_SERVICE_ROLE_KEY: string };\nconst k = import.meta.env.SUPABASE_SERVICE_ROLE_KEY;\n",
+        );
+        assert_eq!(scan(&SupabaseServiceRoleInClient, &file).len(), 1);
     }
 
     /// The declaration turns off the name arm and not the token arm: a pasted

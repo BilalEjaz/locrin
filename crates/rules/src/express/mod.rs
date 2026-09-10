@@ -37,9 +37,11 @@
 //! - **A path is a string literal.** A route registered with a regular
 //!   expression, an array of paths, or a variable has no path here: the rules
 //!   report the registrations whose path they can quote.
-//! - **A mount's prefix is compared as text.** `app.use("/admin", requireAuth)`
-//!   covers `app.get("/admin/users", ...)` because the second path starts with
-//!   the first. It does not cover the commoner Express idiom, a `Router` mounted
+//! - **A mount's prefix is compared as text, one whole segment at a time.**
+//!   `app.use("/admin", requireAuth)` covers `app.get("/admin/users", ...)`
+//!   because the second path continues the first at a slash, and it does not
+//!   cover `/administration`, which merely starts with the same characters. It
+//!   does not cover the commoner Express idiom, a `Router` mounted
 //!   at `/admin` whose own routes are registered as `/users`: the router's paths
 //!   do not carry the prefix, and joining them would mean following the router
 //!   object across files, which is release two's work.
@@ -186,12 +188,18 @@ pub(crate) fn registrations(file: &ParsedFile) -> Vec<Registration<'_>> {
 
 /// Whether an argument names one of the repository's auth middlewares.
 ///
-/// Three shapes, and the compositions of them: the bare identifier
+/// Four shapes, and the compositions of them: the bare identifier
 /// (`requireAuth`), a call that builds one (`requireAuth()`,
-/// `requireRole("admin")`), and a member whose property is the name
-/// (`auth.requireAuth`). A call whose callee is a member (`auth.requireAuth()`)
-/// is all three at once, which is why the test recurses rather than listing the
-/// cases.
+/// `requireRole("admin")`), a member whose property is the name
+/// (`auth.requireAuth`), and an array of any of those. A call whose callee is a
+/// member (`auth.requireAuth()`) is all of them at once, which is why the test
+/// recurses rather than listing the cases.
+///
+/// The array arm is Express's own documented shape for a middleware chain:
+/// `app.post("/orders", [requireAuth, validate], create)` passes one argument
+/// where the flat form passes two, and Express flattens it before running it.
+/// Any element authenticating authenticates the array, for the same reason any
+/// argument authenticates the call.
 pub(crate) fn is_auth(node: Node, src: &str, names: &[String]) -> bool {
     let node = unwrap(node);
     match node.kind() {
@@ -200,6 +208,13 @@ pub(crate) fn is_auth(node: Node, src: &str, names: &[String]) -> bool {
             node.child_by_field_name("property").is_some_and(|p| names.iter().any(|n| n == text(p, src)))
         }
         "call_expression" => node.child_by_field_name("function").is_some_and(|f| is_auth(f, src, names)),
+        "array" => {
+            // Two statements, not one expression: the iterator borrows
+            // `cursor`, so it has to be dropped before `cursor` is.
+            let mut cursor = node.walk();
+            let elements: Vec<Node> = node.named_children(&mut cursor).filter(|n| n.kind() != "comment").collect();
+            elements.into_iter().any(|e| is_auth(e, src, names))
+        }
         _ => false,
     }
 }
@@ -224,15 +239,28 @@ pub(crate) fn auth_mounts(file: &ParsedFile, names: &[String]) -> Vec<Mount> {
         .collect()
 }
 
+/// Whether a mount's prefix covers a path. A mount covers the prefix itself and
+/// everything below it as a path segment, which is how Express matches: `/api`
+/// covers `/api` and `/api/users` and does not cover `/apiary`. A prefix that
+/// is empty, or that is only slashes, is a mount with no path and covers
+/// everything.
+pub(crate) fn covers(prefix: &str, path: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return true;
+    }
+    path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Whether a registration is authenticated: a middleware in its own argument
-/// list after the path, or a mount earlier in the file whose prefix its path
-/// starts with.
+/// list after the path, or a mount earlier in the file whose prefix covers its
+/// path.
 pub(crate) fn is_authenticated(reg: &Registration, src: &str, names: &[String], mounts: &[Mount]) -> bool {
     if args(reg.call).iter().skip(1).any(|a| is_auth(*a, src, names)) {
         return true;
     }
     let path = reg.path.clone().unwrap_or_default();
-    mounts.iter().any(|m| m.start < reg.start && path.starts_with(&m.prefix))
+    mounts.iter().any(|m| m.start < reg.start && covers(&m.prefix, &path))
 }
 
 #[cfg(test)]
@@ -270,6 +298,11 @@ mod tests {
         assert!(authed("app.get(\"/a\", auth.requireAuth, h);\n"), "a member");
         assert!(authed("app.get(\"/a\", auth.requireAuth(), h);\n"), "a call on a member");
         assert!(authed("app.get(\"/a\", (requireAuth as Handler), h);\n"), "through a cast");
+        // Express's own documented middleware-chain shape: one argument holding
+        // the list. Any element authenticates it.
+        assert!(authed("app.post(\"/orders\", [requireAuth, validate], create);\n"), "an array of middlewares");
+        assert!(authed("app.post(\"/orders\", [validate, auth.requireAuth()], create);\n"), "any element, any shape");
+        assert!(!authed("app.post(\"/orders\", [validate, log], create);\n"), "an array of other middlewares");
         assert!(!authed("app.get(\"/a\", requireAuthentication, h);\n"), "a longer name is another name");
         assert!(!authed("app.get(\"/a\", h);\n"));
         // The path is the first argument and is never itself a middleware, even
@@ -318,6 +351,31 @@ mod tests {
         let regs = registrations(&file);
         let route = regs.iter().find(|r| r.method == "get").unwrap();
         assert!(is_authenticated(route, &file.source, &names, &mounts));
+    }
+
+    /// A prefix covers whole segments, not characters. `/apiary` is not under
+    /// `/api`, and a mount at `/api` still covers `/api` itself.
+    #[test]
+    fn a_prefix_is_matched_a_segment_at_a_time() {
+        assert!(covers("/api", "/api"), "the mount point itself");
+        assert!(covers("/api", "/api/users"));
+        assert!(covers("/api", "/api/v1/users"));
+        assert!(!covers("/api", "/apiary"), "the same characters are not the same route");
+        assert!(!covers("/api", "/apikeys"));
+        assert!(!covers("/api", "/other"));
+        assert!(covers("", "/anything"), "a mount with no path covers everything");
+        assert!(covers("/", "/anything"), "and so does one mounted at the root");
+        assert!(covers("/api/", "/api/users"), "a trailing slash on the prefix changes nothing");
+
+        let names = vec!["requireAuth".to_string()];
+        let file = parsed("app.use(\"/api\", requireAuth);\napp.get(\"/apiary/bees\", h);\napp.get(\"/api\", h);\n");
+        let mounts = auth_mounts(&file, &names);
+        let covered: Vec<(String, bool)> = registrations(&file)
+            .iter()
+            .filter(|r| r.method != "use")
+            .map(|r| (r.path.clone().unwrap_or_default(), is_authenticated(r, &file.source, &names, &mounts)))
+            .collect();
+        assert_eq!(covered, vec![("/apiary/bees".to_string(), false), ("/api".to_string(), true)]);
     }
 
     #[test]

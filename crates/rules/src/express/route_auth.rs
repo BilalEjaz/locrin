@@ -33,6 +33,12 @@
 //!   coverage.
 //! - **`use` is never reported.** A mount is middleware, not an endpoint, and
 //!   the thing it is missing is the thing it might itself be.
+//! - **A one-argument `app.get(...)` is not read.** Express overloads `app.get`
+//!   with the getter half of its settings API, so `app.get("env")` and
+//!   `app.get("trust proxy")` read a setting rather than register a route. A
+//!   registration takes a path and at least one handler, so a call with fewer
+//!   than two arguments is skipped. The cost is nil: a route with no handler
+//!   answers nothing.
 //! - **Authorisation is not authentication.** A route carrying `requireAuth`
 //!   passes whatever it does next with the identity it established. Whether the
 //!   right user is allowed at the right row is not a question a middleware list
@@ -44,7 +50,7 @@ use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
 use regex::Regex;
 
-use super::{auth_mounts, imports_express, is_authenticated, registrations};
+use super::{args, auth_mounts, imports_express, is_authenticated, registrations};
 use crate::{clean_files, finding_at, line_span, Rule, RuleContext, Scope};
 
 pub struct ExpressRouteWithoutAuth;
@@ -68,6 +74,13 @@ fn scan(rule: &ExpressRouteWithoutAuth, file: &ParsedFile, names: &[String]) -> 
     for reg in registrations(file) {
         // A mount is middleware, not an endpoint.
         if reg.method == "use" {
+            continue;
+        }
+        // `app.get("env")` is not a route. Express overloads `app.get` with the
+        // getter half of its settings API, and a settings read takes exactly
+        // one argument where a route registration takes a path and at least one
+        // handler. One argument is the getter every time.
+        if args(reg.call).len() < 2 {
             continue;
         }
         let Some(path) = reg.path.clone() else { continue };
@@ -157,5 +170,22 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].evidence, "GET /admin registered without requireAuth, authenticate");
         assert_eq!(out[0].fix, FIX);
+    }
+
+    /// Express's settings getter shares the name of its route registrar. One
+    /// argument is the getter, and a getter has no handler to be missing an
+    /// auth middleware in front of.
+    #[test]
+    fn a_settings_read_is_not_a_route() {
+        let names = vec!["requireAuth".to_string()];
+        let file = locrin_core::parse::parse_source(
+            std::path::Path::new("src/a.ts"),
+            "src/a.ts",
+            "const mode = app.get(\"env\");\nconst proxy = app.get(\"trust proxy\");\napp.get(\"/admin\", h);\n".into(),
+        )
+        .unwrap();
+        let out = scan(&ExpressRouteWithoutAuth, &file, &names);
+        let evidence: Vec<&str> = out.iter().map(|f| f.evidence.as_str()).collect();
+        assert_eq!(evidence, vec!["GET /admin registered without requireAuth"]);
     }
 }
