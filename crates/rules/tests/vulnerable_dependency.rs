@@ -127,6 +127,49 @@ fn the_finding_id_survives_the_entry_moving_to_another_line() {
     assert_eq!(f.id, only(&npm).id, "the id follows the package and the advisory, not the line");
 }
 
+/// One package installed at two versions, both hit by one advisory, is two
+/// findings with two ids: each version is upgraded in its own place in the
+/// dependency tree, so accepting one of them must not accept the other. This is
+/// the shape that lost 33 findings on the first real run, where three installed
+/// copies of one package matched the same advisories.
+#[test]
+fn two_installed_versions_of_one_package_are_two_findings() {
+    // Five packages this time (`@acme/util`, `b`, `left-pad`, lodash 4.17.10,
+    // lodash 4.17.15), and the advisory sits on both lodash entries.
+    let both = format!(
+        r#"{{"results":[{{}},{{}},{{}},{{"vulns":[{{"id":"{VULN_ID}"}}]}},{{"vulns":[{{"id":"{VULN_ID}"}}]}}]}}"#
+    );
+    let root = fixture("vulnerable_dependency", "npm-two-versions");
+    let config = locrin_core::config::Config::default();
+    let seed = |ix: &Index, root: &Path| {
+        let detail = detail("moderate", Some("4.17.20"), "Prototype Pollution in lodash");
+        let canned = |url: &str, body: Option<&str>| -> anyhow::Result<String> {
+            if url == osv::BATCH_URL {
+                assert!(body.is_some(), "the batch endpoint is a POST");
+                return Ok(both.clone());
+            }
+            Ok(detail.clone())
+        };
+        let lock = lockfile::read(root).unwrap().expect("the fixture directory has a lockfile");
+        let outcome = osv::check(ix, &lock, false, &canned).unwrap();
+        assert_eq!(outcome.warnings, Vec::<String>::new(), "the seed itself must be clean");
+        assert_eq!(outcome.hits.len(), 2, "the advisory covers both installed versions");
+    };
+
+    let findings = run_on_seeded(Box::new(VulnerableDependency), &root, &config, &Previous::default(), seed);
+
+    assert_eq!(findings.len(), 2, "one finding per installed version: {findings:?}");
+    let seen: Vec<(String, u32)> = findings.iter().map(|f| (f.evidence.clone(), f.span.start_line)).collect();
+    assert_eq!(
+        seen,
+        vec![
+            (format!("lodash 4.17.10: {VULN_ID} (MODERATE) Prototype Pollution in lodash"), 28),
+            (format!("lodash 4.17.15: {VULN_ID} (MODERATE) Prototype Pollution in lodash"), 36),
+        ]
+    );
+    assert_ne!(findings[0].id, findings[1].id, "two versions, two ids");
+}
+
 /// A copy of the npm fixture whose `packages` object opens with blank lines, so
 /// every entry in it is declared further down the file than in the committed
 /// one. Whitespace is insignificant to JSON and to the package hash, so the

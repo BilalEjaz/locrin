@@ -131,7 +131,11 @@ impl Rule for VulnerableDependency {
             // The advisory id joins the package name in the anchor so that a
             // package with two advisories is two findings, and so that a finding
             // keeps its id when the lockfile is regenerated and the entry moves.
-            let anchor = format!("{}\x1f{}", package.name, advisory.id);
+            // The version is there for the same reason: an install tree holding
+            // three copies of one package at three versions is three findings
+            // with three upgrades to make, and without the version they shared
+            // one id, so accepting one of them accepted all three unread.
+            let anchor = format!("{}\x1f{}\x1f{}", package.name, package.version, advisory.id);
             let evidence = format!(
                 "{} {}: {} ({}) {}",
                 package.name,

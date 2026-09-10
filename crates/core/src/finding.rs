@@ -74,10 +74,12 @@ pub struct Verdict {
 /// Stable 16 hex character identity for a finding. The unit separator keeps the
 /// three parts from running together, so ("ab", "c") and ("a", "bc") differ.
 ///
-/// The id identifies a finding *class* within a symbol, not one occurrence: the
-/// same rule hitting twice inside one function produces the same id. So a
-/// verdict may legitimately contain duplicate ids, and accepting one of them
-/// into the baseline accepts the whole class.
+/// What the id identifies is whatever the caller put in the anchor. A rule that
+/// reports a line anchors on the enclosing symbol, the line's text and the
+/// ordinal of that line among the identical ones inside the symbol, so the
+/// caller's anchor gives every occurrence its own id. A rule that reports a
+/// class anchors on the class instead: the same secret value twice in one file
+/// is one id, and accepting it accepts both.
 pub fn make_id(rule: &str, rel: &str, anchor: &str) -> String {
     let mut h = blake3::Hasher::new();
     h.update(rule.as_bytes());

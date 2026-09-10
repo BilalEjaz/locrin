@@ -871,10 +871,17 @@ pub fn scan(root: &Path, offline: bool) -> anyhow::Result<(usize, usize)> {
 /// for the same reason: `create` runs every rule, `vulnerable-dependency`
 /// included, so without it a repository drawing its first line in the sand on a
 /// machine with no network waits out the advisory requests' timeouts.
-pub fn baseline_create(root: &Path, offline: bool) -> anyhow::Result<usize> {
+///
+/// `record` decides whether this pass may leave its mark on the repository's
+/// index. `init` passes true: it has just scanned, the findings cache is warm,
+/// and a second cold parse of the whole repository would double its time and
+/// repeat every warning. The CLI's `baseline create` passes false for the same
+/// reason `baseline accept` does: a baseline command must never move the
+/// `--changed` watermark.
+pub fn baseline_create(root: &Path, offline: bool, record: bool) -> anyhow::Result<usize> {
     let root = canonical_root(root);
     let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
-    let findings = full_findings(&root, &opts, false)?;
+    let findings = full_findings(&root, &opts, record)?;
     let mut b = Baseline::default();
     for f in &findings {
         b.accept(f, "baseline", "locrin");

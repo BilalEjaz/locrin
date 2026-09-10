@@ -238,6 +238,32 @@ fn init_does_not_reset_an_existing_baseline() {
     assert!(text.contains("abc123"), "init replaced a baseline it did not write: {text}");
 }
 
+/// The baseline is written from the scan init has just run, not from a second
+/// pass over the same tree. The second pass parsed all 1846 files of a real
+/// repository again from cold, which doubled `init` and printed every parse
+/// warning twice, and a warning repeated is a person hunting for the second file
+/// that does not exist.
+///
+/// The fixture is a genuine parse error rather than a tolerated one: a bare
+/// ampersand in JSX text is recovered from, an attribute with no value is not.
+#[test]
+fn init_parses_the_repository_once() {
+    let dir = temp_repo();
+    git(dir.path(), &["init", "-q"]);
+    std::fs::write(dir.path().join("src/broken.tsx"), "export const a = <Label a=>x</Label>;\n").unwrap();
+
+    let out = init(dir.path());
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        stderr.matches("warning: parse errors in").count(),
+        1,
+        "the repository was parsed more than once:\n{stderr}"
+    );
+    // And the progress a person reads still describes one scan, not two.
+    assert_eq!(stderr.matches("indexing ").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("indexed ").count(), 1, "{stderr}");
+}
+
 /// The report on stdout is the only record of what init did, so a run that
 /// cannot finish must not have created anything: files written before the
 /// failure would never be named anywhere.

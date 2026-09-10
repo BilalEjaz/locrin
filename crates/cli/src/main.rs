@@ -211,7 +211,11 @@ fn real_main() -> anyhow::Result<i32> {
             Ok(0)
         }
         Cmd::Baseline { cmd: BaselineCmd::Create { offline } } => {
-            let n = run::baseline_create(&root, offline)?;
+            // Not recording: a baseline command is not a check, and a recording
+            // pass here would answer for every pending edit and leave the next
+            // `locrin check --changed` with nothing to report. `init` is the
+            // caller that passes true, and [`run::baseline_create`] says why.
+            let n = run::baseline_create(&root, offline, false)?;
             println!("baseline written with {n} finding(s)");
             Ok(0)
         }

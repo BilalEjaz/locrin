@@ -9,7 +9,7 @@ command line, a git pre-commit hook, Claude Code's hooks, and an MCP client.
 There is no model in the loop and no scoring. A rule either fires on what is in
 the file or it does not, so two runs on the same bytes give the same answer.
 
-## Two limits worth knowing first
+## Limits worth knowing first
 
 Locrin does not type check. Import resolution is heuristic: it reads `tsconfig`
 paths and package `exports`, and falls back to sensible guesses. That is enough
@@ -20,6 +20,22 @@ for `tsc`.
 `find_existing`, the MCP tool that searches the indexed symbols so an agent can
 look before it writes. The rule that fails a build over a duplicate is not
 shipped yet.
+
+One construct the parser cannot read excludes its file. The grammar has no rule
+for an import type carrying an array suffix, `x as import('./t').Seg[]`
+(tree-sitter-typescript issue 322, open), and the parser recovers by inventing a
+MISSING identifier, a token that is not in the file at all. A MISSING node is
+never tolerated, because the engine cannot read a tree the parser made up, so
+the file is excluded from every rule with one `warning: parse errors` line on
+stderr. Write the type as `Array<import('./t').Seg>`, or import it by name and
+use `Seg[]`, and the file parses and is checked like any other. Two
+things that look like the same problem are not: a bare `&` in JSX text, as in
+`BODY & NUTRITION`, is tolerated, because the scanner's refusal leaves the rest
+of the tree intact and the only thing lost is the words after the `&` in that
+one text run, which no rule reads today; and a NUL byte in source parses,
+because the parser is handed a copy with each NUL replaced by a byte the lexer
+does not reserve, one byte for one byte, while every rule reads the file as it
+is written.
 
 ## Install
 
@@ -219,8 +235,22 @@ where the acceptance is written down with a reason.
 
 `locrin-baseline.json` holds accepted findings by id, each with the rule, the
 file, a reason, an author and a date. A finding in the baseline is filtered out
-of every verdict. An id identifies a finding class within a symbol rather than
-one occurrence, so accepting one accepts the class.
+of every verdict. An id identifies whatever the rule that reported it anchored
+on: a rule that reports a line anchors on the enclosing symbol, the line's text
+and which of the identical lines in that symbol it is, so every occurrence is
+accepted on its own; a rule that reports a class, such as a secret's value,
+anchors on the class and one acceptance covers every place it appears.
+
+Finding ids changed in 0.2.0, so a baseline written by 0.1.0 is stale in every
+entry and suppresses nothing. A line rule's anchor now carries the line's own
+text and which of the identical lines inside its symbol it is, and an advisory
+carries the installed version, which is what makes two identical debug lines in
+one function two findings to accept and three installed versions of one
+vulnerable package three. Recreate the file with `locrin baseline create` after
+upgrading, from a working tree you are willing to accept as it stands. The
+findings cache is keyed by the version as well, so the first run after the
+upgrade rebuilds it and pays for one cold pass rather than serving a row that
+carries an old id.
 
 For a single line, the text `locrin:allow` on that line suppresses the findings
 reported there. The indexer records which lines carry it, so the suppression

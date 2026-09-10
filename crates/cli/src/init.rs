@@ -129,12 +129,17 @@ pub fn run(
     let mut report = Report { files_indexed: files, baseline_entries: None };
     progress(&format!("indexed {} file(s) in {elapsed:.1} s", report.files_indexed));
 
-    // The scan above has warmed the findings cache, so this second pass over the
-    // repository is served from it.
+    // Recording, so this pass reads the index the scan above just wrote and is
+    // served from the findings cache the scan warmed. A non-recording pass would
+    // start from an empty in-memory index and parse all of it again from cold,
+    // which on a real repository doubled init's time and printed every parse
+    // warning a second time. Moving the `--changed` watermark is not a cost
+    // here the way it is for `baseline create`: the scan a line above has
+    // already moved it, and init is where the watermark starts.
     if root.join(BASELINE_FILE).exists() {
         touched.push((BASELINE_FILE.to_string(), Touch::Unchanged));
     } else {
-        let entries = run::baseline_create(root, offline)?;
+        let entries = run::baseline_create(root, offline, true)?;
         touched.push((BASELINE_FILE.to_string(), Touch::Wrote));
         report.baseline_entries = Some(entries);
     }

@@ -26,7 +26,6 @@ use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity, Spa
 use locrin_core::index::Index;
 use locrin_core::parse::ParsedFile;
 use locrin_core::previous::Previous;
-use locrin_core::symbols::enclosing_symbol;
 use rayon::prelude::*;
 
 pub use locrin_core::ALLOW_MARK;
@@ -126,7 +125,8 @@ pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
 }
 
 /// The files a file rule is allowed to look at: every parsed file whose tree came
-/// back without a syntax error. Rules iterate this instead of `ctx.files`, so a
+/// back without a syntax error the engine cannot see past (see
+/// `parse::has_blocking_error`). Rules iterate this instead of `ctx.files`, so a
 /// file that failed to parse is exempt from every rule rather than from whichever
 /// rules happened to check `has_error`.
 pub fn clean_files<'a>(ctx: &'a RuleContext) -> impl Iterator<Item = &'a ParsedFile> {
@@ -145,11 +145,42 @@ pub fn line_span(file: &ParsedFile, line: u32) -> Span {
     Span { start_line: line, start_col: 0, end_line: line, end_col: text.len() as u32 }
 }
 
-/// The identity anchor for a finding: the enclosing symbol name if there is
-/// one, otherwise the line text. Anchoring on the symbol is what keeps a
-/// finding's id stable when unrelated lines move around it.
+/// The part of a finding's identity that survives a line shift: the enclosing
+/// symbol name if there is one, the line's trimmed text, and the ordinal of
+/// this line among the identical lines inside that symbol.
+///
+/// Anchoring on the symbol is what keeps a finding's id stable when unrelated
+/// lines move around it. The text and the ordinal are what keep two findings
+/// apart: two identical `console.log` lines in one function are two lines a
+/// reader has to delete, and on the symbol alone they had one id between them,
+/// so accepting either into a baseline silently accepted the other. Neither
+/// part is a line number, so moving the whole function down the file leaves
+/// both ids alone (spec 7.1).
 pub fn anchor_for(file: &ParsedFile, line: u32) -> String {
-    enclosing_symbol(file, line).unwrap_or_else(|| line_text(file, line).to_string())
+    // The symbol table is extracted once here and then asked many times.
+    // `enclosing_symbol` is not a lookup: each call walks the whole tree and
+    // allocates the symbol list again, so asking it once per identical earlier
+    // line made a file of byte-identical flagged lines cost tree walks
+    // quadratically. Resolving against this Vec instead picks exactly what
+    // `enclosing_symbol` picks, the first symbol in extraction order whose span
+    // covers the line, for one walk per finding.
+    let symbols = locrin_core::symbols::extract(file);
+    let enclosing = |at: u32| symbols.iter().find(|s| s.start_line <= at && at <= s.end_line).map(|s| s.name.as_str());
+    let symbol = enclosing(line);
+    let text = line_text(file, line);
+    // Only a line that reads the same can be an earlier occurrence, and reading
+    // the same is a string compare where sharing a symbol is a scan of the
+    // symbol list, so the cheap half is asked first: a file whose lines are all
+    // different pays for one pass over the text and no symbol scan at all.
+    let ordinal = file
+        .source
+        .lines()
+        .take(line.saturating_sub(1) as usize)
+        .enumerate()
+        .filter(|(_, earlier)| earlier.trim() == text)
+        .filter(|(i, _)| enclosing(*i as u32 + 1) == symbol)
+        .count();
+    format!("{}\x1f{text}\x1f{ordinal}", symbol.unwrap_or_default())
 }
 
 /// Builds a finding from its parts. Every rule constructs findings through this
@@ -504,9 +535,53 @@ mod tests {
             "function f() {\n  console.log(1);\n}\nconsole.log(2);\n".into(),
         )
         .unwrap();
-        assert_eq!(anchor_for(&file, 2), "f");
-        assert_eq!(anchor_for(&file, 4), "console.log(2);");
+        assert_eq!(anchor_for(&file, 2), "f\u{1f}console.log(1);\u{1f}0");
+        assert_eq!(anchor_for(&file, 4), "\u{1f}console.log(2);\u{1f}0", "a line outside every symbol has no name");
         assert_eq!(line_text(&file, 4), "console.log(2);");
+    }
+
+    /// The source two of these tests share: one function holding the same debug
+    /// line twice. Before the ordinal was part of the anchor these two lines had
+    /// one id between them, so accepting either into a baseline accepted both.
+    const TWICE: &str = "function f() {\n  console.log(\"a\");\n  console.log(\"a\");\n}\n";
+
+    fn parsed(source: &str) -> ParsedFile {
+        parse_source(Path::new("src/a.ts"), "src/a.ts", source.into()).unwrap()
+    }
+
+    #[test]
+    fn two_identical_lines_in_one_function_get_two_ids() {
+        let file = parsed(TWICE);
+        assert_ne!(anchor_for(&file, 2), anchor_for(&file, 3), "the second occurrence is a finding of its own");
+    }
+
+    /// The reason the ordinal counts occurrences rather than naming the line: an
+    /// edit above the function moves both lines and neither finding may be
+    /// retired and re-reported for it (spec 7.1).
+    #[test]
+    fn an_anchor_survives_a_line_shift() {
+        let file = parsed(TWICE);
+        let shifted = parsed(&format!("\n\n{TWICE}"));
+        assert_eq!(anchor_for(&shifted, 4), anchor_for(&file, 2));
+        assert_eq!(anchor_for(&shifted, 5), anchor_for(&file, 3));
+    }
+
+    /// The shape of the ordinal's cost, pinned on the file that used to be the
+    /// bad case: 200 byte-identical lines in one function. The scan reads every
+    /// earlier line once, and the symbol table behind it is extracted once for
+    /// the whole call rather than once per matching line, so this is one tree
+    /// walk and not two hundred.
+    #[test]
+    fn the_ordinal_counts_every_identical_earlier_line() {
+        let body = "  console.log(\"x\");\n".repeat(200);
+        let file = parsed(&format!("function f() {{\n{body}}}\n"));
+        assert_eq!(anchor_for(&file, 201), "f\u{1f}console.log(\"x\");\u{1f}199");
+    }
+
+    #[test]
+    fn identical_lines_in_different_functions_differ() {
+        let file = parsed("function f() {\n  console.log(\"a\");\n}\nfunction g() {\n  console.log(\"a\");\n}\n");
+        assert_ne!(anchor_for(&file, 2), anchor_for(&file, 5), "the enclosing symbol still separates them");
     }
 
     #[test]

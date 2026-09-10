@@ -12,6 +12,31 @@ pub fn line(node: Node) -> u32 {
     node.start_position().row as u32 + 1
 }
 
+/// The outermost ERROR and MISSING nodes under `root`, in no particular order.
+///
+/// A subtree tree-sitter reports as clean is skipped whole, so a file that
+/// parsed costs one question and no allocation, and the walk never descends
+/// past a refusal it has already reported: what is inside one is that
+/// refusal's own business, and its caller asks about that directly.
+pub fn error_nodes<'t>(root: Node<'t>) -> Vec<Node<'t>> {
+    let mut out = Vec::new();
+    if !root.has_error() {
+        return out;
+    }
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            out.push(node);
+            continue;
+        }
+        // Same two-local dance as `has_keyword`: the iterator borrows the cursor.
+        let mut cursor = node.walk();
+        let mut children = node.children(&mut cursor);
+        stack.extend(children.by_ref().filter(|c| c.has_error()));
+    }
+    out
+}
+
 /// Whether `node` has an anonymous child token spelled `keyword`, such as the
 /// `default` in `export default` or the `type` in `import type`. Keyword tokens
 /// are anonymous nodes whose kind is the keyword itself, so this is the only

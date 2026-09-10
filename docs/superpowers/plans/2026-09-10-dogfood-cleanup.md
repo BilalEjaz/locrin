@@ -30,6 +30,51 @@
 
 (Empty at planning time. The executor appends every ruling here with its reason.)
 
+- **Task 1, Task 5 bumps the workspace version to 0.2.0.** Ids changed, and the
+  findings cache key mixes in `CARGO_PKG_VERSION`, so every warm row an older
+  binary wrote must become a miss rather than a hit serving a stale id. The cost
+  if the ruling is wrong is one cold pass per repository after the upgrade. No
+  test pins the crate version: the `0.1.0` strings in `crates/reporters` and
+  `crates/mcp` are arguments those tests pass in themselves, not reads of
+  `CARGO_PKG_VERSION`, so the bump changed no assertion.
+
+- **Task 2, the NUL fixture bucket is named `nul_byte` and the `line_text` half
+  of the unit assertion lives in the rules e2e.** `NUL` is a reserved device name
+  on Windows and a directory by that name fails with os error 1, and a unit test
+  in `crates/core` cannot reach the rules crate without a cycle.
+  `.gitattributes` pins the fixture as binary so no tool rewrites the byte.
+
+- **Task 3, the tolerated shape follows the tree the parser actually produces.**
+  The plan described an ERROR node between `jsx_text` siblings; probing showed an
+  ERROR child of `jsx_element` whose named children are identifiers. The
+  implementation tolerates that shape with "no child of the ERROR has an error of
+  its own" in place of the plan's `jsx_text` clause, keeping the `<`, `{` and `}`
+  text guard as the discriminator. The cost if the ruling is wrong is that a
+  text-run refusal which is not an ampersand is tolerated too, which is the same
+  class of error and the same recovery.
+
+- **Task 5, the pull request is opened by the controller after the whole-branch
+  review, not by this task.** The brief's step 4 `gh pr create` was held back
+  deliberately. What Task 5 delivers is the version bump, the documentation, the
+  benchmarks and the read-only FastLift evidence.
+
+- **Task 5, the cold benchmark is reported as failed and attributed rather than
+  re-run until it passes.** The four mandated runs read 46561, 10032, 10033 and
+  9857 ms against a 5000 ms target. Instead of tuning or moving the target, three
+  earlier commits were built and measured beside the branch head, which put every
+  binary including `main` at 5.4 to 6.3 s and the four mandated runs' plateau
+  down to the machine's state at the time. The gate is missed either way and it
+  is missed by `main` too, so it is recorded as a concern and handed to the
+  controller.
+
+- **Task 5, the FastLift tracker entry D9 line was written by the controller, not
+  by this task.** The Global Constraint above asks for a line in
+  `<home>/fasting-app/.planning/ROADMAP-SMART-2026-08-25.md`; the
+  controller's read-only amendment forbade this task writing anything into that
+  checkout beyond moving the baseline out and back, so the controller wrote the
+  tracker line itself. The constraint is met, by the controller's hand rather
+  than this task's.
+
 ## File structure
 
 - `crates/rules/src/lib.rs` (modify): `anchor_for` includes the line's trimmed text and its ordinal within the enclosing symbol.
@@ -114,7 +159,7 @@ fn is_tolerated_jsx_text_error(node: Node, src: &str) -> bool;
 ```
 `ParsedFile.has_error = has_blocking_error(tree.root_node(), &source)`.
 
-- [ ] Step 1: failing tests. Unit: `a_bare_ampersand_in_jsx_text_is_tolerated` (`<Label>BODY & NUTRITION</Label>` inside a component: `has_error == false`); `a_broken_attribute_is_still_an_error` (`<Label a=>x</Label>`: `has_error == true`); `a_missing_semicolon_in_a_type_is_still_an_error` (the FastLift `as import('./t').Seg[]` shape: `has_error == true`, pinning that the fifth file stays excluded rather than silently misparsed). E2e: a `.tsx` fixture with the ampersand and a `console.log` produces the `leftover-debug` finding and no warning.
+- [ ] Step 1: failing tests. Unit: `a_bare_ampersand_in_jsx_text_is_tolerated` (`<Label>BODY & NUTRITION</Label>` inside a component: `has_error == false`); `a_broken_attribute_is_still_an_error` (`<Label a=>x</Label>`: `has_error == true`); `an_import_type_with_an_array_suffix_is_still_an_error` (the FastLift `as import('./t').Seg[]` shape: `has_error == true`, pinning that the fifth file stays excluded rather than silently misparsed). E2e: a `.tsx` fixture with the ampersand and a `console.log` produces the `leftover-debug` finding and no warning.
 - [ ] Step 2: run, see them fail.
 - [ ] Step 3: implement; walk with a cursor over every node (`tree.rs` may already have a `walk` helper; reuse it).
 - [ ] Step 4: green; fmt; commit `engine: a bare ampersand in JSX text is a tolerated parse error`.

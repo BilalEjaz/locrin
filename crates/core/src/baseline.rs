@@ -85,11 +85,12 @@ impl Baseline {
 
     /// Accepts a finding into the baseline, ignoring one that is already there.
     ///
-    /// A finding id identifies a finding *class* within a symbol rather than a
-    /// single occurrence (see the `make_id` doc in `finding`), so accepting one
-    /// id suppresses every finding of that class inside that symbol. That is by
-    /// design: signing off "this function may keep its debug logging" should not
-    /// have to be repeated line by line.
+    /// A finding id identifies whatever its rule anchored on (see the `make_id`
+    /// doc in `finding`), so what one acceptance covers is that rule's decision.
+    /// A rule that reports a line gives every occurrence its own id, so signing
+    /// off one debug line leaves the next one in the same function reported; a
+    /// rule that anchors on a class, such as a secret's value, is accepted once
+    /// for every place it appears.
     pub fn accept(&mut self, f: &Finding, reason: &str, author: &str) {
         if self.contains(&f.id) {
             return;
