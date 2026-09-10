@@ -614,6 +614,7 @@ dependencies = [
  "locrin-rules",
  "rayon",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
 ]

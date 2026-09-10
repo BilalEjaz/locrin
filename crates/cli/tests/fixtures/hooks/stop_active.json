@@ -1,0 +1,9 @@
+{
+  "session_id": "7d6e5f4a-3b2c-4d1e-9f8a-6b5c4d3e2f10",
+  "transcript_path": "/home/dev/.claude/projects/repo/7d6e5f4a.jsonl",
+  "cwd": "/home/dev/repo",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": true,
+  "last_assistant_message": "Removed the debug call I left in src/clean.ts."
+}

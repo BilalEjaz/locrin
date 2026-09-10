@@ -1,4 +1,5 @@
-//! Spec section 3.4 targets. Run: cargo test --release -p locrin-cli -- --ignored --nocapture
+//! Spec section 3.4 targets, and spec 5.2's hook budget. Run:
+//! cargo test --release -p locrin-cli -- --ignored --nocapture
 //! Requires the founder's FastLift checkout at <home>/fasting-app (override with LOCRIN_BENCH_REPO).
 //!
 //! Every run here passes `--offline`. These are engine targets, and since
@@ -9,8 +10,9 @@
 //! rule's own cost is a separate target (under 50 ms warm) measured against its
 //! snapshot, which is what every run after the first one uses anyway.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -19,7 +21,7 @@ use assert_cmd::prelude::*;
 /// These tests measure wall-clock time, so they must never overlap: the libtest
 /// harness runs tests on several threads by default and the contention alone
 /// inflates a measurement by an order of magnitude. Every benchmark holds this
-/// lock for its whole body, which makes the three run one at a time whatever
+/// lock for its whole body, which makes them run one at a time whatever
 /// the harness does. Poisoning is ignored: a failing benchmark must not turn
 /// the others into lock errors.
 static BENCH_LOCK: Mutex<()> = Mutex::new(());
@@ -92,6 +94,74 @@ fn startup_under_50ms() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(ms < 50, "startup took {ms} ms");
+}
+
+/// Spec 5.2: the PostToolUse hook on a warm index, end to end, under 300 ms.
+///
+/// The single-file check above measures the same scope through `check`, and this
+/// one measures what an agent actually waits for: process start, the payload
+/// read off stdin, the watchdog thread, the check, and the JSON on stdout. The
+/// gap between the two is the hook's own overhead, which is the number spec
+/// 5.2's budget is really about.
+#[test]
+#[ignore]
+fn post_edit_hook_under_300ms() {
+    let _serial = serial();
+    let cache = tempfile::tempdir().unwrap();
+    locrin(cache.path()).args(["scan", "--offline"]).assert().success();
+    let file = repo().join("app/_layout.tsx");
+    // The hook is a no-op for a path that is not there, which would measure the
+    // no-op rather than a check and still exit 0.
+    assert!(file.is_file(), "{} is not a file, so the hook would no-op", file.display());
+    // The recorded payload with the two paths that name a real place rewritten
+    // to the bench checkout, through `serde_json` so a Windows path keeps its
+    // backslashes escaped.
+    let raw = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hooks/post_edit_write.json"),
+    )
+    .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    payload["cwd"] = serde_json::Value::String(repo().display().to_string());
+    payload["tool_input"]["file_path"] = serde_json::Value::String(file.display().to_string());
+    let payload = payload.to_string();
+    // No `--root`: `locrin` above already runs in the bench checkout, which is
+    // where Claude Code runs a hook from too.
+    let t = Instant::now();
+    let mut child = locrin(cache.path())
+        .args(["hook", "post-edit"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(payload.as_bytes()).unwrap();
+    // The hook reads stdin to end of file, so it cannot start until this closes.
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let ms = t.elapsed().as_millis();
+    println!("post-edit hook: {ms} ms");
+    // A hook always exits 0, so anything else is the binary failing to start
+    // rather than a verdict, and the measurement is not one.
+    assert!(
+        out.status.success(),
+        "the hook exited with {}, so the {ms} ms is not a real measurement: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Exit 0 is every outcome the hook has, including the ones that checked
+    // nothing: a timeout, a crash inside the engine and an engine error all
+    // print a `systemMessage` saying so and return in milliseconds, which would
+    // fake a fast benchmark the way exit 2 would fake a fast `check`. A clean
+    // file prints nothing, and a block or an advisory prints a different key.
+    // The output is already collected, so reading it costs the measurement
+    // nothing.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("systemMessage"),
+        "the hook passed without checking, so the {ms} ms is not a real measurement: {stdout}"
+    );
+    assert!(ms < 300, "post-edit hook took {ms} ms");
 }
 
 /// Spec 3.4: a warm diff check on a typical pull request (30 files) under 1 s.

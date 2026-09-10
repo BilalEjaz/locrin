@@ -1,5 +1,14 @@
 mod git;
+mod hook;
+mod init;
 mod run;
+
+/// `LOCRIN_CACHE_DIR` is process-wide, so every test in this binary that points
+/// it somewhere of its own takes a turn here rather than racing the others.
+/// Poisoning is ignored: a panicking test has already failed and must not take
+/// the rest of the binary's tests down with it.
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -53,6 +62,16 @@ enum Cmd {
         #[arg(long)]
         offline: bool,
     },
+    /// Wire this repository up: config, agent hooks, MCP server, git hook, first scan and baseline
+    ///
+    /// Safe to run again: nothing locrin did not write is ever overwritten, and a
+    /// second run reports every file unchanged.
+    Init {
+        /// Never touch the network; use the cached advisory snapshot or skip
+        /// vulnerable-dependency with a warning
+        #[arg(long)]
+        offline: bool,
+    },
     /// Index the repository and warm the findings cache without printing a verdict
     Scan {
         /// Never touch the network; use the cached advisory snapshot or skip
@@ -64,6 +83,11 @@ enum Cmd {
     Baseline {
         #[command(subcommand)]
         cmd: BaselineCmd,
+    },
+    /// Run as an agent hook, reading the event as JSON on stdin
+    Hook {
+        #[command(subcommand)]
+        cmd: HookCmd,
     },
 }
 
@@ -86,6 +110,31 @@ enum BaselineCmd {
         #[arg(long)]
         offline: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// Check the file Claude Code just wrote and answer the agent
+    ///
+    /// The PostToolUse hook. It reads the tool event as JSON on stdin and
+    /// answers with one JSON object on stdout. There is no --offline flag: a
+    /// hook runs on every edit, so it is always offline.
+    PostEdit,
+    /// Check the working tree before Claude Code stops and send the agent back
+    /// while blocking findings remain
+    ///
+    /// The Stop hook. It checks everything that differs from HEAD, not the one
+    /// file an edit touched, and it sends the agent back at most three times per
+    /// session. Offline for the same reason as post-edit.
+    Stop,
+    /// Check the files staged for the next commit and block the commit when one
+    /// of them blocks
+    ///
+    /// The git pre-commit hook. It reads nothing on stdin, prints the same
+    /// verdict `locrin check` prints, and its exit code is the verdict's: 0 to
+    /// let the commit through, 1 to stop it, 2 when the engine itself failed.
+    /// Offline for the same reason as the other two.
+    PreCommit,
 }
 
 fn real_main() -> anyhow::Result<i32> {
@@ -120,6 +169,29 @@ fn real_main() -> anyhow::Result<i32> {
             }
             Ok(verdict.exit_code())
         }
+        Cmd::Init { offline } => {
+            // Progress goes to stderr: it names no file the command touched, and
+            // stdout is the list of files it did.
+            //
+            // The list is printed before the result is unwrapped, so a run that
+            // fails after its first write still says what is on disk. That is the
+            // moment the list is worth most: nothing else in the repository
+            // names those files as locrin's.
+            let mut touched = Vec::new();
+            let result = init::run(&root, offline, &mut touched, &mut |line| eprintln!("{line}"));
+            for (path, touch) in &touched {
+                match touch {
+                    init::Touch::Wrote => println!("wrote {path}"),
+                    init::Touch::Updated => println!("updated {path}"),
+                    init::Touch::Unchanged => println!("unchanged {path}"),
+                    init::Touch::Skipped(why) => println!("skipped {path}: {why}"),
+                }
+            }
+            if let Some(n) = result?.baseline_entries {
+                println!("baseline written with {n} finding(s)");
+            }
+            Ok(0)
+        }
         Cmd::Scan { offline } => {
             let (files, changed) = run::scan(&root, offline)?;
             println!("indexed {files} file(s), {changed} changed");
@@ -139,6 +211,24 @@ fn real_main() -> anyhow::Result<i32> {
                 Ok(2)
             }
         }
+        Cmd::Hook { cmd: HookCmd::PostEdit } => {
+            // A payload the hook could not read has already been reported on
+            // stderr. The hook still exits 0 with an empty stdout, because the
+            // alternative is stalling the agent over a message it did not send.
+            let Some(input) = hook::read_input() else { return Ok(0) };
+            // Claude Code runs a hook in the project directory, so the current
+            // directory is the root unless --root says otherwise.
+            Ok(hook::guarded(|| hook::post_edit(&root, input)))
+        }
+        Cmd::Hook { cmd: HookCmd::Stop } => {
+            let Some(input) = hook::read_input() else { return Ok(0) };
+            Ok(hook::guarded(|| hook::stop(&root, input)))
+        }
+        // The only hook whose failure is not swallowed: an error here reaches
+        // `main` and exits 2, so a broken engine stops the commit instead of
+        // waving it through as a pass. The operator who disagrees has
+        // `git commit --no-verify`.
+        Cmd::Hook { cmd: HookCmd::PreCommit } => hook::pre_commit(&root),
     }
 }
 

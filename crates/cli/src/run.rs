@@ -843,11 +843,10 @@ pub fn baseline_accept(root: &Path, id: &str, reason: &str, offline: bool) -> an
 mod tests {
     use super::*;
 
-    /// `LOCRIN_CACHE_DIR` is process-wide and every test here sets it, so the
-    /// tests in this module take turns rather than racing over it. Poisoning is
-    /// ignored: a panicking test has already failed and must not take the rest
-    /// of the module down with it.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // The tests here set `LOCRIN_CACHE_DIR`, which is process-wide, so they
+    // take turns on the lock the whole binary's tests share rather than one of
+    // their own: a lock per module would not stop this module racing another.
+    use crate::ENV_LOCK;
 
     /// The rules that answer with a change rather than a state need to know what
     /// the file used to say, and for a `--changed` run the index is where that
