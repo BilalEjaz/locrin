@@ -47,6 +47,13 @@
 //!   absent from the object or written `false`. (The task brief said "lacking
 //!   `httpOnly: true`", which read literally would report that idiom; the
 //!   deviation is recorded in the plan.)
+//! - **A handler with no name is anchored on its route, and failing that on its
+//!   line.** Most Express handlers are anonymous, so most findings here have no
+//!   enclosing symbol, and the general fallback is the text of the line: two
+//!   handlers writing the same call would share one finding id. The route the
+//!   handler was registered on (`GET /login`) is the name such a file does
+//!   have. A cookie set outside any registration falls back to the line, which
+//!   an edit above it moves. See [`handler_anchor`].
 //! - **The default is not read.** A framework or wrapper that sets the flags
 //!   for every cookie makes each call site quiet about them, and the rule
 //!   reports the call site. `locrin:allow` is the answer where that is true.
@@ -56,8 +63,8 @@ use locrin_core::parse::ParsedFile;
 use locrin_core::tree::{line, text};
 use tree_sitter::Node;
 
-use super::{args, imports_express, property, string_value, unwrap, walk};
-use crate::{anchor_for, clean_files, finding_at, line_span, Rule, RuleContext, Scope};
+use super::{args, enclosing_registration, imports_express, property, string_value, unwrap, walk};
+use crate::{clean_files, finding_at, line_span, Rule, RuleContext, Scope};
 
 pub struct ExpressCookieInsecure;
 
@@ -127,6 +134,25 @@ fn cookie_name(node: Node, src: &str) -> String {
     string_value(node, src).unwrap_or_else(|| text(node, src).split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// The half of the anchor that says *where* the cookie is set, in the strongest
+/// terms the file offers.
+///
+/// The enclosing symbol first, as everywhere else. An Express handler is usually
+/// anonymous, though, and the general fallback is the text of the line the
+/// finding sits on: two anonymous handlers writing the same call then share one
+/// finding id, so accepting one into the baseline accepts the other and fixing
+/// one leaves a finding whose id has already been retired. The registration the
+/// handler was passed to is the name such a file does have, and where there is
+/// not even that, the line the call sits on separates them. A line number is a
+/// weaker anchor than a name, because an edit above the call moves it; it is
+/// the last resort and not the first.
+fn handler_anchor(file: &ParsedFile, call: Node, at: u32) -> String {
+    if let Some(symbol) = locrin_core::symbols::enclosing_symbol(file, at) {
+        return symbol;
+    }
+    enclosing_registration(call, &file.source).unwrap_or_else(|| format!("line {at}"))
+}
+
 fn scan(rule: &ExpressCookieInsecure, file: &ParsedFile) -> Vec<Finding> {
     let src = &file.source;
     let mut out: Vec<Finding> = Vec::new();
@@ -143,8 +169,9 @@ fn scan(rule: &ExpressCookieInsecure, file: &ParsedFile) -> Vec<Finding> {
             // what keeps `res.cookie("session", ...)` in `login` and the same
             // call in `refresh` apart: without it a file setting one cookie in
             // two handlers gives them one id between them, and suppressing one
-            // suppresses both.
-            let anchor = format!("cookie\x1f{}\x1f{name}\x1f{flag}", anchor_for(file, at));
+            // suppresses both. See [`handler_anchor`] for the two answers an
+            // anonymous handler gets instead of a symbol.
+            let anchor = format!("cookie\x1f{}\x1f{name}\x1f{flag}", handler_anchor(file, n, at));
             let mut f = finding_at(
                 rule,
                 &file.rel,
@@ -288,5 +315,44 @@ mod tests {
         assert_eq!(out.len(), 4, "two cookies, two flags each");
         let ids: std::collections::HashSet<&str> = out.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids.len(), 4, "four decisions, four ids");
+    }
+
+    /// An Express handler is usually anonymous, and the anchor's fallback when a
+    /// file names no enclosing symbol is the line's own text. Two anonymous
+    /// handlers on different routes setting the same cookie the same way
+    /// therefore shared one id between them, so accepting one into the baseline
+    /// accepted the other. The registration is the name the file does have.
+    #[test]
+    fn two_anonymous_handlers_setting_the_same_cookie_get_two_ids() {
+        let file = parsed(concat!(
+            "app.get(\"/login\", (req, res) => {\n",
+            "  res.cookie(\"session\", token);\n",
+            "});\n",
+            "app.post(\"/refresh\", (req, res) => {\n",
+            "  res.cookie(\"session\", token);\n",
+            "});\n",
+        ));
+        let out = scan(&ExpressCookieInsecure, &file);
+        assert_eq!(out.len(), 4, "two cookies, two flags each");
+        let ids: std::collections::HashSet<&str> = out.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids.len(), 4, "four decisions, four ids");
+    }
+
+    /// And where there is not even a registration to name, the call's line is
+    /// the last thing that keeps two of them apart.
+    #[test]
+    fn two_anonymous_calls_outside_any_registration_still_get_two_ids() {
+        let file = parsed(concat!(
+            "queue.forEach(() => {\n",
+            "  res.cookie(\"session\", token);\n",
+            "});\n",
+            "later(() => {\n",
+            "  res.cookie(\"session\", token);\n",
+            "});\n",
+        ));
+        let out = scan(&ExpressCookieInsecure, &file);
+        assert_eq!(out.len(), 4);
+        let ids: std::collections::HashSet<&str> = out.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids.len(), 4);
     }
 }

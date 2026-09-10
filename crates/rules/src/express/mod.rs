@@ -186,6 +186,32 @@ pub(crate) fn registrations(file: &ParsedFile) -> Vec<Registration<'_>> {
     out
 }
 
+/// The route registration a node sits inside, spelled `GET /admin/users`, or
+/// `None` when there is none or when the nearest one registers no literal path.
+///
+/// The climb stops at the first registration whose *arguments* hold the node,
+/// which is the handler it was passed to. A registration reached any other way
+/// is not one this node is inside: the receiver of `app.get(...)` is `app`, not
+/// a handler.
+///
+/// This is a name for an anonymous handler, which is what most handlers are. A
+/// finding inside one has no enclosing symbol to anchor on, and the fallback
+/// (the text of the line the finding sits on) is the same text in every handler
+/// that writes the same call, so two of them would share one finding id.
+pub(crate) fn enclosing_registration(node: Node, src: &str) -> Option<String> {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if parent.child_by_field_name("arguments").is_some_and(|a| a.id() == current.id()) {
+            if let Some(method) = registration_method(parent, src) {
+                let path = args(parent).first().and_then(|a| string_value(*a, src))?;
+                return Some(format!("{} {path}", method.to_uppercase()));
+            }
+        }
+        current = parent;
+    }
+    None
+}
+
 /// Whether an argument names one of the repository's auth middlewares.
 ///
 /// Four shapes, and the compositions of them: the bare identifier
