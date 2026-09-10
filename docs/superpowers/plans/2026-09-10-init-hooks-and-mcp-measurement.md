@@ -465,9 +465,12 @@ the plan.
 Branch `engine/cleanup`, HEAD `d7f423e` ("engine: version 0.2.0, finding ids
 changed"), 10 September 2026. Plan
 `docs/superpowers/plans/2026-09-10-dogfood-cleanup.md`, Task 5. The first real
-`locrin init` on a repository nobody wrote the engine against is recorded in
-Part A above; this section is what that run turned up, what was done about it,
-and the evidence that the fixes hold on the same repository.
+`locrin init` on a repository nobody wrote the engine against, the FastLift run
+that reported 778 findings and wrote 756 baseline entries, is recorded in
+`docs/superpowers/plans/2026-09-10-dogfood-cleanup.md` rather than here; Part A's
+own dogfood run above is a different, five-file one on `fastlift-admin`. This
+section is what the FastLift run turned up, what was done about it, and the
+evidence that the fixes hold on the same repository.
 
 ### What the dogfood showed, and the fix
 
@@ -537,10 +540,10 @@ re-measurement Part B asked for.
 | warm 30-file check | under 1000 ms | 347 ms | 337 ms | 349 ms | 328 ms | PASS |
 | startup (`--help`) | under 50 ms | 21 ms | 19 ms | 20 ms | 19 ms | PASS |
 
-Four gates pass with more margin than any earlier measurement in this document,
-including the two the plan said to watch. Task 1 adds a symbol extract per
-finding and the warm single-file check is the gate that pays for it: 184 to 195
-ms against Part B's post-fix 194 to 210 ms, so the extract does not show. The
+Four gates pass with more margin than Part B's measurements gave, including the
+two the plan said to watch. Task 1 adds a symbol extract per finding and the
+warm single-file check is the gate that pays for it: 184 to 195 ms against Part
+B's post-fix 194 to 210 ms, so the extract does not show. The
 post-edit hook is 181 to 189 ms and the hook's own overhead over the warm check
 on the same file is -14, 5 and -2 ms on the counted runs, which is noise in both
 directions, the same reading Part A and Part B gave.
@@ -591,8 +594,9 @@ recorded here and reported to the controller.
 `<home>/fasting-app`, nothing written into it. `locrin-baseline.json` was
 moved to a scratch directory before the run and moved back after, so every
 finding the repository has is reported rather than filtered, and
-`git status --short` was taken before and after: the two listings are identical,
-byte for byte, including the untracked `locrin-baseline.json` and `locrin.toml`
+`git status --short` was taken before and after and both listings were saved:
+`diff` of the two saved files prints nothing, so they are identical byte for
+byte, including the untracked `locrin-baseline.json` and `locrin.toml`
 that the dogfood `init` left there. The baseline came back at the same 177789
 bytes it went out as. `locrin.toml` in that checkout is the `init` template with
 every setting still commented out, so this is the engine on its defaults.
@@ -662,3 +666,11 @@ ledger. The same bullets are appended to the plan.
   down to the machine's state at the time. The gate is missed either way and it
   is missed by `main` too, so it is recorded as a concern and handed to the
   controller.
+
+- **Task 5, the FastLift tracker entry D9 line was written by the controller, not
+  by this task.** The plan's Global Constraints ask for a line in
+  `<home>/fasting-app/.planning/ROADMAP-SMART-2026-08-25.md`; the
+  controller's read-only amendment forbade this task writing anything into that
+  checkout beyond moving the baseline out and back, so the controller wrote the
+  tracker line itself. The constraint is met, by the controller's hand rather
+  than this task's.

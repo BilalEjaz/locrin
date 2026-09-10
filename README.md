@@ -23,10 +23,12 @@ shipped yet.
 
 One construct the parser cannot read excludes its file. The grammar has no rule
 for an import type carrying an array suffix, `x as import('./t').Seg[]`
-(tree-sitter-typescript issue 322, open), and the error swallows the rest of the
-file, so the file is excluded from every rule with one `warning: parse errors`
-line on stderr. Write the type as `Array<import('./t').Seg>`, or import it by
-name and use `Seg[]`, and the file parses and is checked like any other. Two
+(tree-sitter-typescript issue 322, open), and the parser recovers by inventing a
+MISSING identifier, a token that is not in the file at all. A MISSING node is
+never tolerated, because the engine cannot read a tree the parser made up, so
+the file is excluded from every rule with one `warning: parse errors` line on
+stderr. Write the type as `Array<import('./t').Seg>`, or import it by name and
+use `Seg[]`, and the file parses and is checked like any other. Two
 things that look like the same problem are not: a bare `&` in JSX text, as in
 `BODY & NUTRITION`, is tolerated, because the scanner's refusal leaves the rest
 of the tree intact and the only thing lost is the words after the `&` in that

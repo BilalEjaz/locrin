@@ -67,6 +67,14 @@
   is missed by `main` too, so it is recorded as a concern and handed to the
   controller.
 
+- **Task 5, the FastLift tracker entry D9 line was written by the controller, not
+  by this task.** The Global Constraint above asks for a line in
+  `<home>/fasting-app/.planning/ROADMAP-SMART-2026-08-25.md`; the
+  controller's read-only amendment forbade this task writing anything into that
+  checkout beyond moving the baseline out and back, so the controller wrote the
+  tracker line itself. The constraint is met, by the controller's hand rather
+  than this task's.
+
 ## File structure
 
 - `crates/rules/src/lib.rs` (modify): `anchor_for` includes the line's trimmed text and its ordinal within the enclosing symbol.
