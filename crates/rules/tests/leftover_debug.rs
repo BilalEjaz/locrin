@@ -65,6 +65,26 @@ fn a_nul_in_a_template_literal_does_not_exclude_the_file() {
     assert_eq!(out[0].evidence, "console.log(\"key\", k);");
 }
 
+/// The JSX-text scanner refuses a bare `&` (tree-sitter-javascript #366), so
+/// `BODY & NUTRITION` in a heading used to carry a parse error and exempt the
+/// whole screen from every rule. The refusal leaves the rest of the tree
+/// intact, so the debug line above it is a finding.
+#[test]
+fn a_bare_ampersand_in_jsx_text_does_not_exclude_the_file() {
+    let root = fixture("leftover_debug", "jsx_text_amp");
+
+    let files = parse_dir(&root);
+    let file = files.iter().find(|f| f.rel == "Label.tsx").expect("the fixture file is walked and read");
+    assert!(file.source.contains(" & "), "the fixture must hold the bare ampersand");
+    assert!(!file.has_error, "no blocking parse errors, so no `excluded from rules` warning");
+    // The text is kept as written; only the verdict on the refusal changed.
+    assert_eq!(line_text(file, 3), "return <Text>BODY & NUTRITION</Text>;");
+
+    let out = run_on(Box::new(LeftoverDebug::default()), &root, &Config::default());
+    assert_eq!(hits(&out), vec![("Label.tsx".to_string(), 2)]);
+    assert_eq!(out[0].evidence, "console.log(\"rendering\", id);");
+}
+
 #[test]
 fn ignores_error_warn_and_allowed_paths() {
     let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "clean"), &Config::default());

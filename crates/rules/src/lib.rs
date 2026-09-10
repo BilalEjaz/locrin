@@ -125,7 +125,8 @@ pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
 }
 
 /// The files a file rule is allowed to look at: every parsed file whose tree came
-/// back without a syntax error. Rules iterate this instead of `ctx.files`, so a
+/// back without a syntax error the engine cannot see past (see
+/// `parse::has_blocking_error`). Rules iterate this instead of `ctx.files`, so a
 /// file that failed to parse is exempt from every rule rather than from whichever
 /// rules happened to check `has_error`.
 pub fn clean_files<'a>(ctx: &'a RuleContext) -> impl Iterator<Item = &'a ParsedFile> {
