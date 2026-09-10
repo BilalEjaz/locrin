@@ -16,6 +16,7 @@
 //! invalidates the snapshot, which is exactly when the answer can change, and a
 //! snapshot from today is reused without a request even when the run is online.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -51,7 +52,8 @@ pub struct Advisory {
     /// `CRITICAL`, `HIGH`, `MODERATE`, `LOW`, or `UNKNOWN` when the advisory does
     /// not rate itself.
     pub severity: String,
-    /// The first version the advisory says is fixed, when it names one.
+    /// The version that fixes the installed one: the `fixed` event of the
+    /// affected range the installed version falls in, when that range names one.
     pub fixed: Option<String>,
     pub aliases: Vec<String>,
 }
@@ -150,7 +152,7 @@ pub fn check(
     for (package, ids) in lock.packages.iter().zip(per_package) {
         for id in ids {
             let advisory = match details.get(&id) {
-                Some(detail) => advisory_from(&id, detail, &package.name),
+                Some(detail) => advisory_from(&id, detail, &package.name, &package.version),
                 None => Advisory {
                     id: id.clone(),
                     summary: String::new(),
@@ -259,7 +261,7 @@ fn is_safe_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn advisory_from(id: &str, detail: &Value, package: &str) -> Advisory {
+fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advisory {
     let severity = detail
         .get("database_specific")
         .and_then(|d| d.get("severity"))
@@ -271,7 +273,7 @@ fn advisory_from(id: &str, detail: &Value, package: &str) -> Advisory {
         id: id.to_string(),
         summary: detail.get("summary").and_then(Value::as_str).unwrap_or_default().to_string(),
         severity,
-        fixed: first_fixed(detail, package),
+        fixed: first_fixed(detail, package, version),
         aliases: detail
             .get("aliases")
             .and_then(Value::as_array)
@@ -280,17 +282,34 @@ fn advisory_from(id: &str, detail: &Value, package: &str) -> Advisory {
     }
 }
 
-/// The first version the advisory declares fixed for this package.
+/// The version the advisory says fixes the installed version of this package.
 ///
 /// An advisory can carry ranges for several ecosystems and several packages, so
 /// the entry has to be matched by name and by ecosystem: the same name lives in
 /// npm and in Maven and in PyPI, with version numbers that have nothing to do
 /// with each other, and everything this engine reads came out of an npm
-/// lockfile. Within the matching entry the first `fixed` event is the version to
-/// upgrade to. An entry that does not say which ecosystem it is for is not read
-/// as npm; a finding then carries no fix, which is a weaker sentence, not a
-/// wrong version.
-fn first_fixed(detail: &Value, package: &str) -> Option<String> {
+/// lockfile. An entry that does not say which ecosystem it is for is not read as
+/// npm; a finding then carries no fix, which is a weaker sentence, not a wrong
+/// version.
+///
+/// Within the matching entry the range has to be the one the installed version
+/// falls in, and that is the whole point of this function. A package that
+/// maintains more than one branch gets one range per branch, each with its own
+/// `fixed`, and the document lists them oldest first: `fast-uri` carries
+/// `[{introduced: 0, fixed: 2.4.5}, {introduced: 3.0.0, fixed: 3.1.6}]`, so
+/// reading the first `fixed` in the document told a repository on `3.1.5` to
+/// install `2.4.5`. A security finding that names an older release is a wrong
+/// instruction, whatever it is right about, so the range is chosen by the
+/// version rather than by its position.
+///
+/// Every range is half open, `introduced <= v < fixed`, which is what OSV means
+/// by the two events. A range whose `introduced` the version is at or past with
+/// no `fixed` after it (or with a `last_affected` the version is at or before)
+/// is the range that contains it and it names no fix: the answer is `None`, and
+/// the advisory reads "No fixed version published". `None` is also the answer
+/// when no range contains the version at all, which happens when the batch
+/// endpoint and the detail document disagree about what is affected.
+fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
     for affected in detail.get("affected").and_then(Value::as_array).into_iter().flatten() {
         let named = affected.get("package");
         let name = named.and_then(|p| p.get("name")).and_then(Value::as_str);
@@ -299,14 +318,115 @@ fn first_fixed(detail: &Value, package: &str) -> Option<String> {
             continue;
         }
         for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
-            for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
-                if let Some(fixed) = event.get("fixed").and_then(Value::as_str) {
-                    return Some(fixed.to_string());
-                }
+            match containing_range(range, version) {
+                // The range holding the installed version names the upgrade.
+                Some(Some(fixed)) => return Some(fixed),
+                // It holds the version and names no upgrade. There is no
+                // second opinion to look for: this is the branch the
+                // repository is on.
+                Some(None) => return None,
+                None => continue,
             }
         }
     }
     None
+}
+
+/// Whether a SEMVER range contains `version`, and the `fixed` it names if it
+/// does: `Some(Some(fixed))` for a contained version with a fix,
+/// `Some(None)` for a contained version with none, `None` for a range that does
+/// not contain it.
+///
+/// Only `SEMVER` ranges are read. A `GIT` range names commits, and an
+/// `ECOSYSTEM` range on npm carries the same version strings but is not
+/// guaranteed to be ordered by them, so neither is a range this comparison can
+/// answer.
+fn containing_range(range: &Value, version: &str) -> Option<Option<String>> {
+    if range.get("type").and_then(Value::as_str) != Some("SEMVER") {
+        return None;
+    }
+    let mut introduced: Option<&str> = None;
+    for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(at) = event.get("introduced").and_then(Value::as_str) {
+            introduced = Some(at);
+            continue;
+        }
+        // A half-open interval closed by its fix: `introduced <= v < fixed`.
+        if let Some(fixed) = event.get("fixed").and_then(Value::as_str) {
+            let opened = introduced.take();
+            if opened.is_some_and(|at| version_cmp(version, at) != Ordering::Less)
+                && version_cmp(version, fixed) == Ordering::Less
+            {
+                return Some(Some(fixed.to_string()));
+            }
+            continue;
+        }
+        // An interval closed by its last affected release instead, which is
+        // what an advisory writes when no fix has shipped: `introduced <= v <=
+        // last_affected`, and no version to upgrade to.
+        if let Some(last) = event.get("last_affected").and_then(Value::as_str) {
+            let opened = introduced.take();
+            if opened.is_some_and(|at| version_cmp(version, at) != Ordering::Less)
+                && version_cmp(version, last) != Ordering::Greater
+            {
+                return Some(None);
+            }
+        }
+    }
+    // An `introduced` with nothing closing it runs to the end of time.
+    match introduced {
+        Some(at) if version_cmp(version, at) != Ordering::Less => Some(None),
+        _ => None,
+    }
+}
+
+/// Orders two npm version strings.
+///
+/// This is the smallest comparison the range check needs and not a semver
+/// implementation: `major.minor.patch` compared as numbers, a missing part read
+/// as zero (`introduced: "0"` is how OSV spells the beginning of time), build
+/// metadata dropped, and a prerelease of a version sorted before that version so
+/// `3.1.6-rc.1` is inside a range fixed at `3.1.6`. Prereleases of the same
+/// version are not ordered against each other, because no range boundary this
+/// engine reads has ever needed it. Anything that does not parse falls back to a
+/// string comparison, which is arbitrary but total: a range with an unreadable
+/// boundary is not allowed to panic a run.
+fn version_cmp(a: &str, b: &str) -> Ordering {
+    match (parse_version(a), parse_version(b)) {
+        (Some((a_parts, a_pre)), Some((b_parts, b_pre))) => a_parts.cmp(&b_parts).then_with(|| match (a_pre, b_pre) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => Ordering::Equal,
+        }),
+        _ => a.cmp(b),
+    }
+}
+
+/// A version as its three numbers and whether it carries a prerelease tag, or
+/// `None` when it is not three numbers at all.
+fn parse_version(v: &str) -> Option<([u64; 3], bool)> {
+    let v = v.trim();
+    let v = v.strip_prefix('v').unwrap_or(v);
+    // Build metadata never orders anything.
+    let v = v.split('+').next().unwrap_or(v);
+    let (core, pre) = match v.split_once('-') {
+        Some((core, rest)) => (core, !rest.is_empty()),
+        None => (v, false),
+    };
+    let mut parts = core.split('.');
+    let mut numbers = [0u64; 3];
+    for slot in numbers.iter_mut() {
+        match parts.next() {
+            Some(part) => *slot = part.parse().ok()?,
+            // A boundary written `3` or `3.1` means `3.0.0` and `3.1.0`.
+            None => break,
+        }
+    }
+    // A fourth part is not a version this comparison understands.
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((numbers, pre))
 }
 
 fn store_batch(ix: &Index, lock_hash: &str, now: u64, json: &str) -> anyhow::Result<()> {
@@ -541,10 +661,10 @@ mod tests {
         let detail: Value = serde_json::from_str(DETAIL).unwrap();
         let bare = json!({"id": "GHSA-x", "affected": []});
 
-        assert_eq!(advisory_from("GHSA-x", &bare, "lodash").severity, "UNKNOWN");
-        assert_eq!(advisory_from("GHSA-x", &bare, "lodash").fixed, None);
-        assert_eq!(advisory_from(VULN_ID, &detail, "left-pad").fixed.as_deref(), Some("9.9.9"));
-        assert_eq!(advisory_from(VULN_ID, &detail, "not-in-the-advisory").fixed, None);
+        assert_eq!(advisory_from("GHSA-x", &bare, "lodash", "4.17.19").severity, "UNKNOWN");
+        assert_eq!(advisory_from("GHSA-x", &bare, "lodash", "4.17.19").fixed, None);
+        assert_eq!(advisory_from(VULN_ID, &detail, "left-pad", "1.3.0").fixed.as_deref(), Some("9.9.9"));
+        assert_eq!(advisory_from(VULN_ID, &detail, "not-in-the-advisory", "1.0.0").fixed, None);
     }
 
     /// An advisory can carry the same name in several ecosystems, and only the
@@ -565,7 +685,7 @@ mod tests {
             }
           ]
         });
-        assert_eq!(advisory_from("GHSA-y", &detail, "lodash").fixed.as_deref(), Some("4.17.21"));
+        assert_eq!(advisory_from("GHSA-y", &detail, "lodash", "4.17.19").fixed.as_deref(), Some("4.17.21"));
 
         let unstated = json!({
           "id": "GHSA-z",
@@ -575,7 +695,7 @@ mod tests {
           }]
         });
         assert_eq!(
-            advisory_from("GHSA-z", &unstated, "lodash").fixed,
+            advisory_from("GHSA-z", &unstated, "lodash", "4.17.19").fixed,
             None,
             "an entry that does not say it is npm is not read as one"
         );
@@ -621,5 +741,119 @@ mod tests {
         assert_eq!(age_in_days(1_000 * DAY, (1_002 * DAY) as i64), 0);
         assert_eq!(age_in_days(1_000 * DAY, (997 * DAY) as i64), 3);
         assert_eq!(age_in_days(1_000 * DAY, -5), 1_000);
+    }
+
+    /// An advisory for a package that maintains two branches, which is the
+    /// shape the whole range check exists for.
+    fn two_branches(package: &str, first: &str, second: &str) -> Value {
+        serde_json::from_str(&format!(
+            r#"{{
+              "id": "GHSA-test",
+              "affected": [
+                {{
+                  "package": {{"name": "{package}", "ecosystem": "npm"}},
+                  "ranges": [
+                    {{"type": "SEMVER", "events": [{{"introduced": "0"}}, {{"fixed": "{first}"}}]}},
+                    {{"type": "SEMVER", "events": [{{"introduced": "3.0.0"}}, {{"fixed": "{second}"}}]}}
+                  ]
+                }}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    /// The five downgrades Task 16 reproduced on `fasting-app`. Every one of
+    /// them was the first `fixed` in the document rather than the fix for the
+    /// branch the repository is on.
+    #[test]
+    fn the_fix_comes_from_the_range_the_installed_version_is_in() {
+        let uri = two_branches("fast-uri", "2.4.5", "3.1.6");
+        assert_eq!(first_fixed(&uri, "fast-uri", "3.1.5").as_deref(), Some("3.1.6"), "not the 2.x fix");
+        assert_eq!(first_fixed(&uri, "fast-uri", "2.4.4").as_deref(), Some("2.4.5"), "the 2.x branch still answers");
+
+        // `@xmldom/xmldom` carries three branches and the report saw it get all
+        // three wrong in both directions.
+        let xmldom: Value = serde_json::from_str(
+            r#"{
+              "affected": [
+                {
+                  "package": {"name": "@xmldom/xmldom", "ecosystem": "npm"},
+                  "ranges": [
+                    {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.7.14"}]},
+                    {"type": "SEMVER", "events": [{"introduced": "0.8.0"}, {"fixed": "0.8.14"}]},
+                    {"type": "SEMVER", "events": [{"introduced": "0.9.0"}, {"fixed": "0.9.12"}]}
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(first_fixed(&xmldom, "@xmldom/xmldom", "0.9.10").as_deref(), Some("0.9.12"));
+        assert_eq!(first_fixed(&xmldom, "@xmldom/xmldom", "0.8.13").as_deref(), Some("0.8.14"));
+        assert_eq!(first_fixed(&xmldom, "@xmldom/xmldom", "0.7.13").as_deref(), Some("0.7.14"));
+
+        let yaml = two_branches("js-yaml", "3.15.2", "4.3.2");
+        assert_eq!(first_fixed(&yaml, "js-yaml", "3.15.1").as_deref(), Some("3.15.2"), "not the 4.x fix");
+    }
+
+    /// A version outside every range gets no fix rather than the nearest one,
+    /// and so does one inside a range that names none.
+    #[test]
+    fn a_version_no_range_holds_names_no_fix() {
+        let uri = two_branches("fast-uri", "2.4.5", "3.1.6");
+        assert_eq!(first_fixed(&uri, "fast-uri", "3.2.0"), None, "past the last fix");
+        assert_eq!(first_fixed(&uri, "fast-uri", "2.9.0"), None, "between the two branches");
+        assert_eq!(first_fixed(&uri, "other", "1.0.0"), None, "another package entirely");
+
+        // An `introduced` with nothing closing it: affected from here on, and
+        // no release to move to.
+        let open: Value = serde_json::from_str(
+            r#"{"affected": [{"package": {"name": "p", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "2.0.0"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(first_fixed(&open, "p", "2.5.0"), None);
+        assert_eq!(first_fixed(&open, "p", "1.9.0"), None);
+
+        // A `last_affected` closes the interval without naming a fix.
+        let last: Value = serde_json::from_str(
+            r#"{"affected": [{"package": {"name": "p", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "1.0.0"}, {"last_affected": "1.4.0"}]},
+                            {"type": "SEMVER", "events": [{"introduced": "2.0.0"}, {"fixed": "2.1.0"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(first_fixed(&last, "p", "1.3.0"), None);
+        assert_eq!(first_fixed(&last, "p", "2.0.5").as_deref(), Some("2.1.0"));
+
+        // The ecosystem gate is unchanged: a Maven entry is not read as npm.
+        let maven: Value = serde_json::from_str(
+            r#"{"affected": [{"package": {"name": "p", "ecosystem": "Maven"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.9.9"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(first_fixed(&maven, "p", "1.0.0"), None);
+    }
+
+    /// The comparison the range check runs on, and the two places it gives up.
+    #[test]
+    fn versions_are_ordered_by_their_numbers_and_a_prerelease_sorts_first() {
+        assert_eq!(version_cmp("3.1.5", "3.1.6"), Ordering::Less);
+        assert_eq!(version_cmp("3.10.0", "3.9.0"), Ordering::Greater, "numbers, not text");
+        assert_eq!(version_cmp("0.9.10", "0.9.9"), Ordering::Greater);
+        assert_eq!(version_cmp("2.4.5", "2.4.5"), Ordering::Equal);
+        assert_eq!(version_cmp("3.0.0", "0"), Ordering::Greater, "the beginning of time");
+        assert_eq!(version_cmp("3.1", "3.1.0"), Ordering::Equal, "a missing part is a zero");
+        assert_eq!(version_cmp("v3.1.6", "3.1.6"), Ordering::Equal);
+        assert_eq!(version_cmp("3.1.6+build.7", "3.1.6"), Ordering::Equal, "build metadata orders nothing");
+        assert_eq!(version_cmp("3.1.6-rc.1", "3.1.6"), Ordering::Less, "a prerelease comes before its release");
+        assert_eq!(version_cmp("3.1.6", "3.1.6-rc.1"), Ordering::Greater);
+        // A prerelease inside the range it precedes, which is what that rule is
+        // for: `3.1.6-rc.1` is still affected by a bug fixed in `3.1.6`.
+        let uri = two_branches("fast-uri", "2.4.5", "3.1.6");
+        assert_eq!(first_fixed(&uri, "fast-uri", "3.1.6-rc.1").as_deref(), Some("3.1.6"));
+        // The last resort, which is arbitrary but never panics.
+        assert_eq!(version_cmp("not-a-version", "not-a-version"), Ordering::Equal);
+        assert_eq!(version_cmp("1.2.3.4", "1.2.3"), "1.2.3.4".cmp("1.2.3"));
     }
 }
