@@ -136,8 +136,9 @@ fn the_finding_id_survives_the_entry_moving_to_another_line() {
 fn two_installed_versions_of_one_package_are_two_findings() {
     // Five packages this time (`@acme/util`, `b`, `left-pad`, lodash 4.17.10,
     // lodash 4.17.15), and the advisory sits on both lodash entries.
-    const BOTH: &str =
-        r#"{"results":[{},{},{},{"vulns":[{"id":"GHSA-p6mc-m468-83gg"}]},{"vulns":[{"id":"GHSA-p6mc-m468-83gg"}]}]}"#;
+    let both = format!(
+        r#"{{"results":[{{}},{{}},{{}},{{"vulns":[{{"id":"{VULN_ID}"}}]}},{{"vulns":[{{"id":"{VULN_ID}"}}]}}]}}"#
+    );
     let root = fixture("vulnerable_dependency", "npm-two-versions");
     let config = locrin_core::config::Config::default();
     let seed = |ix: &Index, root: &Path| {
@@ -145,7 +146,7 @@ fn two_installed_versions_of_one_package_are_two_findings() {
         let canned = |url: &str, body: Option<&str>| -> anyhow::Result<String> {
             if url == osv::BATCH_URL {
                 assert!(body.is_some(), "the batch endpoint is a POST");
-                return Ok(BOTH.to_string());
+                return Ok(both.clone());
             }
             Ok(detail.clone())
         };

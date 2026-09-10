@@ -76,10 +76,10 @@ pub struct Verdict {
 ///
 /// What the id identifies is whatever the caller put in the anchor. A rule that
 /// reports a line anchors on the enclosing symbol, the line's text and the
-/// ordinal of that line among the identical ones inside the symbol
-/// (`anchor_for` in the rules crate), so every occurrence is its own id. A rule
-/// that reports a class anchors on the class instead: the same secret value
-/// twice in one file is one id, and accepting it accepts both.
+/// ordinal of that line among the identical ones inside the symbol, so the
+/// caller's anchor gives every occurrence its own id. A rule that reports a
+/// class anchors on the class instead: the same secret value twice in one file
+/// is one id, and accepting it accepts both.
 pub fn make_id(rule: &str, rel: &str, anchor: &str) -> String {
     let mut h = blake3::Hasher::new();
     h.update(rule.as_bytes());

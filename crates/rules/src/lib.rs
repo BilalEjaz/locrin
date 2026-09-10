@@ -26,7 +26,6 @@ use locrin_core::finding::{make_id, Category, Confidence, Finding, Severity, Spa
 use locrin_core::index::Index;
 use locrin_core::parse::ParsedFile;
 use locrin_core::previous::Previous;
-use locrin_core::symbols::enclosing_symbol;
 use rayon::prelude::*;
 
 pub use locrin_core::ALLOW_MARK;
@@ -157,19 +156,28 @@ pub fn line_span(file: &ParsedFile, line: u32) -> Span {
 /// part is a line number, so moving the whole function down the file leaves
 /// both ids alone (spec 7.1).
 pub fn anchor_for(file: &ParsedFile, line: u32) -> String {
-    let symbol = enclosing_symbol(file, line);
+    // The symbol table is extracted once here and then asked many times.
+    // `enclosing_symbol` is not a lookup: each call walks the whole tree and
+    // allocates the symbol list again, so asking it once per identical earlier
+    // line made a file of byte-identical flagged lines cost tree walks
+    // quadratically. Resolving against this Vec instead picks exactly what
+    // `enclosing_symbol` picks, the first symbol in extraction order whose span
+    // covers the line, for one walk per finding.
+    let symbols = locrin_core::symbols::extract(file);
+    let enclosing = |at: u32| symbols.iter().find(|s| s.start_line <= at && at <= s.end_line).map(|s| s.name.as_str());
+    let symbol = enclosing(line);
     let text = line_text(file, line);
     // Only a line that reads the same can be an earlier occurrence, and reading
-    // the same is a string compare where sharing a symbol is a walk of the
-    // tree, so the cheap half is asked first: a file whose lines are all
-    // different pays for one pass over the text and no symbol lookup at all.
+    // the same is a string compare where sharing a symbol is a scan of the
+    // symbol list, so the cheap half is asked first: a file whose lines are all
+    // different pays for one pass over the text and no symbol scan at all.
     let ordinal = file
         .source
         .lines()
         .take(line.saturating_sub(1) as usize)
         .enumerate()
         .filter(|(_, earlier)| earlier.trim() == text)
-        .filter(|(i, _)| enclosing_symbol(file, *i as u32 + 1) == symbol)
+        .filter(|(i, _)| enclosing(*i as u32 + 1) == symbol)
         .count();
     format!("{}\x1f{text}\x1f{ordinal}", symbol.unwrap_or_default())
 }
@@ -555,6 +563,18 @@ mod tests {
         let shifted = parsed(&format!("\n\n{TWICE}"));
         assert_eq!(anchor_for(&shifted, 4), anchor_for(&file, 2));
         assert_eq!(anchor_for(&shifted, 5), anchor_for(&file, 3));
+    }
+
+    /// The shape of the ordinal's cost, pinned on the file that used to be the
+    /// bad case: 200 byte-identical lines in one function. The scan reads every
+    /// earlier line once, and the symbol table behind it is extracted once for
+    /// the whole call rather than once per matching line, so this is one tree
+    /// walk and not two hundred.
+    #[test]
+    fn the_ordinal_counts_every_identical_earlier_line() {
+        let body = "  console.log(\"x\");\n".repeat(200);
+        let file = parsed(&format!("function f() {{\n{body}}}\n"));
+        assert_eq!(anchor_for(&file, 201), "f\u{1f}console.log(\"x\");\u{1f}199");
     }
 
     #[test]
