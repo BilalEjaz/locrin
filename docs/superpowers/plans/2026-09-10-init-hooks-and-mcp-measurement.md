@@ -33,8 +33,9 @@ in the two precision reports.
 All five gates are green, and green on the discarded run as well: every number
 in the table is inside its target, so the discard changes no verdict.
 
-Run 1 is discarded for the reason the Task 7c report gave and not because of
-anything it measured. The cold benchmark reads all 1846 files of the checkout,
+Run 1 is discarded for the reason
+`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md` gave and
+not because of anything it measured. The cold benchmark reads all 1846 files of the checkout,
 so the first run after a gap pays for the operating system's page cache rather
 than for the engine: 4473 ms against 3866, 3888 and 3871 ms, a spread of 22 ms
 across the three counted runs and 602 ms between the first and the fastest of
@@ -55,7 +56,7 @@ being `tests/fixtures/hooks/post_edit_write.json` rewritten (through
 Counted runs: 183, 185, 182 ms against a 300 ms target, a spread of 3 ms. The
 warm single-file check on the same file and the same warm cache is 182, 184, 186
 ms, so the hook's own overhead over a plain `check` is inside the noise of both
-measurements: under 5 ms on every run, and negative on two of the four. That is
+measurements: at most 5 ms on every run, and negative on one of the four. That is
 the useful reading. The hook adds a stdin read and a thread spawn to work that
 already takes 180 ms, and neither is measurable.
 
@@ -100,7 +101,7 @@ indexed 5 file(s) in 5.0 s
 The 5.0 s is almost all osv.dev: this is the one scan `init` runs online, and the
 same repository re-indexes in 0.0 s on the second run below.
 
-Five lines for five files, which is spec 5.1's "prints every file it touched".
+One line per touched file, which is spec 5.1's "prints every file it touched".
 Nothing was skipped: the repository has no `locrin.toml`, no baseline, no
 `.husky/`, and a `.git/hooks` holding only git's own `.sample` files, so every
 step had a free hand.
@@ -289,6 +290,11 @@ the plan.
   skipped" contradicted its own idempotence test, and it would have made a second
   `init` disown the file the first one wrote a moment earlier. Nothing is
   overwritten either way, so the ruling costs nothing if it is wrong.
+
+- **Task 5, the hook benchmark passes no `--root`.** The brief asked for one, and
+  the bench's `locrin` helper already sets the process working directory to the
+  checkout, which is the root the hook reads and the place Claude Code runs a
+  hook from.
 
 - **Task 5, the first run of the four-run benchmark set is discarded and
   reported.** The cold benchmark reads every file of the 1846-file bench

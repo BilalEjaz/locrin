@@ -43,6 +43,8 @@
 
 - **Task 4, a `.git/hooks/pre-commit` whose text is exactly `PRE_COMMIT_SCRIPT` is locrin's own.** It reports `unchanged`; any other content reports `skipped` with the line telling the operator what to add by hand. The brief's "always skipped" contradicted its own idempotence test, and it would have made a second `init` disown the file the first one wrote a moment earlier. Nothing is overwritten either way, so the ruling costs nothing if it is wrong.
 
+- **Task 5, the hook benchmark passes no `--root`.** The brief asked for one, and the bench's `locrin` helper already sets the process working directory to the checkout, which is the root the hook reads and the place Claude Code runs a hook from.
+
 - **Task 5, the first run of the four-run benchmark set is discarded and reported.** The cold benchmark reads every file of the 1846-file bench checkout, so the first run after a gap measures the operating system's page cache: 4473 ms against 3866, 3888 and 3871 ms, with warm numbers on the same invocation inside a few milliseconds of the counted runs. All four numbers are in the measurement report and every one of them is green, so the discard changes no verdict. This is the method the two precision reports used.
 
 - **Task 5, the pull request is opened by the controller after the whole-branch review, not by this task.** The brief's step 4 was held back deliberately; the measurement and the dogfood are what Task 5 delivers, in `docs/superpowers/plans/2026-09-10-init-hooks-and-mcp-measurement.md`.
