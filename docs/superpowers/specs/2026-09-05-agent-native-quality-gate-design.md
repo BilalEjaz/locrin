@@ -99,11 +99,11 @@ Erosion pack, free:
 Security pack, core subset free:
 - `secret-exposed`: pattern set (100 providers at launch) plus entropy check. Always blocks. Cannot be downgraded by config. OWASP A02, CWE-798.
 - `weak-crypto`: MD5 or SHA-1 for passwords, Math.random for tokens or ids, hardcoded IVs. A02, CWE-327 and CWE-338.
-- `injection-sink`: eval and new Function with non-literal input; child_process exec with template or concatenated strings; raw SQL built by concatenation or template with an identifier inside. Intra-file source tracking only. A03, CWE-78, CWE-89, CWE-95.
+- `injection-sink`: eval and new Function with non-literal input; child_process exec with template or concatenated strings; raw SQL built by concatenation or template with an identifier inside. Intra-file source tracking only. A03, CWE-78, CWE-89, CWE-95. Ships disabled by default (2 of 28 corpus findings actionable, 2026-09-10); enable with `[rules.injection-sink]` `enabled = true`.
 - `html-injection`: dangerouslySetInnerHTML or innerHTML with a non-literal. A03, CWE-79.
 - `vulnerable-dependency`: lockfile packages checked against OSV. Online batch query by default; offline mode uses a cached OSV snapshot with an age warning. A06, CWE-1395.
 - Framework rules, Supabase: service-role key referenced in client-side code; table created or altered without row-level security in migration files. A01, CWE-284.
-- Framework rules, Express: route handler registered without any middleware when config declares an auth middleware name; `cors()` with wildcard origin on a route marked authenticated; cookies set without httpOnly or secure. A01, A05, CWE-306, CWE-614.
+- Framework rules, Express: route handler registered without any middleware when config declares an auth middleware name; `cors()` with wildcard origin on a route marked authenticated; cookies set without httpOnly or secure. A01, A05, CWE-306, CWE-614, CWE-942 (the accurate id for the permissive cross-domain policy the CORS rule reports).
 
 ### 4.2 Held for release two
 - `already-exists`: new or changed function near-duplicates an existing one. The spike measured precision 0.69 sample-pooled and 0.61 population-weighted at recall 0.91 against the 0.85 bar (spike/fingerprint/REPORT.md, provisional pending founder spot-check), so it waits here until the fingerprint clears the bar. Reports the existing symbol and suggests reuse.

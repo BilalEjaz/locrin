@@ -98,8 +98,26 @@ pub fn source_files(root: &Path, opts: &WalkOptions) -> anyhow::Result<Vec<PathB
     Ok(walk_with_stats(root, opts)?.0)
 }
 
+/// Walk `root` and return every file it holds, source or not, sorted, as
+/// absolute paths.
+///
+/// The excludes and the gitignore rules are the walk's own, so this is the same
+/// tree [`source_files`] sees without the language filter on the end of it. A
+/// run narrowed to a named directory needs it: naming a directory names every
+/// file under it, and the files a rule reads without parsing (a migration, a
+/// lockfile) are exactly the ones the language filter drops.
+pub fn all_files(root: &Path, opts: &WalkOptions) -> anyhow::Result<Vec<PathBuf>> {
+    Ok(walk_inner(root, opts, false)?.0)
+}
+
 /// Same as [`source_files`], plus counters describing how much of the tree was walked.
 pub fn walk_with_stats(root: &Path, opts: &WalkOptions) -> anyhow::Result<(Vec<PathBuf>, WalkStats)> {
+    walk_inner(root, opts, true)
+}
+
+/// The walk both public entry points share. `source_only` is the language
+/// filter: set for the files the engine parses, clear for every file there is.
+fn walk_inner(root: &Path, opts: &WalkOptions, source_only: bool) -> anyhow::Result<(Vec<PathBuf>, WalkStats)> {
     let root = canonical_root(root);
     let excludes = Arc::new(build_globset(&opts.excludes)?);
 
@@ -154,7 +172,7 @@ pub fn walk_with_stats(root: &Path, opts: &WalkOptions) -> anyhow::Result<(Vec<P
             if excludes.is_match(&rel) {
                 return WalkState::Continue;
             }
-            if Language::from_path(path).is_none() {
+            if source_only && Language::from_path(path).is_none() {
                 return WalkState::Continue;
             }
             // The lock is taken once per matching file, never while reading the
@@ -193,6 +211,19 @@ mod tests {
         let files = source_files(&fixture(), &WalkOptions::default()).unwrap();
         assert!(files.iter().all(|p| p.is_absolute()), "walk must return absolute paths: {files:?}");
         assert_eq!(rel_names(&files), vec![".git_fake/objects/x.ts", "src/index.ts", "src/util.ts"]);
+    }
+
+    /// The listing a narrowed run needs: the same tree, the same excludes, and
+    /// the files the language filter drops kept.
+    #[test]
+    fn all_files_keeps_what_the_language_filter_drops_and_still_prunes_the_excludes() {
+        let files = all_files(&fixture(), &WalkOptions::default()).unwrap();
+        let names = rel_names(&files);
+        assert!(names.contains(&"package.json".to_string()), "{names:?}");
+        assert!(names.contains(&"src/types.d.ts".to_string()), "a declaration file is a file: {names:?}");
+        assert!(names.contains(&"src/index.ts".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("node_modules/")), "the excludes still prune: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("dist/")), "the gitignore still applies: {names:?}");
     }
 
     #[test]

@@ -8,6 +8,8 @@ pub mod imports;
 pub mod index;
 pub mod indexer;
 pub mod lang;
+pub mod lockfile;
+pub mod osv;
 pub mod parse;
 pub mod previous;
 pub mod project;

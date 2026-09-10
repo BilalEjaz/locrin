@@ -1,14 +1,21 @@
 pub mod boundary;
 pub mod dead_export;
 pub mod dead_file;
+pub mod express;
+pub mod html_injection;
+pub mod injection_sink;
 pub mod leftover_commented;
 pub mod leftover_debug;
 pub mod leftover_marker;
+pub mod secrets;
+pub mod supabase;
 pub mod swallowed_error;
 pub mod test_newly_skipped;
 pub mod test_no_assert;
 pub mod unreachable;
 pub mod unused_import;
+pub mod vulnerable_dependency;
+pub mod weak_crypto;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -195,16 +202,20 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
         if !rule_runs(rule.as_ref(), ctx.config) {
             continue;
         }
-        let severity = if rule.locked() {
-            rule.default_severity()
-        } else {
-            ctx.config.severity_for(rule.id(), rule.default_severity())
-        };
+        // A finding arrives carrying a severity: `finding_at` gives it the rule's
+        // own default, and one rule (`vulnerable-dependency`) then replaces it
+        // with the severity of the advisory that finding reports. So the runner
+        // overwrites only when it has something to say. A locked rule's severity
+        // is its own by definition, and the config may not lower it.
+        let severity =
+            if rule.locked() { Some(rule.default_severity()) } else { ctx.config.severity_override(rule.id()) };
         for mut f in rule.run(ctx)? {
             if dropped(&f)? {
                 continue;
             }
-            f.severity = severity;
+            if let Some(severity) = severity {
+                f.severity = severity;
+            }
             out.push(f);
         }
     }
@@ -269,6 +280,16 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(swallowed_error::SwallowedError),
         Box::new(test_no_assert::TestNoAssert),
         Box::new(test_newly_skipped::TestNewlySkipped),
+        Box::new(secrets::SecretExposed),
+        Box::new(weak_crypto::WeakCrypto),
+        Box::new(injection_sink::InjectionSink),
+        Box::new(html_injection::HtmlInjection),
+        Box::new(vulnerable_dependency::VulnerableDependency),
+        Box::new(supabase::service_role::SupabaseServiceRoleInClient),
+        Box::new(supabase::rls::SupabaseTableWithoutRls),
+        Box::new(express::route_auth::ExpressRouteWithoutAuth),
+        Box::new(express::cors::ExpressCorsWildcardOnAuthenticated),
+        Box::new(express::cookie::ExpressCookieInsecure),
     ]
 }
 
@@ -607,14 +628,30 @@ mod tests {
                 "boundary-violation",
                 "swallowed-error",
                 "test-no-assert",
-                "test-newly-skipped"
+                "test-newly-skipped",
+                "secret-exposed",
+                "weak-crypto",
+                "injection-sink",
+                "html-injection",
+                "vulnerable-dependency",
+                "supabase-service-role-in-client",
+                "supabase-table-without-rls",
+                "express-route-without-auth",
+                "express-cors-wildcard-on-authenticated",
+                "express-cookie-insecure"
             ]
         );
         assert!(run_all(&ctx).unwrap().is_empty(), "no files means no findings");
-        assert_eq!(file_rules().len(), 8, "eight file rules and three graph rules");
+        assert_eq!(file_rules().len(), 16, "sixteen file rules and five graph rules");
         assert_eq!(
             graph_rules().iter().map(|r| r.id()).collect::<Vec<_>>(),
-            vec!["dead-export", "dead-file", "boundary-violation"]
+            vec![
+                "dead-export",
+                "dead-file",
+                "boundary-violation",
+                "vulnerable-dependency",
+                "supabase-table-without-rls"
+            ]
         );
     }
 

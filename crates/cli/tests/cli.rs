@@ -774,7 +774,7 @@ fn sarif_output_lists_every_rule_and_every_finding() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["version"], "2.1.0");
     let run = &doc["runs"][0];
-    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 11);
+    assert_eq!(run["tool"]["driver"]["rules"].as_array().unwrap().len(), 21);
     assert_eq!(run["results"].as_array().unwrap().len(), 2);
     assert_eq!(run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "src/dirty.ts");
 }
@@ -1130,4 +1130,164 @@ fn base_reports_a_test_skipped_since_the_base_commit_and_not_one_the_base_alread
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
     assert!(newly_skipped(&v).is_empty(), "the base commit already skipped it: {v}");
+}
+
+/// A lockfileVersion 3 `package-lock.json` with one installed package, written
+/// into a scratch copy of the fixture rather than committed beside it: every
+/// other test in this file shares that fixture and none of them should start
+/// paying for an advisory rule.
+const LOCK: &str = r#"{
+  "name": "scope-fixture",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "scope-fixture",
+      "version": "1.0.0",
+      "dependencies": { "left-pad": "^1.3.0" }
+    },
+    "node_modules/left-pad": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"
+    }
+  }
+}
+"#;
+
+/// `vulnerable-dependency` answers for the lockfile, and the lockfile is not a
+/// source file: no scope's import neighbourhood can ever reach it, so on every
+/// scoped run the rule used to pay its whole cost (the lockfile read, the
+/// snapshot read, and online the requests) and then have every finding thrown
+/// away by the graph filter.
+///
+/// The contract is now that a scoped run runs the rule only when the lockfile is
+/// among the paths the scope itself names, and skips it outright otherwise. The
+/// skip is observed through the warning an offline run with no snapshot prints:
+/// its absence is proof the rule never ran, because a rule that ran would have
+/// printed it.
+///
+/// Everything here is offline, so no test in this file makes a network call.
+#[test]
+fn a_scoped_run_reads_the_lockfile_only_when_the_scope_names_it() {
+    const SKIPPED: &str = "no cached advisory snapshot; vulnerable-dependency skipped";
+    let dir = copy_fixture();
+    std::fs::write(dir.path().join("package-lock.json"), LOCK).unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    let stderr = |args: &[&str]| -> String {
+        let out = locrin(dir.path()).args(args).output().unwrap();
+        String::from_utf8(out.stderr).unwrap()
+    };
+
+    // A whole-repository check answers for the lockfile, so the rule runs.
+    let err = stderr(&["check", "--offline"]);
+    assert!(err.contains(SKIPPED), "a whole-repository check runs the rule: {err}");
+
+    // A named source file does not, and neither does anything its imports reach.
+    let err = stderr(&["check", "src/clean.ts", "--offline"]);
+    assert!(!err.contains(SKIPPED), "the rule must not run for a scope that cannot report it: {err}");
+
+    // Naming the lockfile is an instruction to answer for it.
+    let err = stderr(&["check", "package-lock.json", "--offline"]);
+    assert!(err.contains(SKIPPED), "a scope that names the lockfile runs the rule: {err}");
+
+    // `--changed` takes its scope from the index, which holds source files only,
+    // so the lockfile can never be in it however it was edited.
+    std::fs::write(dir.path().join("package-lock.json"), LOCK.replace("1.3.0", "1.3.1")).unwrap();
+    let err = stderr(&["check", "--changed", "--offline"]);
+    assert!(!err.contains(SKIPPED), "--changed cannot see a file that is not indexed: {err}");
+
+    // A diff scope can: git lists every changed file, not only the parsed ones.
+    let err = stderr(&["check", "--base", "HEAD", "--offline"]);
+    assert!(err.contains(SKIPPED), "the lockfile is in the diff, so the rule runs: {err}");
+
+    // A directory names everything under it, lockfile included: `check .` has to
+    // answer for the lockfile exactly as a whole-repository check does.
+    let err = stderr(&["check", ".", "--offline"]);
+    assert!(err.contains(SKIPPED), "the repository root contains the lockfile: {err}");
+
+    // A directory that does not contain the lockfile still does not name it.
+    let err = stderr(&["check", "src", "--offline"]);
+    assert!(!err.contains(SKIPPED), "the lockfile is not under src: {err}");
+}
+
+/// A migration creating a table nothing locks down, written into a scratch copy
+/// rather than committed beside the fixture: every other test in this file
+/// shares that fixture and none of them should start paying for the rule that
+/// reads migrations.
+const MIGRATION: &str = "create table public.orders (id uuid primary key);\n";
+
+/// `supabase-table-without-rls` answers for the SQL migrations, and a migration
+/// is not a source file: no scope's import neighbourhood can ever reach one, so
+/// on every scoped run the rule used to read every migration and then have all
+/// of its findings thrown away by the graph filter.
+///
+/// The contract is the one `vulnerable-dependency` already has. A scoped run
+/// runs the rule only when the raw scope, every existing file the scope names
+/// rather than only the source files among them, holds a `.sql` under
+/// `supabase/migrations`; and a finding against a file the raw scope names is
+/// kept whatever the neighbourhood says.
+///
+/// Everything here is offline, so no test in this file makes a network call.
+#[test]
+fn a_scoped_run_reports_a_migration_the_scope_names() {
+    let rel = "supabase/migrations/0001_orders.sql";
+    let dir = copy_fixture();
+    std::fs::create_dir_all(dir.path().join("supabase/migrations")).unwrap();
+    std::fs::write(dir.path().join(rel), MIGRATION).unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+
+    let rls = |args: &[&str]| -> bool {
+        let out = locrin(dir.path()).args(args).args(["--json", "--offline"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "supabase-table-without-rls" && f["file"] == rel)
+    };
+
+    // A whole-repository check answers for every file, migrations included.
+    assert!(rls(&["check"]), "a whole-repository check reports the table");
+
+    // Naming the migration is an instruction to answer for it.
+    assert!(rls(&["check", rel]), "a scope that names the migration reports the table");
+
+    // Naming a directory names what is under it, at any depth.
+    assert!(rls(&["check", "supabase"]), "the migration is under supabase");
+    assert!(rls(&["check", "."]), "the repository root contains the migration");
+
+    // A named source file names no migration, so the rule does not run at all.
+    assert!(!rls(&["check", "src/index.ts"]), "a scope that cannot report the finding must not produce it");
+
+    // A diff scope can name it: git lists every changed file, not only the
+    // parsed ones.
+    std::fs::write(dir.path().join(rel), format!("{MIGRATION}-- a later note\n")).unwrap();
+    assert!(rls(&["check", "--base", "HEAD"]), "the migration is in the diff");
+
+    // `--changed` takes its scope from the index, which holds source files only,
+    // so a migration can never be in it however it was edited.
+    assert!(!rls(&["check", "--changed"]), "--changed cannot see a file that is not indexed");
+}
+
+/// `baseline create` runs every rule, `vulnerable-dependency` included, so it
+/// needs the same promise `check --offline` makes: without it a repository
+/// drawing its first line in the sand on a machine with no network waits out
+/// the advisory requests' timeouts.
+///
+/// The flag is observed through the warning an offline run with no snapshot
+/// prints. Its presence proves the flag reached the rule, because an online run
+/// would have fetched instead.
+#[test]
+fn baseline_create_takes_offline_and_the_flag_reaches_the_advisory_rule() {
+    let dir = copy_fixture();
+    std::fs::write(dir.path().join("package-lock.json"), LOCK).unwrap();
+    let out = locrin(dir.path()).args(["baseline", "create", "--offline"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("no cached advisory snapshot; vulnerable-dependency skipped"),
+        "the rule ran offline and said so: {err}"
+    );
+    assert!(dir.path().join("locrin-baseline.json").exists());
 }
