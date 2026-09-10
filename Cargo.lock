@@ -638,6 +638,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "locrin-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "locrin-reporters"
 version = "0.1.0"
 dependencies = [
