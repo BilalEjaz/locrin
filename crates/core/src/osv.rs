@@ -9,6 +9,11 @@
 //! path through this module that turns a network problem into a failed run
 //! (spec 9): the worst case is an empty result and one warning.
 //!
+//! One failure is enough. A batch request that does not answer marks the
+//! network down for the rest of that run, so the advisory details behind it are
+//! served from the snapshot rather than each paying the same [`TIMEOUT`] over
+//! again: an unreachable registry costs one timeout, not one per advisory.
+//!
 //! The snapshot is keyed by the lockfile's package list (see
 //! [`crate::lockfile::Lockfile::hash`]), because the response is stored as one
 //! document and zipped positionally against that list: the key has to promise
@@ -93,6 +98,14 @@ pub fn check(
 
     let mut batch = None;
     let mut snapshot_age_days = None;
+    // A failed request says the network is unreachable for this run, not for
+    // that one request: the registry is down, the machine is on a train, the
+    // proxy refuses. Every advisory detail behind the batch is stale by the same
+    // clock, so without this the run pays the whole [`TIMEOUT`] again once per
+    // advisory found and then serves each of them from the snapshot anyway. The
+    // rest of the run therefore behaves as an offline one: cached details are
+    // served, and a detail with no cached copy reads UNKNOWN, exactly as today.
+    let mut network_down = false;
     // A snapshot from today already answers for this exact package list, and one
     // day is the age at which the run would start warning about it, so it is
     // also the age at which an online run stops trusting it. Below that the run
@@ -107,7 +120,10 @@ pub fn check(
                 batch = Some(json);
                 snapshot_age_days = Some(0);
             }
-            Err(e) => warnings.push(format!("advisory lookup failed ({e}); falling back to the cached snapshot")),
+            Err(e) => {
+                network_down = true;
+                warnings.push(format!("advisory lookup failed ({e}); falling back to the cached snapshot"));
+            }
         }
     }
     if batch.is_none() {
@@ -135,7 +151,7 @@ pub fn check(
     let mut details: BTreeMap<String, Value> = BTreeMap::new();
     let mut unavailable = 0usize;
     for id in ids {
-        match vuln_detail(ix, &id, offline, fetch, now)? {
+        match vuln_detail(ix, &id, offline || network_down, fetch, now)? {
             Some(detail) => {
                 details.insert(id, detail);
             }
@@ -536,6 +552,10 @@ mod tests {
         ix.conn().execute("UPDATE osv_batch SET fetched_at = fetched_at - ?1", params![(days * DAY) as i64]).unwrap();
     }
 
+    fn backdate_vuln(ix: &Index, days: u64) {
+        ix.conn().execute("UPDATE osv_vulns SET fetched_at = fetched_at - ?1", params![(days * DAY) as i64]).unwrap();
+    }
+
     fn only_hit(outcome: &Outcome) -> &Hit {
         assert_eq!(outcome.hits.len(), 1, "one advisory in the canned batch: {:?}", outcome.hits);
         &outcome.hits[0]
@@ -606,6 +626,37 @@ mod tests {
         assert_eq!(outcome.warnings[1], "using cached advisory snapshot from 2 days ago");
         assert_eq!(outcome.snapshot_age_days, Some(2));
         assert_eq!(only_hit(&outcome).advisory.id, VULN_ID);
+    }
+
+    /// A failed batch request says the network is unreachable for this run, not
+    /// for that one request. Every advisory detail behind it is stale by the
+    /// same clock, so left alone the run paid the whole ten-second timeout once
+    /// per advisory found and then served each of them from the snapshot
+    /// anyway: a repository with a dozen advisories waited two minutes for the
+    /// answer it already had.
+    #[test]
+    fn a_failed_batch_request_stops_the_run_asking_for_advisory_details() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = fixture_lock();
+        check(&ix, &lock, false, &canned).unwrap();
+        // Old enough that the run wants to refresh the batch, and old enough
+        // that it would want to refresh the detail behind it too.
+        backdate_batch(&ix, 2);
+        backdate_vuln(&ix, VULN_MAX_AGE_DAYS + 1);
+
+        let calls = std::cell::Cell::new(0usize);
+        let counted = |url: &str, body: Option<&str>| -> anyhow::Result<String> {
+            calls.set(calls.get() + 1);
+            refuse(url, body)
+        };
+
+        let outcome = check(&ix, &lock, false, &counted).unwrap();
+
+        assert_eq!(calls.get(), 1, "the batch request failed, so no detail was asked for");
+        let hit = only_hit(&outcome);
+        assert_eq!(hit.advisory.id, VULN_ID);
+        assert_eq!(hit.advisory.summary, "Prototype Pollution in lodash", "the stale detail still answers");
+        assert!(!outcome.warnings.iter().any(|w| w.contains("details unavailable")), "{:?}", outcome.warnings);
     }
 
     #[test]
