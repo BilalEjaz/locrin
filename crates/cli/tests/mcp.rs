@@ -199,8 +199,9 @@ fn find_existing_on_an_empty_index_says_so() {
     // on an index its predecessor wrote. `Index::open` rebuilds that into an
     // empty database, so the file is there and has nothing in it, and the
     // first question an agent asks after the upgrade must not be answered
-    // "nothing exists".
-    let status = locrin(dir.path()).arg("scan").status().expect("the scan runs");
+    // "nothing exists". `--offline` because nothing here needs the network, and
+    // a lockfile in the fixture would otherwise send the suite to osv.dev.
+    let status = locrin(dir.path()).args(["scan", "--offline"]).status().expect("the scan runs");
     assert!(status.success(), "the scan exited with {status}");
     rusqlite::Connection::open(index_db(dir.path()))
         .expect("the index database opens")
@@ -331,9 +332,9 @@ fn stdout_carries_nothing_but_messages() {
 /// the verdict is no longer a block.
 ///
 /// The budget is the Stop hook's three rounds (spec 5.2), and the assertion is
-/// that a session which answers every finding it was shown comes in under it: a
-/// loop that needed all three would leave an agent no round to spare for the
-/// work itself.
+/// that a session which answers every finding it was shown comes in under it in
+/// exactly two: a loop that needed all three would leave an agent no round to
+/// spare for the work itself.
 #[test]
 fn a_scripted_agent_reaches_a_clean_verdict_in_under_three_rounds() {
     const BUDGET: usize = 3;
@@ -355,6 +356,12 @@ fn a_scripted_agent_reaches_a_clean_verdict_in_under_three_rounds() {
         rounds += 1;
         verdict = parsed(&call(&mut io, id, "check_changes", json!({})));
         id += 1;
+        // Round 1 has to block, or the session proves nothing: a fixture that
+        // was already clean would break out here having accepted nothing and
+        // still reach every assertion below.
+        if rounds == 1 {
+            assert_eq!(verdict["status"], "block", "round 1 did not block: {verdict}");
+        }
         if verdict["status"] != "block" {
             break;
         }
@@ -377,7 +384,11 @@ fn a_scripted_agent_reaches_a_clean_verdict_in_under_three_rounds() {
             assert_eq!(answer["baseline_entries"], accepted.len(), "{answer}");
         }
     }
-    assert!(rounds <= 2, "the session took {rounds} rounds: {verdict}");
+    // The measured values, not a bound: one blocking round, one acceptance pass,
+    // one clean round. A session that stopped short of accepting anything, or
+    // that needed a third round, is a different session and fails here.
+    assert!(!accepted.is_empty(), "the session accepted nothing: {verdict}");
+    assert_eq!(rounds, 2, "the session took {rounds} rounds: {verdict}");
     assert_ne!(verdict["status"], "block", "the session ended on a block: {verdict}");
 
     // `status` is the agent's own record of where it left the repository, so it
@@ -397,7 +408,9 @@ fn a_scripted_agent_reaches_a_clean_verdict_in_under_three_rounds() {
 #[test]
 fn a_stale_index_rebuilds_silently_for_the_server() {
     let dir = copy_fixture();
-    let status = locrin(dir.path()).arg("scan").status().expect("the scan runs");
+    // `--offline` because nothing here needs the network, and a lockfile in the
+    // fixture would otherwise send the suite to osv.dev.
+    let status = locrin(dir.path()).args(["scan", "--offline"]).status().expect("the scan runs");
     assert!(status.success(), "the scan exited with {status}");
     rusqlite::Connection::open(index_db(dir.path()))
         .expect("the index database opens")
@@ -411,6 +424,9 @@ fn a_stale_index_rebuilds_silently_for_the_server() {
     let v = parsed(&call(&mut io, 2, "status", json!({})));
     assert_eq!(v["index"]["exists"], true, "{v}");
     assert_eq!(v["index"]["schema"], "5", "{v}");
+    // Empty, so this is a rebuild rather than a re-stamp of the rows the old
+    // schema left behind.
+    assert_eq!(v["index"]["files"], 0, "{v}");
 
     // Nothing is owed after the last response, so the rest of stdout is EOF.
     drop(io.inp.take());
