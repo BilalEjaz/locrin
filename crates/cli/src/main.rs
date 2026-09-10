@@ -1,5 +1,6 @@
 mod git;
 mod hook;
+mod init;
 mod run;
 
 /// `LOCRIN_CACHE_DIR` is process-wide, so every test in this binary that points
@@ -56,6 +57,16 @@ enum Cmd {
         /// Files changed by the commits in REF..HEAD (the deployment gate)
         #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "base"])]
         since: Option<String>,
+        /// Never touch the network; use the cached advisory snapshot or skip
+        /// vulnerable-dependency with a warning
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Wire this repository up: config, agent hooks, MCP server, git hook, first scan and baseline
+    ///
+    /// Safe to run again: nothing locrin did not write is ever overwritten, and a
+    /// second run reports every file unchanged.
+    Init {
         /// Never touch the network; use the cached advisory snapshot or skip
         /// vulnerable-dependency with a warning
         #[arg(long)]
@@ -157,6 +168,23 @@ fn real_main() -> anyhow::Result<i32> {
                 print!("{}", locrin_reporters::terminal::render(&verdict));
             }
             Ok(verdict.exit_code())
+        }
+        Cmd::Init { offline } => {
+            // Progress goes to stderr: it names no file the command touched, and
+            // stdout is the list of files it did.
+            let report = init::run(&root, offline, &mut |line| eprintln!("{line}"))?;
+            for (path, touch) in &report.touched {
+                match touch {
+                    init::Touch::Wrote => println!("wrote {path}"),
+                    init::Touch::Updated => println!("updated {path}"),
+                    init::Touch::Unchanged => println!("unchanged {path}"),
+                    init::Touch::Skipped(why) => println!("skipped {path}: {why}"),
+                }
+            }
+            if let Some(n) = report.baseline_entries {
+                println!("baseline written with {n} finding(s)");
+            }
+            Ok(0)
         }
         Cmd::Scan { offline } => {
             let (files, changed) = run::scan(&root, offline)?;
