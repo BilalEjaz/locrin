@@ -14,7 +14,7 @@ code) and `locrin init` (config, the two JSON merges, the git hook, the first
 scan, the baseline). This document is the evidence that they hit their targets
 and that `init` works on a repository nobody wrote it against.
 
-## Benchmarks
+### Benchmarks
 
 `cargo test --release -p locrin-cli -- --ignored --nocapture`, on `92b2886`.
 Bench repository `<home>/fasting-app` (1846 files), a fresh temporary
@@ -40,7 +40,7 @@ Run 1 is discarded for the reason
 not because of anything it measured. The cold benchmark reads all 1846 files of the checkout,
 so the first run after a gap pays for the operating system's page cache rather
 than for the engine: 4473 ms against 3866, 3888 and 3871 ms, a spread of 22 ms
-across the three counted runs and 602 ms between the first and the fastest of
+across the three counted runs and 607 ms between the first and the fastest of
 them. The rest of run 1 confirms that reading. Its warm numbers (183 / 188 / 274
 / 20 ms) sit inside the same few milliseconds as the counted runs, so the
 machine was not loaded; only the benchmark that touches every file on disk moved.
@@ -69,7 +69,7 @@ a larger scope than most working trees, at 267 to 288 ms. The budget is roughly
 seven times the largest scope measured here. A repository big enough to spend it
 is not one this measurement has, so the budget stays where spec 9 put it.
 
-## The dogfood run
+### The dogfood run
 
 `init` was run on a copy of `<home>/fastlift-admin` (a Cloudflare Worker,
 five source files, a real git repository with commits). The copy is a temporary
@@ -256,10 +256,15 @@ which is the one file whose ownership `init` has to decide by reading its text.
 
 Branch `engine/mcp`, HEAD `ff0daf9` ("engine: the scripted agent session and the
 stale-index rebuild, as tests"), 10 September 2026. Part B added `crates/mcp`,
-the symbol search, and `locrin mcp` with its five tools over Tasks 6 to 8. None
-of that is on the path any of these benchmarks measures, so this is a
-regression check rather than a new gate: the same five targets, re-run on the
-branch head, beside Part A's numbers.
+the symbol search, and `locrin mcp` with its five tools over Tasks 6 to 8. One
+thing Part B added is on the path these benchmarks measure: Task 7's
+`last_verdict`, which every `check` writes and therefore every PostToolUse hook
+pays for. As it stood when this table was taken it was a second `Index::open`
+plus a `meta_set` after the run had already closed its own; the final-review fix
+below makes it one `meta_set` on the connection the run recorded through, and
+nothing else in Part B is on the path at all. So this is a regression check
+rather than a new gate: the same five targets, re-run on the branch head, beside
+Part A's numbers.
 
 Method as in Part A: `cargo test --release -p locrin-cli -- --ignored
 --nocapture`, bench repository `<home>/fasting-app` (1846 files, the
@@ -312,6 +317,48 @@ is to say at most 9 ms and negative on one of the three. Run 1's 44 ms is the
 larger figure, and it belongs to the discarded run. That is the same result
 Part A reported on a faster machine, which is the useful part: the overhead
 tracks the check rather than sitting on top of it.
+
+## Part B re-measurement after the final-review fixes
+
+Branch `engine/mcp`, HEAD `3f07c1b` ("engine: accept_finding reuses the recorded
+index, the verdict is recorded on the run's own connection, and a tool panic is
+logged"), 10 September 2026.
+
+Only the two gates the fix can move are re-run: the warm single-file check and
+the post-edit hook. The fix is on the `check` path, which is what both measure,
+and it removes a second `Index::open` and a second commit per check. The cold
+scan, the 30-file check and `--help` are untouched by it and their numbers above
+stand.
+
+Method as above and as in Part A, narrowed to one benchmark per invocation:
+`cargo test --release -p locrin-cli --test bench <name> -- --ignored --nocapture`,
+bench repository `<home>/fasting-app`, a fresh temporary cache per
+benchmark, `--offline`, four sequential runs with the first discarded. The
+release test binary was built before the first run, and `tasklist` was empty on
+`cargo`, `rustc` and `locrin` at that point.
+
+Power state, read before the runs and again after them with
+`(Get-CimInstance Win32_Battery).BatteryStatus`: `1` both times, which is
+discharging. **The laptop was on battery for this re-measurement, as it was for
+the table above, so these margins are not settled.** They are better than the
+battery numbers above rather than worse, which is the direction the fix predicts,
+but a battery measurement cannot separate the fix from the machine's state and
+this document does not claim it does. A mains re-measurement is what would settle
+them.
+
+| Benchmark | Target | Run 1 (discarded) | Run 2 | Run 3 | Run 4 | Before the fix (counted) | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| warm single-file check | under 300 ms | 218 ms | 194 ms | 200 ms | 210 ms | 270 to 293 ms | PASS, 90 ms of margin at worst |
+| post-edit hook (`hook post-edit`) | under 300 ms | 204 ms | 205 ms | 207 ms | 205 ms | 274 to 298 ms | PASS, 93 ms of margin at worst |
+
+Both gates are green on all four runs, discarded one included. The two thin
+margins the table above reported as a concern (298 ms and 293 ms against 300 ms)
+are gone: the worst counted number here is 210 ms.
+
+The hook's own overhead over a plain `check` is unchanged and still inside the
+noise of both measurements. Hook minus warm check, run by run on the counted
+runs, is 11, 7 and -5 ms: at most 11 ms, and negative on one of the three, which
+is the same reading Part A and the table above both gave.
 
 ## Deviations recorded during execution
 
@@ -408,3 +455,7 @@ the plan.
 - **Task 9, the whole Part B benchmark set is slower than Part A's because the machine was on battery, and the numbers stand as measured.** Every gate moved, `--help` included, which is a process start and a print: a uniform slowdown across a benchmark that reads 1846 files and one that reads none is the machine, not the engine. The laptop was on battery under the Balanced power scheme, with CPU samples at 4 to 13 percent against Part A's 0 to 4. Two gates are consequently thin (the post-edit hook at 298 ms and the warm single-file check at 293 ms, both against 300 ms). They pass as measured and are reported as a concern; re-running until the numbers improve is not a measurement.
 
 - **Task 9, the pull request is opened by the controller after the whole-branch review, not by this task.** As in Task 5, the brief's `gh pr create` step was held back deliberately. What Task 9 delivers is the scripted session and stale-index tests, the README, and the Part B measurement.
+
+- **Final review, `accept_finding` runs its pass with `record` on and `locrin baseline accept` runs its pass with `record` off.** `baseline_accept_as` grew a `record` parameter because its two callers owe opposite things. The MCP tool is called straight after a `check_changes` that recorded, so the index is already current, and a non-recording pass there opens a throwaway in-memory index and parses the whole repository from cold, once per acceptance and up to ten times in one agent round. The command line's `baseline accept` is not a check, and the index is where `--changed` keeps its watermark: a recording pass there would answer for every pending edit and leave the next `locrin check --changed` nothing to report. `run.rs`'s `an_agent_accept_records_the_index_and_a_command_line_accept_leaves_it_alone` pins the split by the changed count of the pass that follows each accept.
+
+- **Final review, `check` writes `last_verdict` through the connection its own pass recorded on.** `record_verdict` called `Index::open` a second time, paying for `init` and a second commit on the path a PostToolUse hook waits on, which is the path Part B's benchmarks measure. `pass` now hands its `Index` back, `Some` exactly when it recorded, and `check` calls `meta_set` on that. A failure to record is still a warning on stderr and never an error: the verdict is the answer and the caller already has it. `check_records_the_last_verdict` covers it unchanged, and the two gates the change can move were re-measured.

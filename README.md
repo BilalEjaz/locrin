@@ -185,7 +185,12 @@ share one database.
 
 Set `LOCRIN_CACHE_DIR` to put it somewhere else. Give a CI job or a sandbox its
 own cache so runs do not share incremental state. When an upgraded binary meets
-an index an older one wrote, it rebuilds it silently and carries on.
+an index an older one wrote, it rebuilds it with one warning on stderr and
+carries on.
+
+Restart Claude Code after upgrading locrin, so that `locrin mcp` restarts too. A
+long-running server on the old build and a hook on the new one disagree about
+the schema, and each would rebuild the index the other had just written.
 
 ## Config
 

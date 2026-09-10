@@ -69,6 +69,10 @@
 
 - **Task 9, the pull request is opened by the controller after the whole-branch review, not by this task.** As in Task 5, the brief's `gh pr create` step was held back deliberately. What Task 9 delivers is the scripted session and stale-index tests, the README, and the Part B measurement.
 
+- **Final review, `accept_finding` runs its pass with `record` on and `locrin baseline accept` runs its pass with `record` off.** `baseline_accept_as` grew a `record` parameter because its two callers owe opposite things. The MCP tool is called straight after a `check_changes` that recorded, so the index is already current, and a non-recording pass there opens a throwaway in-memory index and parses the whole repository from cold, once per acceptance and up to ten times in one agent round. The command line's `baseline accept` is not a check, and the index is where `--changed` keeps its watermark: a recording pass there would answer for every pending edit and leave the next `locrin check --changed` nothing to report. `run.rs`'s `an_agent_accept_records_the_index_and_a_command_line_accept_leaves_it_alone` pins the split by the changed count of the pass that follows each accept.
+
+- **Final review, `check` writes `last_verdict` through the connection its own pass recorded on.** `record_verdict` called `Index::open` a second time, paying for `init` and a second commit on the path a PostToolUse hook waits on, which is the path Part B's benchmarks measure. `pass` now hands its `Index` back, `Some` exactly when it recorded, and `check` calls `meta_set` on that. A failure to record is still a warning on stderr and never an error: the verdict is the answer and the caller already has it. `check_records_the_last_verdict` covers it unchanged, and the two gates the change can move were re-measured.
+
 ## File structure
 
 Part A:
