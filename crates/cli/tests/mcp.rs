@@ -325,3 +325,98 @@ fn stdout_carries_nothing_but_messages() {
     let status = io.child.wait().expect("the server exits");
     assert!(status.success(), "the server exited with {status}");
 }
+
+/// Spec 10.3's scripted session: the loop an agent actually runs against the
+/// server. List the tools, check, answer every finding, check again, stop when
+/// the verdict is no longer a block.
+///
+/// The budget is the Stop hook's three rounds (spec 5.2), and the assertion is
+/// that a session which answers every finding it was shown comes in under it: a
+/// loop that needed all three would leave an agent no round to spare for the
+/// work itself.
+#[test]
+fn a_scripted_agent_reaches_a_clean_verdict_in_under_three_rounds() {
+    const BUDGET: usize = 3;
+    let dir = copy_fixture();
+    let mut io = session(dir.path());
+    handshake(&mut io);
+    // A client lists before it calls, so what is measured here is the whole
+    // exchange rather than the tool calls alone.
+    rpc(&mut io, 2, "tools/list", json!({}));
+
+    let mut id = 3;
+    let mut rounds = 0;
+    // The ids accepted so far, in order and without repeats: one finding id
+    // identifies a class rather than an occurrence, so a verdict may name the
+    // same id twice and the baseline counts it once.
+    let mut accepted: Vec<String> = Vec::new();
+    let mut verdict = Value::Null;
+    while rounds < BUDGET {
+        rounds += 1;
+        verdict = parsed(&call(&mut io, id, "check_changes", json!({})));
+        id += 1;
+        if verdict["status"] != "block" {
+            break;
+        }
+        let ids: Vec<String> = verdict["findings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a verdict always lists findings: {verdict}"))
+            .iter()
+            .map(|f| f["id"].as_str().expect("every finding carries an id").to_string())
+            .collect();
+        assert!(!ids.is_empty(), "a blocking verdict with nothing in it: {verdict}");
+        for finding in ids {
+            let answer =
+                parsed(&call(&mut io, id, "accept_finding", json!({"id": finding, "reason": "scripted session"})));
+            id += 1;
+            assert_eq!(answer["accepted"], true, "{answer}");
+            assert_eq!(answer["id"], json!(finding), "{answer}");
+            if !accepted.contains(&finding) {
+                accepted.push(finding);
+            }
+            assert_eq!(answer["baseline_entries"], accepted.len(), "{answer}");
+        }
+    }
+    assert!(rounds <= 2, "the session took {rounds} rounds: {verdict}");
+    assert_ne!(verdict["status"], "block", "the session ended on a block: {verdict}");
+
+    // `status` is the agent's own record of where it left the repository, so it
+    // has to agree with what the session just did.
+    let s = parsed(&call(&mut io, id, "status", json!({})));
+    assert_eq!(s["baseline"]["entries"], accepted.len(), "{s}");
+    assert_eq!(s["last_verdict"]["status"], verdict["status"], "{s} against {verdict}");
+    finish(io);
+}
+
+/// Spec 9's schema rebuild, from the server's side: an upgraded binary meets an
+/// index its predecessor wrote and rebuilds it.
+///
+/// Silently is the whole point. On the command line a rebuild may say so; here
+/// stdout is the protocol, so a line about the rebuild is not a warning the
+/// operator reads, it is a frame the client cannot parse.
+#[test]
+fn a_stale_index_rebuilds_silently_for_the_server() {
+    let dir = copy_fixture();
+    let status = locrin(dir.path()).arg("scan").status().expect("the scan runs");
+    assert!(status.success(), "the scan exited with {status}");
+    rusqlite::Connection::open(index_db(dir.path()))
+        .expect("the index database opens")
+        .execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'", [])
+        .expect("the stamp is writable");
+
+    let mut io = session(dir.path());
+    handshake(&mut io);
+    // `rpc` parses every line it reads, so a rebuild that printed anything of
+    // its own would fail there rather than in the assertions below.
+    let v = parsed(&call(&mut io, 2, "status", json!({})));
+    assert_eq!(v["index"]["exists"], true, "{v}");
+    assert_eq!(v["index"]["schema"], "5", "{v}");
+
+    // Nothing is owed after the last response, so the rest of stdout is EOF.
+    drop(io.inp.take());
+    let mut rest = String::new();
+    io.out.read_to_string(&mut rest).expect("stdout reads to EOF");
+    assert_eq!(rest, "", "the server wrote past its last response: {rest}");
+    let exit = io.child.wait().expect("the server exits");
+    assert!(exit.success(), "the server exited with {exit}");
+}
