@@ -1,11 +1,21 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
-use common::{copy_fixture, locrin};
+use common::{copy_fixture, locrin, walkdir};
 use serde_json::{json, Value};
+
+/// The index database a run wrote, wherever the cache key put it. The path is
+/// `<LOCRIN_CACHE_DIR>/<key>/index.db` and the key is a hash of the canonical
+/// root, so a test that wants the file finds it rather than deriving it.
+fn index_db(dir: &Path) -> PathBuf {
+    walkdir(&dir.join(".cache"))
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("index.db"))
+        .expect("the run should have written an index database")
+}
 
 /// A running `locrin mcp` with its pipes.
 ///
@@ -178,6 +188,30 @@ fn find_existing_without_an_index_says_so() {
     let result = call(&mut io, 2, "find_existing", json!({"name": "ok"}));
     assert_eq!(result["isError"], true, "{result}");
     assert_eq!(text(&result), "no index: run locrin init or locrin scan first");
+    finish(io);
+}
+
+#[test]
+fn find_existing_on_an_empty_index_says_so() {
+    let dir = copy_fixture();
+    // A scan fills the index, and then its schema stamp is walked back to a
+    // version this build does not know: exactly what an upgraded binary meets
+    // on an index its predecessor wrote. `Index::open` rebuilds that into an
+    // empty database, so the file is there and has nothing in it, and the
+    // first question an agent asks after the upgrade must not be answered
+    // "nothing exists".
+    let status = locrin(dir.path()).arg("scan").status().expect("the scan runs");
+    assert!(status.success(), "the scan exited with {status}");
+    rusqlite::Connection::open(index_db(dir.path()))
+        .expect("the index database opens")
+        .execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'", [])
+        .expect("the stamp is writable");
+
+    let mut io = session(dir.path());
+    handshake(&mut io);
+    let result = call(&mut io, 2, "find_existing", json!({"name": "ok"}));
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(text(&result), "index is empty: run locrin scan first");
     finish(io);
 }
 

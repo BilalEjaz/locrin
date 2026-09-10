@@ -97,6 +97,14 @@ impl Tools {
             return Err(ToolError("no index: run locrin init or locrin scan first".into()));
         }
         let index = Index::open(&self.root).map_err(engine)?;
+        // The path check above is not the whole guard: `open` also rebuilds an
+        // index whose schema this build does not know, or one that is corrupt,
+        // into an empty database. An upgraded binary meets exactly that on its
+        // first run, and the empty rebuild would answer "nothing exists" with
+        // a file sitting on disk. Refuse again once the database is open.
+        if index.all_files().map_err(engine)?.is_empty() {
+            return Err(ToolError("index is empty: run locrin scan first".into()));
+        }
         let hits = symbols::search(&index, &Query { name, intent, params }, SEARCH_LIMIT).map_err(engine)?;
         let matches: Vec<Value> = hits
             .iter()
@@ -270,7 +278,7 @@ impl Handler for Tools {
             ToolSpec {
                 name: "status",
                 description: "What locrin knows about this repository: the index, the config, the baseline, and the \
-                              last verdict recorded. Reads only; it never builds the index.",
+                              last verdict recorded. Reads only; it never creates an index that does not exist.",
                 input_schema: json!({"type": "object", "properties": {}}),
             },
         ]
