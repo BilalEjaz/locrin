@@ -33,6 +33,20 @@
 
 (Empty at planning time. The executor appends every ruling here with its reason, as plans 2 and 3 did.)
 
+- **Task 2, the Stop hook's session id is percent-encoded and capped before it names a file.** The session id arrives in the payload, and payload data must never become a path on its own terms. It is reduced to `[A-Za-z0-9_-]` and cut at 100 characters before the round counter's file is named. The cost if the ruling is wrong is nothing: a UUID, which is what Claude Code sends, passes through untouched.
+
+- **Task 3, a staged file the engine does not parse still reaches the raw scope.** The brief's test `pre_commit_ignores_a_staged_file_that_is_not_source` asserted the opposite, and it was wrong twice over: the fixture's non-source file is `package.json` rather than `locrin.toml`, and a staged `package.json` is exactly what `vulnerable-dependency` and the Supabase RLS rule gate a commit on. The implementation was kept as written and the stderr assertion moved to `pre_commit_says_when_nothing_is_staged`, so what changed was the plan text.
+
+- **Task 3, the `staged_files` unit tests live in `crates/cli/src/git.rs`.** The CLI has no library target, so `tests/cli.rs` cannot reach the function to test it from outside.
+
+- **Task 4, the file count for `init`'s progress line is walked in `init.rs` rather than reported by `run::scan`.** The file structure said `run.rs` would grow a progress callback. `run::scan` can only report its count once it is over, and the first scan on a cold tree is long enough that a person watching a blank line assumes a hang, so `init` walks with `source_files` first and then calls `run::scan` unchanged. The second walk costs milliseconds and leaves the scan pipeline untouched; the cost if the ruling is wrong is one redundant walk per `init`.
+
+- **Task 4, a `.git/hooks/pre-commit` whose text is exactly `PRE_COMMIT_SCRIPT` is locrin's own.** It reports `unchanged`; any other content reports `skipped` with the line telling the operator what to add by hand. The brief's "always skipped" contradicted its own idempotence test, and it would have made a second `init` disown the file the first one wrote a moment earlier. Nothing is overwritten either way, so the ruling costs nothing if it is wrong.
+
+- **Task 5, the first run of the four-run benchmark set is discarded and reported.** The cold benchmark reads every file of the 1846-file bench checkout, so the first run after a gap measures the operating system's page cache: 4473 ms against 3866, 3888 and 3871 ms, with warm numbers on the same invocation inside a few milliseconds of the counted runs. All four numbers are in the measurement report and every one of them is green, so the discard changes no verdict. This is the method the two precision reports used.
+
+- **Task 5, the pull request is opened by the controller after the whole-branch review, not by this task.** The brief's step 4 was held back deliberately; the measurement and the dogfood are what Task 5 delivers, in `docs/superpowers/plans/2026-09-10-init-hooks-and-mcp-measurement.md`.
+
 ## File structure
 
 Part A:
