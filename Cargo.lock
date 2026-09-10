@@ -610,6 +610,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "locrin-core",
+ "locrin-mcp",
  "locrin-reporters",
  "locrin-rules",
  "rayon",

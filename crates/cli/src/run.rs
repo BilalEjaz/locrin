@@ -778,7 +778,11 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
 }
 
 /// Every current finding for a run, with the index updated when `record`.
-fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Vec<Finding>> {
+///
+/// Crate-visible because `explain_finding` needs the unfiltered set: a finding
+/// the baseline already suppresses is exactly the one an agent asks about, and
+/// `check` would have filtered it out before the tool ever saw it.
+pub(crate) fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Vec<Finding>> {
     Ok(pass(root, opts, record)?.findings)
 }
 
@@ -868,13 +872,23 @@ pub fn baseline_create(root: &Path, offline: bool) -> anyhow::Result<usize> {
 /// `offline` as in [`baseline_create`]: accepting one finding runs the whole
 /// check that produced it.
 pub fn baseline_accept(root: &Path, id: &str, reason: &str, offline: bool) -> anyhow::Result<bool> {
+    let author = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "unknown".into());
+    baseline_accept_as(root, id, reason, &author, offline)
+}
+
+/// [`baseline_accept`] with the author named by the caller.
+///
+/// The command line passes the login name, and the MCP server passes
+/// "agent via mcp": a reviewer reading the baseline months later has to be able
+/// to tell an agent's sign-off from a person's, and the login name of whoever
+/// happened to be running the editor would say the opposite of what happened.
+pub fn baseline_accept_as(root: &Path, id: &str, reason: &str, author: &str, offline: bool) -> anyhow::Result<bool> {
     let root = canonical_root(root);
     let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };
-    let author = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "unknown".into());
-    b.accept(f, reason, &author);
+    b.accept(f, reason, author);
     b.save(&root)?;
     Ok(true)
 }
