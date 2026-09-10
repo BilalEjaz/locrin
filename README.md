@@ -154,12 +154,17 @@ the same way, so a bad call never takes the server down.
   scanning uploads. `--offline` skips the network. Paths and the diff scopes
   cannot be combined: each names its own set of files.
 - `locrin scan` indexes the repository and warms the findings cache without
-  printing a verdict, so the next check pays only for what changed.
+  printing a verdict, so the next check pays only for what changed. `--offline`
+  skips the network.
 - `locrin baseline create` snapshots every current finding into the baseline.
+  `--offline` skips the network.
 - `locrin baseline accept <id> --reason <text>` accepts one finding by id.
+  `--offline` skips the network.
 - `locrin hook post-edit`, `locrin hook stop`, `locrin hook pre-commit` are the
-  three hooks above.
-- `locrin init` wires the repository up.
+  three hooks above. They have no `--offline`: a hook runs on every edit, so it
+  is always offline.
+- `locrin init` wires the repository up. `--offline` skips the network on the
+  first scan, which is the one scan `init` runs online.
 - `locrin mcp` serves the five tools.
 
 ## Exit codes

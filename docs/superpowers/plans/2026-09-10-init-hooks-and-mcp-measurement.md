@@ -1,4 +1,6 @@
-# Part A measurement: init, the Claude Code hooks, and the pre-commit hook
+# Plan 4 measurement: init, hooks, and the MCP server
+
+## Part A measurement: init, the Claude Code hooks, and the pre-commit hook
 
 Branch `engine/agent`, HEAD `92b2886` ("engine: the PostToolUse hook joins the
 benchmark set"), 10 September 2026. Plan 4 of 4,
@@ -271,7 +273,7 @@ that check so no compile overlapped a measurement.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | cold index (`scan`, empty cache) | under 5000 ms | 6054 ms | 4403 ms | 4716 ms | 4673 ms | 3866 to 3888 ms | PASS on the counted runs; the discarded run missed |
 | warm single-file check | under 300 ms | 238 ms | 270 ms | 292 ms | 293 ms | 182 to 186 ms | PASS, 7 ms of margin at worst |
-| post-edit hook (`hook post-edit`) | under 300 ms | 282 ms | 279 ms | 274 ms | 298 ms | 182 to 188 ms | PASS, 2 ms of margin at worst |
+| post-edit hook (`hook post-edit`) | under 300 ms | 282 ms | 279 ms | 274 ms | 298 ms | 182 to 185 ms | PASS, 2 ms of margin at worst |
 | warm 30-file check | under 1000 ms | 363 ms | 391 ms | 381 ms | 398 ms | 267 to 288 ms | PASS |
 | startup (`--help`) | under 50 ms | 23 ms | 24 ms | 21 ms | 28 ms | 18 to 19 ms | PASS |
 
@@ -283,8 +285,8 @@ green on every gate, so discarding it was bookkeeping. Here run 1's cold index
 is 6054 ms against a 5000 ms target and the benchmark failed the assertion; runs
 2, 3 and 4 are 4403, 4716 and 4673 ms. The reading is the same one Part A gave
 (the cold benchmark reads all 1846 files, so the first run after a gap pays for
-the operating system's page cache, and the gap of 1381 ms between run 1 and the
-fastest counted run is the same order as Part A's 602 ms), but the honest
+the operating system's page cache, and the gap of 1651 ms between run 1 and the
+fastest counted run is the same order as Part A's 607 ms), but the honest
 statement is that on this machine, in this state, a genuinely cold first scan of
 a 1846-file checkout does not meet spec 3.4's five seconds. Nothing was tuned
 and the target was not moved.
@@ -304,8 +306,10 @@ numbers improve is not what this document is for.
 The post-edit hook's own overhead, which is the reading spec 5.2's budget is
 really about, is unchanged: the hook is 274 to 298 ms and the warm single-file
 check on the same file and the same warm cache is 270 to 293 ms, so the stdin
-read and the watchdog thread are still inside the noise of both measurements
-(at most 5 ms, and negative on one of the four runs). That is the same result
+read and the watchdog thread are still inside the noise of both measurements.
+Hook minus warm check, run by run, is 9, -18 and 5 ms on the counted runs, which
+is to say at most 9 ms and negative on one of the three. Run 1's 44 ms is the
+larger figure, and it belongs to the discarded run. That is the same result
 Part A reported on a faster machine, which is the useful part: the overhead
 tracks the check rather than sitting on top of it.
 
@@ -391,9 +395,13 @@ the plan.
 
 - **Task 6, a JSON-RPC message is dispatched on its method before its id.** A message carrying neither is answered `-32600` with a null id rather than being read as a notification and dropped, and an explicit `id: null` is treated as a notification, which is what the JSON-RPC 2.0 text says. Only a malformed client can reach either arm, so the cost if the ruling is wrong is one error shape nobody well-behaved ever sees.
 
+- **Task 6 review, `serve` answers `-32700` on a line that is not UTF-8 and skips a blank one, instead of returning `Err`.** The function's own docstring already promised a parse error and a live session, but the code ended the loop, so one stray byte from a client took the server down mid-conversation. It now reads lines as bytes, replies `-32700` with a null id to a line it cannot decode, ignores a line that is only whitespace, and carries on. Only a malformed client provokes either arm, so the cost if the ruling is wrong is one error frame nobody well-behaved ever sees.
+
 - **Task 8, three tool-argument resolutions.** `find_existing` adds its "return types are not indexed in version one" note only when `returns` was actually supplied, because a note on a call that never mentioned it reads as a search that considered something it did not. Every argument is validated before the index is looked at, so a caller with a bad argument is told about the argument rather than about a missing index. "At least one of `intent` or `name`" is expressed as prose in the schema rather than as an `anyOf` of two `required` lists, which every client renders badly, and the tool repeats it in words when a call arrives empty.
 
 - **Task 8, `find_existing` refuses an index that `Index::open` has just rebuilt empty.** The path check alone was not enough: `open` rebuilds an index whose schema this build does not know, or one that is corrupt, into an empty database, and an upgraded binary meets exactly that on its first run. The tool would then answer "nothing exists" to the one question an agent asks before writing a duplicate. It now checks again once the database is open and says `index is empty: run locrin scan first`. Task 9's `a_stale_index_rebuilds_silently_for_the_server` covers the same rebuild from the server's side, where the rebuild must also not put a line on stdout.
+
+- **Task 8 review, `status` no longer claims it never builds the index.** Its description read "it never builds the index", which `Index::open` makes untrue: opening an index whose schema this build does not know rebuilds it empty. It now reads "it never creates an index that does not exist", which is the promise that actually holds. This is the half of the empty-index fix above that is about what the tool tells its caller rather than what it does.
 
 - **Task 9, the cold-index benchmark missed its target on the discarded first run and is recorded rather than tuned away.** Run 1 measured 6054 ms against spec 3.4's 5000 ms; the three counted runs are 4403, 4716 and 4673 ms. Part A's discard changed no verdict because its run 1 was green, and this one does, so it is stated in the measurement rather than left to the table. Nothing was tuned and no target was moved.
 
