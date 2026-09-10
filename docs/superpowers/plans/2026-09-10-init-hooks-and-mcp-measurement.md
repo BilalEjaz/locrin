@@ -459,3 +459,206 @@ the plan.
 - **Final review, `accept_finding` runs its pass with `record` on and `locrin baseline accept` runs its pass with `record` off.** `baseline_accept_as` grew a `record` parameter because its two callers owe opposite things. The MCP tool is called straight after a `check_changes` that recorded, so the index is already current, and a non-recording pass there opens a throwaway in-memory index and parses the whole repository from cold, once per acceptance and up to ten times in one agent round. The command line's `baseline accept` is not a check, and the index is where `--changed` keeps its watermark: a recording pass there would answer for every pending edit and leave the next `locrin check --changed` nothing to report. `run.rs`'s `an_agent_accept_records_the_index_and_a_command_line_accept_leaves_it_alone` pins the split by the changed count of the pass that follows each accept.
 
 - **Final review, `check` writes `last_verdict` through the connection its own pass recorded on.** `record_verdict` called `Index::open` a second time, paying for `init` and a second commit on the path a PostToolUse hook waits on, which is the path Part B's benchmarks measure. `pass` now hands its `Index` back, `Some` exactly when it recorded, and `check` calls `meta_set` on that. A failure to record is still a warning on stderr and never an error: the verdict is the answer and the caller already has it. `check_records_the_last_verdict` covers it unchanged, and the two gates the change can move were re-measured.
+
+## Dogfood cleanup
+
+Branch `engine/cleanup`, HEAD `d7f423e` ("engine: version 0.2.0, finding ids
+changed"), 10 September 2026. Plan
+`docs/superpowers/plans/2026-09-10-dogfood-cleanup.md`, Task 5. The first real
+`locrin init` on a repository nobody wrote the engine against is recorded in
+Part A above; this section is what that run turned up, what was done about it,
+and the evidence that the fixes hold on the same repository.
+
+### What the dogfood showed, and the fix
+
+- **Ids collided.** `init` reported 778 findings and wrote 756 baseline entries.
+  Thirteen ids were shared by 33 `vulnerable-dependency` findings, because three
+  installed versions of `@xmldom/xmldom` match one advisory and the anchor was
+  the package name and the advisory id with no version; one id was shared by two
+  `leftover-commented-code` findings, two identical commented lines inside one
+  function, because a line rule anchored on the enclosing symbol's name alone.
+  `Baseline::accept` dedupes by id, so accepting one instance silently accepted
+  the others. Fixed in `c32f4ae` and `527bff9`: a line rule's anchor carries the
+  line's trimmed text and its ordinal among the identical lines in that symbol,
+  an advisory carries the installed version, and the ordinal pass extracts the
+  symbol table once rather than once per earlier line.
+- **A NUL byte ended the parse.** `src/domain/food/collapseFoodDuplicates.ts` and
+  `src/domain/sync/quarantineNotice.ts` hold a literal NUL inside a template
+  literal as a composite-key separator, and tree-sitter's lexer reserves byte 0
+  as end of input, so both files were excluded from every rule. Fixed in
+  `8d48c5f` and `ca905e8`: the parser is handed a copy with each NUL replaced by
+  0x01, one byte for one byte so every span still indexes the original, and the
+  substitute is proven on both grammars.
+- **A bare ampersand in JSX text excluded the file.** `app/settings.tsx` and
+  `src/features/today/YourNumbersPanel.tsx` write `BODY & NUTRITION` as JSX
+  text, and the external scanner's `html_character_reference` stops at any `&`
+  that does not open a valid entity (tree-sitter-javascript issue 366, open),
+  which exempted a 2000-line screen from every rule. Fixed in `90393e4`: that one
+  error shape is tolerated and the file counts as parsed.
+- **`init` parsed the repository twice.** It printed every parse warning twice
+  and took 13.9 s, because the scan parsed 1846 files and then `baseline_create`
+  ran a second, non-recording pass over an in-memory index with a cold findings
+  cache. Fixed in `69b8768`: `baseline_create` takes a `record` flag, `init`
+  passes true and the command line's `baseline create` keeps false, so a
+  baseline command still never moves the `--changed` watermark.
+- **The fifth file is not fixable here.**
+  `src/theme/historyPort.guard.test.tsx:393` writes
+  `as import('../domain/signals/types').SleepStageSegment[]`, and the grammar has
+  no rule for an import type with an array suffix (tree-sitter-typescript issue
+  322, open). It stays excluded with one warning, and the README now says so and
+  names the two ways to write the type that parse.
+
+Ids changed for every rule, which invalidates every baseline. `0.1.0` became
+`0.2.0` in `d7f423e` for that reason and not only as an announcement: the
+findings cache key mixes in `CARGO_PKG_VERSION`, so without the bump a warm row
+written by the old binary would be served with the old id. With it, the first run
+after an upgrade rebuilds the cache and pays one cold pass.
+
+### Benchmarks
+
+Method as in Part A and Part B: `cargo test --release -p locrin-cli -- --ignored
+--nocapture`, bench repository `<home>/fasting-app` (1846 files, the same
+count both earlier parts measured and the count this branch's scan reports), a
+fresh temporary cache per benchmark, every run `--offline`, four sequential runs
+of the whole ignored set with the first discarded as the page-cache run. The
+release binary and the release test binaries were built before the measurement,
+and `tasklist` was empty on `cargo`, `rustc` and `locrin` after that build and
+before run 1, so no compile overlapped a run.
+
+Power state, read with `(Get-CimInstance Win32_Battery).BatteryStatus` before
+run 1 and again after run 4: `2` both times, which is mains. This is the mains
+re-measurement Part B asked for.
+
+| Benchmark | Target | Run 1 (discarded) | Run 2 | Run 3 | Run 4 | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | 46561 ms | 10032 ms | 10033 ms | 9857 ms | FAIL on all four runs |
+| warm single-file check | under 300 ms | 193 ms | 195 ms | 184 ms | 186 ms | PASS, 105 ms of margin at worst |
+| post-edit hook (`hook post-edit`) | under 300 ms | 199 ms | 181 ms | 189 ms | 184 ms | PASS, 111 ms of margin at worst |
+| warm 30-file check | under 1000 ms | 347 ms | 337 ms | 349 ms | 328 ms | PASS |
+| startup (`--help`) | under 50 ms | 21 ms | 19 ms | 20 ms | 19 ms | PASS |
+
+Four gates pass with more margin than any earlier measurement in this document,
+including the two the plan said to watch. Task 1 adds a symbol extract per
+finding and the warm single-file check is the gate that pays for it: 184 to 195
+ms against Part B's post-fix 194 to 210 ms, so the extract does not show. The
+post-edit hook is 181 to 189 ms and the hook's own overhead over the warm check
+on the same file is -14, 5 and -2 ms on the counted runs, which is noise in both
+directions, the same reading Part A and Part B gave.
+
+The cold gate fails, and it failed on every run rather than only on the
+discarded one. Nothing was tuned and the target was not moved. What follows is
+what was measured afterwards to find out what the failure is, because a 10 s
+number against Part A's 3866 ms is far too large to read as the two per-parse
+costs this branch added.
+
+The same benchmark, alone in its own process, on the same binary and the same
+machine an hour later: `cargo test --release -p locrin-cli --test bench
+cold_index -- --ignored --nocapture` twice, 5587 ms and 5072 ms. A fifth run of
+the whole ignored set at that point read 5189 ms cold, with 216 ms warm, 213 ms
+hook, 440 ms for the 30-file check and 21 ms startup. So the 10 s plateau was a
+state the machine was in during the four mandated runs and not what the code
+costs, and the 46561 ms of run 1 is the same state at its worst.
+
+The attribution is the useful part. Four release binaries were built from four
+commits into one target directory and each ran `locrin scan --offline` against
+the FastLift checkout with a fresh cache, twice each, interleaved, on an idle
+machine:
+
+| Binary | Commit | Cold scan, pass 1 | Cold scan, pass 2 |
+| --- | --- | --- | --- |
+| main, before this branch | `7a6f878` | 5524 ms | 6275 ms |
+| end of Task 1 (ids) | `527bff9` | 5456 ms | 5420 ms |
+| end of Task 3 (NUL, ampersand) | `90393e4` | 5699 ms | 5676 ms |
+| branch head | `d7f423e` | 5592 ms | 5383 ms |
+
+The branch head and the commit it branched from are the same speed inside the
+spread of repeated runs of either one, and the two commits between them are too.
+So this branch did not make the cold scan slower: the byte scan Task 2 adds per
+parse, the error walk Task 3 adds per parse and the symbol extract Task 1 adds
+per finding are all inside the noise of a 5 s measurement over 1846 files.
+
+What the table above does say, and what stands as the concern, is that a cold
+scan of this checkout on this machine is now around 5.4 to 6.3 s against spec
+3.4's 5000 ms, on mains, for `main` as much as for the branch. Part A measured
+3866 to 3888 ms for the same benchmark on 10 September and Part B measured 4403
+to 4716 ms on battery the same day. The gate is missed by every binary tested and
+by roughly the same amount, so it is either the machine or something that landed
+before this branch, and finding out which is not this task's to do. It is
+recorded here and reported to the controller.
+
+### The read-only FastLift check
+
+`<home>/fasting-app`, nothing written into it. `locrin-baseline.json` was
+moved to a scratch directory before the run and moved back after, so every
+finding the repository has is reported rather than filtered, and
+`git status --short` was taken before and after: the two listings are identical,
+byte for byte, including the untracked `locrin-baseline.json` and `locrin.toml`
+that the dogfood `init` left there. The baseline came back at the same 177789
+bytes it went out as. `locrin.toml` in that checkout is the `init` template with
+every setting still commented out, so this is the engine on its defaults.
+
+The run: `LOCRIN_CACHE_DIR=<fresh temp dir> locrin check --sarif --offline`, the
+release binary of `d7f423e`.
+
+- 766 findings, 766 distinct `partialFingerprints["locrin/id"]` values, no id
+  shared by two findings and therefore no rule to list as still colliding. By
+  rule: 597 `dead-export`, 99 `leftover-commented-code`, 59 `unused-import`, 6
+  `leftover-debug`, 4 `leftover-agent-marker`, 1 `test-newly-skipped`.
+- stderr, in full, is two lines: `warning: parse errors in
+  src/theme/historyPort.guard.test.tsx; excluded from rules` and `warning: no
+  cached advisory snapshot; vulnerable-dependency skipped`. Four of the five
+  files the dogfood excluded are gone from it, the fifth is still there, and the
+  warning appears once rather than twice.
+- The four fixed files are checked rather than exempt: `app/settings.tsx` 3
+  findings, `src/domain/food/collapseFoodDuplicates.ts` 1,
+  `src/domain/sync/quarantineNotice.ts` 1, and
+  `src/features/today/YourNumbersPanel.tsx` 0, which is a file that now parses
+  and has nothing to report. `src/theme/historyPort.guard.test.tsx` has 0
+  because it is still excluded, which is the documented limit.
+
+A fresh cache offline means no advisory snapshot, so that run skips
+`vulnerable-dependency`, which is the rule Task 1's other half was for. One
+further run, fresh cache and online, was made for that half alone: 820 findings,
+820 distinct ids, no collisions, 54 of them `vulnerable-dependency`. The dogfood
+run this section opens with reported 778 findings and could only write 756
+baseline entries; the same repository now yields an id per finding, with the
+three installed versions of one package separated, which is what Task 1 was for.
+
+### Deviations recorded during execution
+
+The rulings the controller made over Tasks 1 to 5, as they stand in the SDD
+ledger. The same bullets are appended to the plan.
+
+- **Task 1, Task 5 bumps the workspace version to 0.2.0.** Ids changed, and the
+  findings cache key mixes in `CARGO_PKG_VERSION`, so every warm row an older
+  binary wrote must become a miss rather than a hit serving a stale id. The cost
+  if the ruling is wrong is one cold pass per repository after the upgrade. No
+  test pins the crate version: the `0.1.0` strings in `crates/reporters` and
+  `crates/mcp` are arguments those tests pass in themselves, not reads of
+  `CARGO_PKG_VERSION`, so the bump changed no assertion.
+- **Task 2, the NUL fixture bucket is named `nul_byte` and the `line_text` half
+  of the unit assertion lives in the rules e2e.** `NUL` is a reserved device name
+  on Windows and a directory by that name fails with os error 1, and a unit test
+  in `crates/core` cannot reach the rules crate without a cycle.
+  `.gitattributes` pins the fixture as binary so no tool rewrites the byte.
+- **Task 3, the tolerated shape follows the tree the parser actually produces.**
+  The plan described an ERROR node between `jsx_text` siblings; probing showed an
+  ERROR child of `jsx_element` whose named children are identifiers. The
+  implementation tolerates that shape with "no child of the ERROR has an error of
+  its own" in place of the plan's `jsx_text` clause, keeping the `<`, `{` and `}`
+  text guard as the discriminator. The cost if the ruling is wrong is that a
+  text-run refusal which is not an ampersand is tolerated too, which is the same
+  class of error and the same recovery.
+- **Task 5, the pull request is opened by the controller after the whole-branch
+  review, not by this task.** As in Part A's Task 5 and Part B's Task 9, the
+  brief's `gh pr create` step was held back deliberately. What Task 5 delivers is
+  the version bump, the documentation, the benchmarks and the read-only FastLift
+  evidence.
+- **Task 5, the cold benchmark is reported as failed and attributed rather than
+  re-run until it passes.** The four mandated runs read 46561, 10032, 10033 and
+  9857 ms against a 5000 ms target. Instead of tuning or moving the target, three
+  earlier commits were built and measured beside the branch head, which put every
+  binary including `main` at 5.4 to 6.3 s and the four mandated runs' plateau
+  down to the machine's state at the time. The gate is missed either way and it
+  is missed by `main` too, so it is recorded as a concern and handed to the
+  controller.
