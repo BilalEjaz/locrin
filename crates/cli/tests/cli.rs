@@ -1269,3 +1269,25 @@ fn a_scoped_run_reports_a_migration_the_scope_names() {
     // so a migration can never be in it however it was edited.
     assert!(!rls(&["check", "--changed"]), "--changed cannot see a file that is not indexed");
 }
+
+/// `baseline create` runs every rule, `vulnerable-dependency` included, so it
+/// needs the same promise `check --offline` makes: without it a repository
+/// drawing its first line in the sand on a machine with no network waits out
+/// the advisory requests' timeouts.
+///
+/// The flag is observed through the warning an offline run with no snapshot
+/// prints. Its presence proves the flag reached the rule, because an online run
+/// would have fetched instead.
+#[test]
+fn baseline_create_takes_offline_and_the_flag_reaches_the_advisory_rule() {
+    let dir = copy_fixture();
+    std::fs::write(dir.path().join("package-lock.json"), LOCK).unwrap();
+    let out = locrin(dir.path()).args(["baseline", "create", "--offline"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("no cached advisory snapshot; vulnerable-dependency skipped"),
+        "the rule ran offline and said so: {err}"
+    );
+    assert!(dir.path().join("locrin-baseline.json").exists());
+}

@@ -70,12 +70,21 @@ enum Cmd {
 #[derive(Subcommand)]
 enum BaselineCmd {
     /// Snapshot every current finding into the baseline
-    Create,
+    Create {
+        /// Never touch the network; use the cached advisory snapshot or skip
+        /// vulnerable-dependency with a warning
+        #[arg(long)]
+        offline: bool,
+    },
     /// Accept one finding by id with a reason
     Accept {
         id: String,
         #[arg(long)]
         reason: String,
+        /// Never touch the network; use the cached advisory snapshot or skip
+        /// vulnerable-dependency with a warning
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -116,13 +125,13 @@ fn real_main() -> anyhow::Result<i32> {
             println!("indexed {files} file(s), {changed} changed");
             Ok(0)
         }
-        Cmd::Baseline { cmd: BaselineCmd::Create } => {
-            let n = run::baseline_create(&root)?;
+        Cmd::Baseline { cmd: BaselineCmd::Create { offline } } => {
+            let n = run::baseline_create(&root, offline)?;
             println!("baseline written with {n} finding(s)");
             Ok(0)
         }
-        Cmd::Baseline { cmd: BaselineCmd::Accept { id, reason } } => {
-            if run::baseline_accept(&root, &id, &reason)? {
+        Cmd::Baseline { cmd: BaselineCmd::Accept { id, reason, offline } } => {
+            if run::baseline_accept(&root, &id, &reason, offline)? {
                 println!("accepted {id}");
                 Ok(0)
             } else {

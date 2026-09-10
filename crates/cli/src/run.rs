@@ -804,10 +804,14 @@ pub fn scan(root: &Path, offline: bool) -> anyhow::Result<(usize, usize)> {
 
 /// Snapshots every current finding into the baseline, ignoring whatever the
 /// baseline already holds: `create` is a fresh line in the sand, not a merge.
-pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
+///
+/// `offline` is the same promise `check --offline` makes, and it belongs here
+/// for the same reason: `create` runs every rule, `vulnerable-dependency`
+/// included, so without it a repository drawing its first line in the sand on a
+/// machine with no network waits out the advisory requests' timeouts.
+pub fn baseline_create(root: &Path, offline: bool) -> anyhow::Result<usize> {
     let root = canonical_root(root);
-    let opts =
-        Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: false, diff: None };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::default();
     for f in &findings {
@@ -820,10 +824,12 @@ pub fn baseline_create(root: &Path) -> anyhow::Result<usize> {
 /// Accepts one current finding by id. Returns false when no finding in the
 /// current check carries that id, so the caller can say so rather than writing
 /// an entry that suppresses nothing.
-pub fn baseline_accept(root: &Path, id: &str, reason: &str) -> anyhow::Result<bool> {
+///
+/// `offline` as in [`baseline_create`]: accepting one finding runs the whole
+/// check that produced it.
+pub fn baseline_accept(root: &Path, id: &str, reason: &str, offline: bool) -> anyhow::Result<bool> {
     let root = canonical_root(root);
-    let opts =
-        Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: false, diff: None };
+    let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
     let findings = full_findings(&root, &opts, false)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };
