@@ -1,3 +1,4 @@
+mod session;
 pub mod text;
 
 use std::io::Read;
@@ -12,25 +13,38 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::run;
+use session::{Session, MAX_ROUNDS};
 
 /// What Claude Code writes to a hook's stdin. Every field this crate reads is
 /// optional at the type level so a payload from a newer or older Claude Code
 /// still parses; a missing field the hook needs makes the hook a no-op, never
 /// an error.
 ///
-/// The whole event is modelled even though `post_edit` reads one field of it:
-/// the type is the record of what the agent sends, and the rest of it is what
-/// the session hooks read, so the fields are declared here once rather than
-/// grown a field at a time as each hook arrives.
-#[allow(dead_code)]
+/// The whole event is modelled even though the hooks act on a few fields of it:
+/// the type is the record of what the agent sends, so the fields are declared
+/// here once rather than grown one at a time as each hook arrives. The ones no
+/// hook acts on say below why they are there anyway.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Input {
     pub session_id: String,
+    /// The project directory, which is also where Claude Code runs the hook, so
+    /// the process already knows it as its own working directory.
+    #[allow(dead_code)]
     pub cwd: String,
+    /// Which event this is, which the subcommand already said.
+    #[allow(dead_code)]
     pub hook_event_name: String,
+    /// Which tool wrote the file. `post_edit` treats Write and Edit alike, so
+    /// this is context for a reader of a recorded payload and nothing else.
+    #[allow(dead_code)]
     pub tool_name: String,
     pub tool_input: ToolInput,
+    /// Whether this stop is already a continuation of one the hook blocked.
+    /// Read for the record and deliberately not acted on: `stop` counts its own
+    /// rounds, and that counter is the same guard whether the stop is the
+    /// agent's own or a continuation of one.
+    #[allow(dead_code)]
     pub stop_hook_active: bool,
 }
 
@@ -190,6 +204,100 @@ pub fn post_edit(root: &Path, input: Input) -> i32 {
         // agent that is told "fine" a hundred times learns to skim what the
         // hook says.
         Outcome::Done(Ok(_)) => emit(None),
+    }
+}
+
+/// Checks the working tree before Claude Code stops and sends the agent back
+/// while blocking findings remain.
+///
+/// Where `post_edit` answers for the one file an edit touched, this answers for
+/// everything the session changed: an agent can leave a repository broken
+/// without the last edit being the broken one. The scope is the working tree
+/// against HEAD, which is what a person would see in `git status` plus the files
+/// they have not added yet, and a repository without a commit falls back to what
+/// the index calls changed, because there is nothing to diff against.
+///
+/// The round counter is what keeps this from being a loop. Three rounds is spec
+/// 5.2's cap; on the fourth stop the hook stands down and tells the person
+/// instead, because an agent that cannot fix a finding in three tries will not
+/// fix it in a fourth, and the person is the one who can decide what to do about
+/// it.
+pub fn stop(root: &Path, input: Input) -> i32 {
+    let root = canonical_root(root);
+    let mut session = Session::load(&root, &input.session_id);
+    // Past the cap there is nothing left to say: the agent is not being sent
+    // back, and the person was told once, on the stop that hit the cap.
+    if session.rounds > MAX_ROUNDS {
+        return emit(None);
+    }
+    let diff = crate::git::has_head(&root).then(|| crate::git::DiffScope::Base("HEAD".to_string()));
+    let opts = run::Options {
+        root: root.clone(),
+        paths: vec![],
+        changed_only: diff.is_none(),
+        json: true,
+        offline: true,
+        diff,
+    };
+    match watchdog(move || run::check(&opts)) {
+        Outcome::Timeout => emit(Some(json!({
+            "systemMessage": format!(
+                "locrin: working-tree check did not finish in {} s; not blocking the stop",
+                HOOK_BUDGET_MS / 1000
+            )
+        }))),
+        Outcome::Crashed => emit(Some(json!({
+            "systemMessage": "locrin: working-tree check failed inside the engine; not blocking the stop"
+        }))),
+        Outcome::Done(Err(e)) => {
+            emit(Some(json!({ "systemMessage": format!("locrin: {e:#}; not blocking the stop") })))
+        }
+        // A clean verdict closes the loop, so the budget is returned: a session
+        // that fixes what it broke and later breaks something else gets the full
+        // three rounds again.
+        Outcome::Done(Ok(v)) if v.blocking == 0 => {
+            session.rounds = 0;
+            save(&session);
+            emit(None)
+        }
+        Outcome::Done(Ok(v)) => {
+            session.rounds += 1;
+            save(&session);
+            if session.rounds <= MAX_ROUNDS {
+                let capped = v.capped(locrin_reporters::agent::CAP);
+                emit(Some(json!({
+                    "decision": "block",
+                    "reason": format!(
+                        "{}\nRound {} of {}: fix the blocking findings above, then stop again.",
+                        text::feedback(&capped),
+                        session.rounds,
+                        MAX_ROUNDS
+                    )
+                })))
+            } else {
+                // The findings are still there and the agent is not being sent
+                // back for them, so this one goes to the person, with the
+                // command that shows them the same view the hook had.
+                emit(Some(json!({
+                    "systemMessage": format!(
+                        "locrin: {} blocking finding(s) remain after {} rounds; the agent was not sent back \
+                         again. Run `locrin check --base HEAD` to see them.",
+                        v.blocking, MAX_ROUNDS
+                    )
+                })))
+            }
+        }
+    }
+}
+
+/// Records the round, or says why it could not.
+///
+/// A counter that cannot be written is not worth failing a stop over: the check
+/// still ran and its answer still reaches the agent. What it costs is the memory
+/// of this round, so it is reported rather than swallowed.
+fn save(session: &Session) {
+    if let Err(e) = session.save() {
+        eprintln!("locrin: could not record the stop round: {e:#}");
     }
 }
 

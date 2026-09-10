@@ -158,3 +158,15 @@ pub fn changed_files(root: &Path, scope: &DiffScope) -> anyhow::Result<Vec<Strin
     out.dedup();
     Ok(out)
 }
+
+/// Whether `root` is inside a git work tree that has at least one commit, which
+/// is what a diff against HEAD needs. False for no git, no repository, or an
+/// unborn branch.
+///
+/// This is a question, not a step of a run, so every way of failing is one
+/// answer: a caller asks it to choose a scope and has another scope to fall back
+/// to, and an error here would turn "there is nothing to diff against" into a
+/// hook that reports a problem instead of checking the code.
+pub fn has_head(root: &Path) -> bool {
+    git_command(root).args(["rev-parse", "--verify", "--quiet", "HEAD"]).output().is_ok_and(|out| out.status.success())
+}

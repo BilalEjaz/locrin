@@ -1291,3 +1291,17 @@ fn baseline_create_takes_offline_and_the_flag_reaches_the_advisory_rule() {
     );
     assert!(dir.path().join("locrin-baseline.json").exists());
 }
+
+/// `--base HEAD` needs a HEAD, and the Stop hook asks this before it builds that
+/// scope. The three answers are the three states a directory it runs in can be
+/// in, and only the last of them can be diffed against.
+#[test]
+fn has_head_is_true_only_once_there_is_a_commit() {
+    let dir = copy_fixture();
+    assert!(!git_src::has_head(dir.path()), "no repository at all");
+    git(dir.path(), &["init", "-q"]);
+    assert!(!git_src::has_head(dir.path()), "an unborn branch has no commit to diff against");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+    assert!(git_src::has_head(dir.path()));
+}

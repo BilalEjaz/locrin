@@ -2,6 +2,13 @@ mod git;
 mod hook;
 mod run;
 
+/// `LOCRIN_CACHE_DIR` is process-wide, so every test in this binary that points
+/// it somewhere of its own takes a turn here rather than racing the others.
+/// Poisoning is ignored: a panicking test has already failed and must not take
+/// the rest of the binary's tests down with it.
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -102,6 +109,13 @@ enum HookCmd {
     /// answers with one JSON object on stdout. There is no --offline flag: a
     /// hook runs on every edit, so it is always offline.
     PostEdit,
+    /// Check the working tree before Claude Code stops and send the agent back
+    /// while blocking findings remain
+    ///
+    /// The Stop hook. It checks everything that differs from HEAD, not the one
+    /// file an edit touched, and it sends the agent back at most three times per
+    /// session. Offline for the same reason as post-edit.
+    Stop,
 }
 
 fn real_main() -> anyhow::Result<i32> {
@@ -163,6 +177,10 @@ fn real_main() -> anyhow::Result<i32> {
             // Claude Code runs a hook in the project directory, so the current
             // directory is the root unless --root says otherwise.
             Ok(hook::post_edit(&root, input))
+        }
+        Cmd::Hook { cmd: HookCmd::Stop } => {
+            let Some(input) = hook::read_input() else { return Ok(0) };
+            Ok(hook::stop(&root, input))
         }
     }
 }
