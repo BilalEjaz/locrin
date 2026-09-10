@@ -40,23 +40,47 @@ pub struct Pattern {
 
 /// The compiled table: a set for the fast reject, and the individual
 /// expressions for pulling the value out of the line the set said matched.
+///
+/// The set is built once per process and the individual expressions are not.
+/// Building all of them was the whole of `secret-exposed`'s fixed cost, about
+/// 90 ms paid by the first file of every run whether or not a single line
+/// matched, and it is a cost the run almost never gets anything for: a
+/// repository with no committed credentials never asks for one of them. So each
+/// slot compiles on the first hit for its own pattern, through [`Compiled::at`],
+/// and a run that finds nothing pays for the set alone.
 pub struct Compiled {
     pub set: RegexSet,
-    pub regexes: Vec<Regex>,
+    /// One slot per entry in [`PATTERNS`], in the same order, each empty until
+    /// the set says its pattern matched a line.
+    regexes: Vec<OnceLock<Regex>>,
 }
 
-/// Compiles the table once per process. A bad expression here is a programming
-/// error, not something a repository can provoke, so it panics with the
-/// provider that owns it rather than degrading a locked rule into silence.
+impl Compiled {
+    /// The expression for the pattern at `index`, compiled if this is the first
+    /// line that matched it.
+    ///
+    /// A bad expression is a programming error, not something a repository can
+    /// provoke, so it panics with the provider that owns it rather than
+    /// degrading a locked rule into silence. In practice [`compiled`] has
+    /// already rejected it: `RegexSet::new` parses every pattern in the table,
+    /// so an expression that cannot compile fails the process before any file
+    /// is read, and this panic is the belt to that pair of braces.
+    pub fn at(&self, index: usize) -> &Regex {
+        self.regexes[index].get_or_init(|| {
+            let pattern = &PATTERNS[index];
+            Regex::new(pattern.regex).unwrap_or_else(|e| panic!("secret pattern for {}: {e}", pattern.provider))
+        })
+    }
+}
+
+/// Compiles the table's set once per process. A pattern that does not parse
+/// fails here, with the same panic a rule would have raised later.
 pub fn compiled() -> &'static Compiled {
     static COMPILED: OnceLock<Compiled> = OnceLock::new();
     COMPILED.get_or_init(|| {
-        let regexes = PATTERNS
-            .iter()
-            .map(|p| Regex::new(p.regex).unwrap_or_else(|e| panic!("secret pattern for {}: {e}", p.provider)))
-            .collect();
-        let set = RegexSet::new(PATTERNS.iter().map(|p| p.regex)).expect("every pattern compiles on its own first");
-        Compiled { set, regexes }
+        let set = RegexSet::new(PATTERNS.iter().map(|p| p.regex))
+            .unwrap_or_else(|e| panic!("the secret pattern table does not compile: {e}"));
+        Compiled { set, regexes: PATTERNS.iter().map(|_| OnceLock::new()).collect() }
     })
 }
 
@@ -535,7 +559,13 @@ mod tests {
     #[test]
     fn the_table_compiles_and_has_at_least_a_hundred_distinct_providers() {
         let c = compiled();
-        assert_eq!(c.regexes.len(), PATTERNS.len());
+        assert_eq!(c.set.len(), PATTERNS.len());
+        assert_eq!(c.regexes.len(), PATTERNS.len(), "one lazy slot per entry, in the same order");
+        // Every entry compiles on demand; asking for all of them is the check
+        // that used to happen eagerly in `compiled`.
+        for (i, p) in PATTERNS.iter().enumerate() {
+            assert!(c.at(i).as_str() == p.regex, "{} compiled out of order", p.provider);
+        }
         assert!(PATTERNS.len() >= 100, "{} patterns", PATTERNS.len());
         let mut seen = std::collections::BTreeSet::new();
         for p in PATTERNS {

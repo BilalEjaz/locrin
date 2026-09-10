@@ -318,7 +318,7 @@ fn scan(rule: &SecretExposed, file: &ParsedFile) -> Vec<Finding> {
         let mut claimed: Vec<&str> = Vec::new();
         for idx in compiled.set.matches(line) {
             let pattern = &patterns::PATTERNS[idx];
-            for caps in compiled.regexes[idx].captures_iter(line) {
+            for caps in compiled.at(idx).captures_iter(line) {
                 let whole = caps.get(0).map(|m| m.range()).unwrap_or(0..0);
                 let start = whole.start;
                 let value = if pattern.provider == patterns::PRIVATE_KEY {
