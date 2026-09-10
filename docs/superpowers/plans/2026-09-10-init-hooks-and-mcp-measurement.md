@@ -541,9 +541,9 @@ re-measurement Part B asked for.
 | startup (`--help`) | under 50 ms | 21 ms | 19 ms | 20 ms | 19 ms | PASS |
 
 Four gates pass with more margin than Part B's measurements gave, including the
-two the plan said to watch. Task 1 adds a symbol extract per finding and the
+two the plan said to watch. Task 1 adds a line scan per finding and the
 warm single-file check is the gate that pays for it: 184 to 195 ms against Part
-B's post-fix 194 to 210 ms, so the extract does not show. The
+B's post-fix 194 to 210 ms, so the scan does not show. The
 post-edit hook is 181 to 189 ms and the hook's own overhead over the warm check
 on the same file is -14, 5 and -2 ms on the counted runs, which is noise in both
 directions, the same reading Part A and Part B gave.

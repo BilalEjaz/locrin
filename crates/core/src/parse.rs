@@ -227,9 +227,7 @@ mod tests {
     /// every rule over one ampersand.
     #[test]
     fn a_bare_ampersand_in_jsx_text_is_tolerated() {
-        let src = "function A() { return <Label>BODY & NUTRITION</Label>; }
-"
-        .to_string();
+        let src = "function A() { return <Label>BODY & NUTRITION</Label>; }\n".to_string();
         let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src).unwrap();
         assert!(!p.has_error, "tree: {}", p.tree.root_node().to_sexp());
         // The tolerance is about what the engine can see, not about the tree
@@ -242,9 +240,7 @@ mod tests {
     /// nodes the rules would then read as absent, so it stays an error.
     #[test]
     fn a_broken_attribute_is_still_an_error() {
-        let src = "function A() { return <Label a=>x</Label>; }
-"
-        .to_string();
+        let src = "function A() { return <Label a=>x</Label>; }\n".to_string();
         let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src).unwrap();
         assert!(p.has_error, "tree: {}", p.tree.root_node().to_sexp());
     }
@@ -254,10 +250,8 @@ mod tests {
     /// not in the file is exactly what the engine cannot see past, so that file
     /// stays excluded rather than being read from a tree the parser made up.
     #[test]
-    fn a_missing_semicolon_in_a_type_is_still_an_error() {
-        let src = "const s = j as import('./t').Seg[];
-"
-        .to_string();
+    fn an_import_type_with_an_array_suffix_is_still_an_error() {
+        let src = "const s = j as import('./t').Seg[];\n".to_string();
         let p = parse_source(Path::new("x/t.ts"), "x/t.ts", src).unwrap();
         assert!(p.has_error, "tree: {}", p.tree.root_node().to_sexp());
     }
@@ -268,12 +262,9 @@ mod tests {
     /// `{` or `}` is markup the parser gave up on, not text.
     #[test]
     fn a_stray_bracket_in_jsx_text_is_still_an_error() {
-        for src in [
-            "function A() { return <Label>a </b</Label>; }
-",
-            "function A() { return <Label>a } b</Label>; }
-",
-        ] {
+        for src in
+            ["function A() { return <Label>a </b</Label>; }\n", "function A() { return <Label>a } b</Label>; }\n"]
+        {
             let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
             assert!(p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
         }

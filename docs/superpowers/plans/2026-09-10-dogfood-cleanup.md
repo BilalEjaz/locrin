@@ -159,7 +159,7 @@ fn is_tolerated_jsx_text_error(node: Node, src: &str) -> bool;
 ```
 `ParsedFile.has_error = has_blocking_error(tree.root_node(), &source)`.
 
-- [ ] Step 1: failing tests. Unit: `a_bare_ampersand_in_jsx_text_is_tolerated` (`<Label>BODY & NUTRITION</Label>` inside a component: `has_error == false`); `a_broken_attribute_is_still_an_error` (`<Label a=>x</Label>`: `has_error == true`); `a_missing_semicolon_in_a_type_is_still_an_error` (the FastLift `as import('./t').Seg[]` shape: `has_error == true`, pinning that the fifth file stays excluded rather than silently misparsed). E2e: a `.tsx` fixture with the ampersand and a `console.log` produces the `leftover-debug` finding and no warning.
+- [ ] Step 1: failing tests. Unit: `a_bare_ampersand_in_jsx_text_is_tolerated` (`<Label>BODY & NUTRITION</Label>` inside a component: `has_error == false`); `a_broken_attribute_is_still_an_error` (`<Label a=>x</Label>`: `has_error == true`); `an_import_type_with_an_array_suffix_is_still_an_error` (the FastLift `as import('./t').Seg[]` shape: `has_error == true`, pinning that the fifth file stays excluded rather than silently misparsed). E2e: a `.tsx` fixture with the ampersand and a `console.log` produces the `leftover-debug` finding and no warning.
 - [ ] Step 2: run, see them fail.
 - [ ] Step 3: implement; walk with a cursor over every node (`tree.rs` may already have a `walk` helper; reuse it).
 - [ ] Step 4: green; fmt; commit `engine: a bare ampersand in JSX text is a tolerated parse error`.
