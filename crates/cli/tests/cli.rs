@@ -1212,3 +1212,60 @@ fn a_scoped_run_reads_the_lockfile_only_when_the_scope_names_it() {
     let err = stderr(&["check", "src", "--offline"]);
     assert!(!err.contains(SKIPPED), "the lockfile is not under src: {err}");
 }
+
+/// A migration creating a table nothing locks down, written into a scratch copy
+/// rather than committed beside the fixture: every other test in this file
+/// shares that fixture and none of them should start paying for the rule that
+/// reads migrations.
+const MIGRATION: &str = "create table public.orders (id uuid primary key);\n";
+
+/// `supabase-table-without-rls` answers for the SQL migrations, and a migration
+/// is not a source file: no scope's import neighbourhood can ever reach one, so
+/// on every scoped run the rule used to read every migration and then have all
+/// of its findings thrown away by the graph filter.
+///
+/// The contract is the one `vulnerable-dependency` already has. A scoped run
+/// runs the rule only when the raw scope, every existing file the scope names
+/// rather than only the source files among them, holds a `.sql` under
+/// `supabase/migrations`; and a finding against a file the raw scope names is
+/// kept whatever the neighbourhood says.
+///
+/// Everything here is offline, so no test in this file makes a network call.
+#[test]
+fn a_scoped_run_reports_a_migration_the_scope_names() {
+    let rel = "supabase/migrations/0001_orders.sql";
+    let dir = copy_fixture();
+    std::fs::create_dir_all(dir.path().join("supabase/migrations")).unwrap();
+    std::fs::write(dir.path().join(rel), MIGRATION).unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "init"]);
+
+    let rls = |args: &[&str]| -> bool {
+        let out = locrin(dir.path()).args(args).args(["--json", "--offline"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "supabase-table-without-rls" && f["file"] == rel)
+    };
+
+    // A whole-repository check answers for every file, migrations included.
+    assert!(rls(&["check"]), "a whole-repository check reports the table");
+
+    // Naming the migration is an instruction to answer for it.
+    assert!(rls(&["check", rel]), "a scope that names the migration reports the table");
+
+    // Naming a directory names what is under it, at any depth.
+    assert!(rls(&["check", "supabase"]), "the migration is under supabase");
+    assert!(rls(&["check", "."]), "the repository root contains the migration");
+
+    // A named source file names no migration, so the rule does not run at all.
+    assert!(!rls(&["check", "src/index.ts"]), "a scope that cannot report the finding must not produce it");
+
+    // A diff scope can name it: git lists every changed file, not only the
+    // parsed ones.
+    std::fs::write(dir.path().join(rel), format!("{MIGRATION}-- a later note\n")).unwrap();
+    assert!(rls(&["check", "--base", "HEAD"]), "the migration is in the diff");
+
+    // `--changed` takes its scope from the index, which holds source files only,
+    // so a migration can never be in it however it was edited.
+    assert!(!rls(&["check", "--changed"]), "--changed cannot see a file that is not indexed");
+}

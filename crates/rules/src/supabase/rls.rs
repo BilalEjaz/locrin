@@ -17,6 +17,32 @@
 //! never touch the filesystem", because the process's working directory is not
 //! the repository root under a hook or an editor.
 //!
+//! Which is also the scoping contract, and the CLI enforces it before the rule
+//! is asked to run (see `rls_in_scope` in `crates/cli/src/run.rs`). A run
+//! narrowed to a scope answers for the migrations only when the scope itself
+//! names one: a diff whose git file list holds a `.sql` under
+//! `supabase/migrations`, a path argument naming one, or a directory argument
+//! the migrations lie under. Any other scope skips the rule outright, reading
+//! no migration at all, because the findings would have been discarded after
+//! being paid for: a migration is not a source file, so it is in no walk, no
+//! index and no import neighbourhood. `--changed` is therefore never a run that
+//! reports a table without row-level security, whatever was done to the
+//! migrations: that scope is the index's watermark and the index holds source
+//! files only, so it sees neither a `.sql` nor the lockfile.
+//!
+//! **Unmeasured on the corpus.** Zero findings across the five repositories,
+//! and the zero was checked rather than assumed: FastLift's 35 migrations
+//! create 33 tables and enable row-level security on all 33, so the rule ships
+//! on fixture evidence with 33 correct answers behind it (see the precision
+//! report).
+//!
+//! `locrin:allow` cannot suppress a finding from this rule. The marker is read
+//! off the line a finding sits on, and for a file the run never parsed that
+//! reading comes from the index's allow rows, which exist only for source
+//! files: a `.sql` has none, so a comment in a migration suppresses nothing.
+//! The baseline is the suppression path, which is the better one anyway: an
+//! accepted table is written down with a reason, a date and an author.
+//!
 //! The reading is regex over `supabase/migrations/*.sql`, sorted by name, which
 //! is how Supabase orders them. Comments are blanked before the regexes run, so
 //! a commented-out `create table` left in a migration as a note is not read as
@@ -60,6 +86,23 @@ pub struct SupabaseTableWithoutRls;
 /// applies from, and a repository that moved it has moved off the convention
 /// the rule is reading.
 const MIGRATIONS: &str = "supabase/migrations";
+
+/// Whether a repository-relative path is a migration this rule reads.
+///
+/// The CLI asks before it runs the rule at all, and it asks about the paths a
+/// narrowed scope names rather than about a walk: a scope holding no migration
+/// could not report a finding against one, so the rule is dropped from the run
+/// instead of reading every migration to have its answer discarded. See the
+/// module doc, and `rls_in_scope` in `crates/cli/src/run.rs`.
+///
+/// Direct children only, because [`migrations`] reads the directory rather than
+/// walking it, and the two have to agree about what a migration is.
+pub fn is_migration(rel: &str) -> bool {
+    let Some(name) = rel.strip_prefix(MIGRATIONS).and_then(|rest| rest.strip_prefix('/')) else {
+        return false;
+    };
+    !name.contains('/') && std::path::Path::new(name).extension().is_some_and(|x| x.eq_ignore_ascii_case("sql"))
+}
 
 /// A schema-qualified name, either half unquoted or double-quoted. Postgres
 /// folds an unquoted identifier to lower case and preserves a quoted one, which
@@ -389,6 +432,18 @@ mod tests {
 
         let sql = "select 'it''s fine -- really';\ncreate table public.live (id uuid);\n";
         assert_eq!(creates(sql), vec![("live".to_string(), 2)], "'' escapes a quote inside a literal");
+    }
+
+    /// What the CLI asks before it decides to run the rule at all.
+    #[test]
+    fn a_migration_is_a_sql_file_directly_under_the_migrations_directory() {
+        assert!(is_migration("supabase/migrations/0001_orders.sql"));
+        assert!(is_migration("supabase/migrations/0001_orders.SQL"));
+        assert!(!is_migration("supabase/migrations/archive/0001_orders.sql"), "the rule reads direct children only");
+        assert!(!is_migration("supabase/migrations/README.md"));
+        assert!(!is_migration("supabase/functions/orders/index.ts"));
+        assert!(!is_migration("db/migrations/0001_orders.sql"));
+        assert!(!is_migration("supabase/migrations"));
     }
 
     #[test]

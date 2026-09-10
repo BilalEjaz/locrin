@@ -15,7 +15,7 @@ use locrin_core::lang::Language;
 use locrin_core::parse::{parse_source, rel_path, ParsedFile};
 use locrin_core::previous::Previous;
 use locrin_core::resolve::Resolver;
-use locrin_core::walk::{canonical_path, canonical_root, source_files, WalkOptions};
+use locrin_core::walk::{all_files, canonical_path, canonical_root, source_files, WalkOptions};
 use locrin_rules::{file_rules, graph_rules, rule_runs, run_file_rules, run_rules, RuleContext};
 use rayon::prelude::*;
 
@@ -138,10 +138,15 @@ struct Explicit {
     /// The source files: what is parsed, and what file-rule findings are
     /// reported for.
     files: Vec<PathBuf>,
-    /// Every path that was named, before any language filter. A rule that
-    /// answers for a file the engine does not parse can only learn that the run
-    /// was asked about it from here; `vulnerable-dependency` and the lockfile
-    /// are the case that exists today. See `lock_in_scope` in `pass`.
+    /// Every existing file the command line named, before any language filter:
+    /// the files named outright, and for a directory every file beneath it,
+    /// source or not. A rule that answers for a file the engine does not parse
+    /// can only learn that the run was asked about it from here, and a graph
+    /// finding against such a file is kept on this authority rather than on the
+    /// import graph's. `vulnerable-dependency` reads the lockfile and
+    /// `supabase-table-without-rls` reads the SQL migrations; both are in no
+    /// walk, no index and no import neighbourhood. See `lock_in_scope`,
+    /// `rls_in_scope` and the graph `retain` in `pass`.
     raw: Vec<PathBuf>,
 }
 
@@ -150,18 +155,34 @@ struct Explicit {
 /// so the config's excludes still apply inside it; a file is taken as named,
 /// excluded or not, because naming a file is an instruction.
 ///
-/// A directory also names the lockfile when the lockfile lies beneath it, which
-/// the walk cannot say because the lockfile is not a source file and is in no
-/// walk. Without this `check .` would answer for every file in the repository
-/// except the one `vulnerable-dependency` reads, which is not what naming the
-/// root means.
-fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow::Result<Option<Explicit>> {
+/// The two readings differ for a directory. `files` is what the engine parses
+/// and reports file findings for, so it is the source files beneath it. `raw`
+/// is what the run was *asked about*, so it is every file beneath it: naming a
+/// directory names what is under it, and the files the rules read without
+/// parsing (the lockfile, a SQL migration) are exactly the ones a language
+/// filter drops. Left to the walk, `check .` would have answered for every file
+/// in the repository except the ones those two rules read, which is not what
+/// naming the root means.
+///
+/// The full listing is walked at most once and only when a directory is named,
+/// which is the only case where it can say anything a named path does not. The
+/// lockfile is added on top of it because a repository may have chosen to
+/// gitignore its lockfile, and a file the walk skips is still a file the rule
+/// reads.
+fn explicit_files(
+    root: &Path,
+    paths: &[PathBuf],
+    walked: &[PathBuf],
+    lockfile_rel: Option<&str>,
+    walk_opts: &WalkOptions,
+) -> anyhow::Result<Option<Explicit>> {
     if paths.is_empty() {
         return Ok(None);
     }
-    let lockfile = locrin_core::lockfile::locate(root).map(|rel| root.join(rel));
+    let lockfile = lockfile_rel.map(|rel| root.join(rel));
     let mut files = Vec::new();
     let mut raw = Vec::new();
+    let mut everything: Option<Vec<PathBuf>> = None;
     for p in paths {
         let abs = if p.is_absolute() { p.clone() } else { root.join(p) };
         // Canonicalise before anything else: `src/../src/dirty.ts` and
@@ -175,9 +196,12 @@ fn explicit_files(root: &Path, paths: &[PathBuf], walked: &[PathBuf]) -> anyhow:
             // A directory names the files under it and not itself: nothing
             // reports against a directory, and the walk already applied the
             // config's excludes.
-            let under: Vec<PathBuf> = walked.iter().filter(|f| f.starts_with(&canon)).cloned().collect();
-            raw.extend(under.iter().cloned());
-            files.extend(under);
+            files.extend(walked.iter().filter(|f| f.starts_with(&canon)).cloned());
+            if everything.is_none() {
+                everything = Some(all_files(root, walk_opts)?);
+            }
+            let all = everything.as_ref().expect("just filled");
+            raw.extend(all.iter().filter(|f| f.starts_with(&canon)).cloned());
             if let Some(lock) = lockfile.as_ref().filter(|lock| lock.starts_with(&canon)) {
                 raw.push(lock.clone());
             }
@@ -561,13 +585,24 @@ fn write_cache(ix: &mut Index, indexed: &Indexed, fresh: &[Finding], key: &Cache
 /// to be captured before it is replaced. A scope that did not come from the
 /// watermark does not get that widening; see the comment at the `retain` below.
 ///
-/// The lockfile is the exception to all of that, because it is not a source
-/// file: no walk, no index and no import neighbourhood reaches it, so a scoped
-/// run answers for it only when the scope names it outright. See `lock_in_scope`.
+/// The files the engine does not parse are the exception to all of that. The
+/// lockfile and the SQL migrations are read by graph rules and reached by no
+/// walk, no index and no import neighbourhood, so a scoped run answers for one
+/// only when the scope names it outright: the run keeps a raw scope beside the
+/// source-file scope, holding every existing file the scope named, and a graph
+/// finding survives when the neighbourhood holds its file or the raw scope
+/// does. A scope that names none of a rule's files drops that rule from the run
+/// rather than paying for reads whose findings it would discard. See
+/// `lock_in_scope` and `rls_in_scope`.
 fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
-    let walked = source_files(root, &WalkOptions { excludes: config.excludes.clone() })?;
-    let explicit = explicit_files(root, &opts.paths, &walked)?;
+    let walk_opts = WalkOptions { excludes: config.excludes.clone() };
+    let walked = source_files(root, &walk_opts)?;
+    // Which file the advisory rule would answer for, found without reading it.
+    // Located once and handed to everything that asks: the question costs a
+    // `stat` per candidate lockfile and has one answer for the whole pass.
+    let lockfile_rel = locrin_core::lockfile::locate(root);
+    let explicit = explicit_files(root, &opts.paths, &walked, lockfile_rel, &walk_opts)?;
     let mut candidates = walked;
     if let Some(e) = &explicit {
         candidates.extend(e.files.iter().cloned());
@@ -593,27 +628,31 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         scope = Some(listed.iter().filter(|r| walked.contains(r.as_str())).cloned().collect());
         raw_scope = Some(listed.into_iter().collect());
     }
-    // Which file the advisory rule would answer for, found without reading it,
-    // and whether this run's scope reaches it.
+    // Whether this run's scope reaches the two files a graph rule reads without
+    // the engine parsing them: the lockfile and the SQL migrations.
     //
-    // The lockfile is not a source file, so it is in no walk, no index and no
-    // import neighbourhood: a scope can only contain it by naming it. Left to
-    // the graph filter at the end of this function, every advisory finding on a
-    // scoped run was therefore produced and then discarded, after the rule had
-    // paid for the lockfile read, the snapshot read and, online, its requests.
-    // So the rule is dropped from the run instead, and the findings it does
-    // produce when the lockfile *is* named are kept whatever the neighbourhood
-    // says.
+    // Neither is a source file, so neither is in a walk, in the index or in an
+    // import neighbourhood: a scope can only contain one by naming it. Left to
+    // the graph filter at the end of this function, every advisory and every
+    // row-level-security finding on a scoped run was produced and then
+    // discarded, after the rule had paid for its reads and, online, its
+    // requests. So the rule is dropped from the run instead, and the findings it
+    // does produce when its files *are* named are kept on the raw scope's
+    // authority rather than on the neighbourhood's.
     //
-    // `--changed` is the one scope that cannot name it: that scope comes from
-    // the index, which holds source files only, so a lockfile edit is invisible
-    // to it and the rule never runs. A whole-repository run has no scope at all
-    // and is unchanged.
-    let lockfile_rel = locrin_core::lockfile::locate(root);
+    // `--changed` is the one scope that can name neither: that scope comes from
+    // the index, which holds source files only, so an edit to a lockfile or to a
+    // migration is invisible to it and neither rule ever runs. A
+    // whole-repository run has no scope at all and is unchanged.
     let lock_in_scope = if opts.changed_only {
         false
     } else {
         raw_scope.as_ref().is_none_or(|raw| lockfile_rel.is_some_and(|rel| raw.contains(rel)))
+    };
+    let rls_in_scope = if opts.changed_only {
+        false
+    } else {
+        raw_scope.as_ref().is_none_or(|raw| raw.iter().any(|rel| locrin_rules::supabase::rls::is_migration(rel)))
     };
     let resolver = Resolver::new(root, rels.iter().cloned().collect());
     let mut ix = if record { Index::open(root)? } else { Index::open_in_memory()? };
@@ -671,10 +710,13 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let graph = {
         let ctx = RuleContext { index: Some(&ix), ..base };
         let mut rules = graph_rules();
+        // Not a config decision and not the registry's business: this run could
+        // not report what these rules would find, so it does not ask.
         if !lock_in_scope {
-            // Not a config decision and not the registry's business: this run
-            // could not report what the rule would find, so it does not ask.
             rules.retain(|r| r.id() != "vulnerable-dependency");
+        }
+        if !rls_in_scope {
+            rules.retain(|r| r.id() != "supabase-table-without-rls");
         }
         run_rules(&rules, &ctx)?
     };
@@ -716,12 +758,14 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
             wide.extend(indexed.before);
         }
         wide.extend(neighbours(&ix, scope)?);
-        // The lockfile is the one file a graph finding can name that no
-        // neighbourhood contains, because nothing imports it. The scope named it
-        // (or the rule that reports against it did not run at all), so its
-        // findings are kept on that authority rather than on the graph's.
-        let lock_rel = lockfile_rel.filter(|_| lock_in_scope);
-        graph.retain(|f| wide.contains(&f.file) || lock_rel.is_some_and(|rel| f.file == rel));
+        // A graph finding can name a file no neighbourhood contains, because
+        // nothing imports it: the lockfile and a SQL migration are the two that
+        // exist today. The raw scope is the run's record of what it was asked
+        // about, source or not, so a finding against a file the scope named is
+        // kept on that authority rather than on the graph's. `--changed` has no
+        // raw scope at all, which is why it reports neither.
+        let raw_scope = raw_scope.as_ref();
+        graph.retain(|f| wide.contains(&f.file) || raw_scope.is_some_and(|raw| raw.contains(&f.file)));
     }
     findings.extend(graph);
     Ok(Run {
