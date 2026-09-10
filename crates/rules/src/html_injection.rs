@@ -3,6 +3,12 @@
 //! `outerHTML` assignment, `insertAdjacentHTML`, `document.write`, and jQuery's
 //! `.html()`.
 //!
+//! **Effectively unmeasured on the corpus.** One finding across the five
+//! repositories the engine is measured against, and it was true, which is 1/1
+//! and a sample far too small for the spec 10.2 gate. The rule ships on that
+//! plus its fixtures; the first repository that renders markup in volume is the
+//! real measurement.
+//!
 //! The rule reads one file's syntax tree, so it sees the shape of the value at
 //! the sink and never where the value came from. That is the whole of its
 //! judgement, and it is where the blind spots are:

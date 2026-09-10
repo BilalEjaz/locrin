@@ -45,6 +45,15 @@
 //! one line stay two findings and neither is quoted. Nothing downstream, a
 //! report, a SARIF file, a pull request comment, ever holds the secret.
 //!
+//! **Unmeasured on the corpus.** Zero findings across the 2674 indexed files of
+//! the five repositories the engine is measured against, so the spec 10.2
+//! precision gate has no sample here and the rule ships on fixture evidence.
+//! The zero was checked rather than assumed (see the precision report): it is a
+//! rule that ran over every line and found nothing, not a rule that never ran.
+//! A locked rule with no sample is the one place that would have STOPPED for
+//! the founder had it produced a false positive, and it produced no findings at
+//! all.
+//!
 //! **Where it under-reports on purpose.** A secret built at runtime from
 //! fragments, a base64 blob with no provider shape, a credential in a file the
 //! engine does not parse (`.env`, JSON, YAML: these are not source files and
