@@ -149,6 +149,18 @@ fn post_edit_hook_under_300ms() {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
+    // Exit 0 is every outcome the hook has, including the ones that checked
+    // nothing: a timeout, a crash inside the engine and an engine error all
+    // print a `systemMessage` saying so and return in milliseconds, which would
+    // fake a fast benchmark the way exit 2 would fake a fast `check`. A clean
+    // file prints nothing, and a block or an advisory prints a different key.
+    // The output is already collected, so reading it costs the measurement
+    // nothing.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("systemMessage"),
+        "the hook passed without checking, so the {ms} ms is not a real measurement: {stdout}"
+    );
     assert!(ms < 300, "post-edit hook took {ms} ms");
 }
 
