@@ -18,6 +18,10 @@ pub struct Symbol {
     pub end_line: u32,
     pub end_col: u32,
     pub exported: bool,
+    /// How many parameters the symbol declares, or None when it is not callable.
+    /// A class is not a zero-argument function, so it gets None rather than
+    /// `Some(0)`: [`search`] compares counts, and a None never matches.
+    pub params: Option<u32>,
 }
 
 /// How a declaration is exported, if at all.
@@ -34,6 +38,32 @@ fn span_of(node: Node) -> (u32, u32, u32, u32) {
     (s.row as u32 + 1, s.column as u32, e.row as u32 + 1, e.column as u32)
 }
 
+/// How many parameters the declaration at `node` takes, or None when nothing
+/// about it is callable.
+///
+/// A function declaration, generator included, carries the count on its own
+/// `parameters` field. A const carries it on the declarator's `value`, which is
+/// where an arrow or a function expression puts the same field. An arrow with a
+/// single unparenthesised parameter (`x => x`) has no `formal_parameters` node
+/// at all, only a `parameter` field, and that is one parameter. Everything else
+/// answers None, which is not the same answer as zero: `search` matches on the
+/// count, and a class must not rank as a zero-argument function.
+fn params_of(node: Node) -> Option<u32> {
+    let callable = match node.kind() {
+        "function_declaration" | "generator_function_declaration" => node,
+        "variable_declarator" => match node.child_by_field_name("value") {
+            Some(v) if matches!(v.kind(), "arrow_function" | "function_expression") => v,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    match callable.child_by_field_name("parameters") {
+        // Named children only: the commas and the parentheses are anonymous.
+        Some(list) => Some(list.named_child_count() as u32),
+        None => callable.child_by_field_name("parameter").map(|_| 1),
+    }
+}
+
 fn push(out: &mut Vec<Symbol>, rel: &str, kind: &str, name: &str, export_name: Option<String>, node: Node) {
     let (sl, sc, el, ec) = span_of(node);
     out.push(Symbol {
@@ -46,6 +76,7 @@ fn push(out: &mut Vec<Symbol>, rel: &str, kind: &str, name: &str, export_name: O
         start_col: sc,
         end_line: el,
         end_col: ec,
+        params: params_of(node),
     });
 }
 
@@ -159,8 +190,8 @@ pub fn store(index: &mut Index, file: &ParsedFile, syms: &[Symbol]) -> anyhow::R
     index.savepoint("symbols", |tx| {
         tx.execute("DELETE FROM symbols WHERE rel = ?1", params![file.rel])?;
         let mut stmt = tx.prepare(
-            "INSERT INTO symbols(rel, kind, name, export_name, start_line, start_col, end_line, end_col, exported)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO symbols(rel, kind, name, export_name, start_line, start_col, end_line, end_col, exported, params)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         for s in syms {
             stmt.execute(params![
@@ -172,7 +203,8 @@ pub fn store(index: &mut Index, file: &ParsedFile, syms: &[Symbol]) -> anyhow::R
                 s.start_col,
                 s.end_line,
                 s.end_col,
-                s.exported as i64
+                s.exported as i64,
+                s.params
             ])?;
         }
         Ok(())
@@ -182,7 +214,7 @@ pub fn store(index: &mut Index, file: &ParsedFile, syms: &[Symbol]) -> anyhow::R
 /// Every exported symbol in the index, in a reproducible order.
 pub fn exported(index: &Index) -> anyhow::Result<Vec<Symbol>> {
     let mut stmt = index.conn().prepare(
-        "SELECT rel, kind, name, export_name, start_line, start_col, end_line, end_col
+        "SELECT rel, kind, name, export_name, start_line, start_col, end_line, end_col, params
          FROM symbols WHERE export_name IS NOT NULL ORDER BY rel, start_line, start_col",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -196,9 +228,147 @@ pub fn exported(index: &Index) -> anyhow::Result<Vec<Symbol>> {
             end_line: r.get(6)?,
             end_col: r.get(7)?,
             exported: true,
+            params: r.get(8)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Words that carry no signal in an intent phrase, so a symbol sharing one of
+/// them with the query has not been matched on anything.
+pub const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "to", "for", "of", "in", "on", "that", "is", "with", "and", "or", "function", "helper", "method",
+];
+
+/// Splits an identifier or a phrase into lowercase tokens.
+///
+/// camelCase, PascalCase, snake_case, kebab-case and whitespace all separate,
+/// and a run of capitals stays one token until a lowercase letter starts the
+/// next word, so `DAY_RECORD_id` is day, record, id and `HTTPServer` is http,
+/// server.
+///
+/// STOPWORDS are deliberately not applied here. They belong to the intent
+/// phrase, which is prose; a symbol genuinely named `toKebab` is named `to` and
+/// `kebab`, and dropping half of it would make the name unsearchable.
+pub fn tokens(s: &str) -> Vec<String> {
+    fn flush(cur: &mut String, out: &mut Vec<String>) {
+        if !cur.is_empty() {
+            out.push(std::mem::take(cur));
+        }
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            flush(&mut cur, &mut out);
+            continue;
+        }
+        if let Some(prev) = i.checked_sub(1).and_then(|p| chars.get(p)).copied() {
+            let camel = c.is_uppercase() && prev.is_lowercase();
+            let acronym_end =
+                c.is_uppercase() && prev.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if camel || acronym_end {
+                flush(&mut cur, &mut out);
+            }
+        }
+        cur.extend(c.to_lowercase());
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// The same list with the duplicates removed, order preserved, so an overlap is
+/// a count of distinct shared tokens rather than of repetitions.
+fn unique(list: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(list.len());
+    for t in list {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// What a caller is looking for: a name it would have written, the intent in
+/// prose, and the signature it expects. Every field is optional; a query with
+/// no name and no intent matches nothing, because nothing has been said.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Query {
+    pub name: Option<String>,
+    pub intent: Option<String>,
+    pub params: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match {
+    pub rel: String,
+    pub line: u32,
+    pub kind: String,
+    pub name: String,
+    pub params: Option<u32>,
+    pub exported: bool,
+    /// The signature bit first, the name-token overlap second, so a tuple
+    /// comparison is the ranking.
+    pub score: (u8, u32),
+}
+
+/// Ranks every symbol in the index against the query: signature first (the
+/// parameter count matches, when both are known), name-token overlap second.
+/// Only symbols sharing at least one token with the query are returned, best
+/// first, ties by rel then line. `limit` caps the result.
+///
+/// Deviation from spec 6, recorded so release two knows what to replace: the
+/// spec asks for signature *vector* similarity first and name token overlap
+/// second. Without the fingerprint index, which is release two, the signature
+/// vector version one can honestly compute is the parameter count, and that is
+/// what this ranks on. It is a real signal (a three-argument call site wants a
+/// three-parameter function) and it is not a similarity score pretending to be
+/// one.
+pub fn search(index: &Index, q: &Query, limit: usize) -> anyhow::Result<Vec<Match>> {
+    let mut wanted = unique(q.name.iter().flat_map(|n| tokens(n)).collect());
+    for token in q.intent.iter().flat_map(|i| tokens(i)) {
+        if STOPWORDS.contains(&token.as_str()) || wanted.contains(&token) {
+            continue;
+        }
+        wanted.push(token);
+    }
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = index
+        .conn()
+        .prepare("SELECT rel, start_line, kind, name, params, exported FROM symbols ORDER BY rel, start_line")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Match {
+            rel: r.get(0)?,
+            line: r.get(1)?,
+            kind: r.get(2)?,
+            name: r.get(3)?,
+            params: r.get(4)?,
+            exported: r.get::<_, i64>(5)? != 0,
+            score: (0, 0),
+        })
+    })?;
+
+    let mut hits = Vec::new();
+    for row in rows {
+        let mut m = row?;
+        let overlap = unique(tokens(&m.name)).into_iter().filter(|t| wanted.contains(t)).count() as u32;
+        // Nothing in common is not a weak match, it is a different symbol.
+        if overlap == 0 {
+            continue;
+        }
+        // An unknown count on either side is not a match: `None == None` would
+        // rank every class above a function that shares the same tokens.
+        let sig = u8::from(q.params.is_some() && q.params == m.params);
+        m.score = (sig, overlap);
+        hits.push(m);
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.rel.cmp(&b.rel)).then_with(|| a.line.cmp(&b.line)));
+    hits.truncate(limit);
+    Ok(hits)
 }
 
 #[cfg(test)]
@@ -344,5 +514,92 @@ export const g = 2;
         store(&mut ix, &p, &syms).unwrap();
         let names: Vec<String> = exported(&ix).unwrap().into_iter().map(|s| s.export_name.unwrap()).collect();
         assert_eq!(names, vec!["a", "c", "default", "d", "e", "g"]);
+    }
+
+    const PARAMS: &str = r#"function a(x, y) {}
+export const b = (p) => p;
+const c = function () {};
+class D {}
+const e = 1;
+function* f(one, two, three) {}
+const g = x => x;
+"#;
+
+    #[test]
+    fn extracts_parameter_counts() {
+        let p = parse_source(Path::new("src/p.ts"), "src/p.ts", PARAMS.to_string()).unwrap();
+        let view: Vec<(String, Option<u32>)> = extract(&p).iter().map(|s| (s.name.clone(), s.params)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("a".to_string(), Some(2)),
+                ("b".to_string(), Some(1)),
+                ("c".to_string(), Some(0)),
+                ("D".to_string(), None),
+                ("e".to_string(), None),
+                ("f".to_string(), Some(3)),
+                // `x => x` carries its one parameter unparenthesised, so there is
+                // no `formal_parameters` node to count.
+                ("g".to_string(), Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokens_split_every_casing() {
+        assert_eq!(tokens("listFoodEntriesBetween"), vec!["list", "food", "entries", "between"]);
+        assert_eq!(tokens("DAY_RECORD_id"), vec!["day", "record", "id"]);
+        // `to` survives: STOPWORDS apply to the intent phrase, not to a name.
+        assert_eq!(tokens("to-kebab"), vec!["to", "kebab"]);
+    }
+
+    const SEARCHABLE: &str = r#"export function listFoodEntries(a, b) {}
+export function listFoodEntriesBetween(a, b, c) {}
+export function foodTotal(a) {}
+export function unrelated() {}
+"#;
+
+    fn searchable_index() -> Index {
+        let mut ix = Index::open_in_memory().unwrap();
+        let p = parse_source(Path::new("src/s.ts"), "src/s.ts", SEARCHABLE.to_string()).unwrap();
+        let syms = extract(&p);
+        store(&mut ix, &p, &syms).unwrap();
+        ix
+    }
+
+    #[test]
+    fn search_ranks_signature_then_overlap() {
+        let ix = searchable_index();
+
+        // Both `listFood*` share two tokens with `listEntries`; the three
+        // parameter one matches the signature too, so it comes first.
+        let q = Query { name: Some("listEntries".to_string()), intent: None, params: Some(3) };
+        let hits = search(&ix, &q, 10).unwrap();
+        let names: Vec<&str> = hits.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["listFoodEntriesBetween", "listFoodEntries"]);
+        assert_eq!(hits[0].score, (1, 2));
+        assert_eq!(hits[1].score, (0, 2));
+        assert_eq!(hits[0].params, Some(3));
+        assert_eq!(
+            (hits[0].rel.as_str(), hits[0].line, hits[0].kind.as_str(), hits[0].exported),
+            ("src/s.ts", 2, "function", true)
+        );
+
+        // The intent shares only `food`, which the three food symbols carry and
+        // `unrelated` does not. All three score the same, so the set is what is
+        // asserted, not an order within it.
+        let q = Query { name: None, intent: Some("sum the food for a day".to_string()), params: None };
+        let hits = search(&ix, &q, 10).unwrap();
+        let mut names: Vec<&str> = hits.iter().map(|m| m.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["foodTotal", "listFoodEntries", "listFoodEntriesBetween"]);
+        assert!(hits.iter().all(|m| m.score == (0, 1)), "{hits:?}");
+    }
+
+    #[test]
+    fn search_caps_at_the_limit() {
+        let ix = searchable_index();
+        let q = Query { name: Some("food".to_string()), intent: None, params: None };
+        assert_eq!(search(&ix, &q, 2).unwrap().len(), 2);
     }
 }

@@ -782,6 +782,44 @@ fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Ve
     Ok(pass(root, opts, record)?.findings)
 }
 
+/// What this run was asked about, as the one word `status` reports back.
+///
+/// The order mirrors `pass`: a diff scope replaces a named-path scope, and
+/// `--changed` is a scope only when neither of those supplied one.
+fn scope_name(opts: &Options) -> String {
+    match &opts.diff {
+        Some(crate::git::DiffScope::Base(r)) => format!("base:{r}"),
+        Some(crate::git::DiffScope::Since(r)) => format!("since:{r}"),
+        None if !opts.paths.is_empty() => "paths".to_string(),
+        None if opts.changed_only => "changed".to_string(),
+        None => "repo".to_string(),
+    }
+}
+
+/// Leaves the verdict in the index for `status` to read back.
+///
+/// Every failure here is a warning and nothing more. The verdict is the answer
+/// and the caller already has it; the note is a convenience for a later `status`
+/// call, and a read-only cache directory or a second locrin holding the write
+/// lock must not turn a successful check into a failed one.
+fn record_verdict(root: &Path, opts: &Options, verdict: &Verdict) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let note = serde_json::json!({
+        "status": verdict.status,
+        "blocking": verdict.blocking,
+        "high": verdict.high,
+        "medium": verdict.medium,
+        "low": verdict.low,
+        "duration_ms": verdict.duration_ms,
+        "at": at,
+        "scope": scope_name(opts),
+    });
+    let recorded = Index::open(root).and_then(|mut ix| ix.meta_set("last_verdict", &note.to_string()));
+    if let Err(e) = recorded {
+        eprintln!("warning: could not record the last verdict: {e:#}");
+    }
+}
+
 pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
     let started = Instant::now();
     // The walker returns canonical absolute paths, so the root that `rel_path`
@@ -790,7 +828,9 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
     let findings = full_findings(&root, opts, true)?;
     let baseline = Baseline::load(&root)?;
     let findings = baseline.filter(findings);
-    Ok(Verdict::from_findings(findings, started.elapsed().as_millis()))
+    let verdict = Verdict::from_findings(findings, started.elapsed().as_millis());
+    record_verdict(&root, opts, &verdict);
+    Ok(verdict)
 }
 
 /// Indexes the repository and warms the findings cache, so the first `check`
@@ -923,6 +963,41 @@ mod tests {
             "an unchanged file the repair pass re-recorded still has the version the index held: {:?}",
             second.previous.skipped_tests
         );
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+    }
+
+    /// `status` answers from the index, so the verdict a check produced has to
+    /// outlive the process that produced it.
+    #[test]
+    fn check_records_the_last_verdict() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
+        let root = canonical_root(dir.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/dirty.ts"),
+            "export function bad(): number {\n  console.log(\"x\");\n  return 2;\n}\n",
+        )
+        .unwrap();
+
+        let opts =
+            Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: true, diff: None };
+        let verdict = check(&opts).unwrap();
+        assert_eq!(verdict.status, locrin_core::finding::Status::Block);
+
+        let ix = Index::open(&root).unwrap();
+        let raw = ix.meta_get("last_verdict").unwrap().expect("check has to record the verdict it returned");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "block");
+        assert_eq!(v["scope"], "repo");
+        assert_eq!(v["blocking"], verdict.blocking as u64);
+        assert_eq!(v["high"], verdict.high as u64);
+        assert_eq!(v["medium"], verdict.medium as u64);
+        assert_eq!(v["low"], verdict.low as u64);
+        assert!(v["duration_ms"].as_u64().is_some(), "{v}");
+        assert!(v["at"].as_u64().unwrap_or(0) > 0, "{v}");
 
         std::env::remove_var("LOCRIN_CACHE_DIR");
     }
