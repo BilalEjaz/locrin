@@ -1,0 +1,18 @@
+{
+  "session_id": "9a8b7c6d-5e4f-4321-8765-0f1e2d3c4b5a",
+  "transcript_path": "C:\\Users\\dev\\.claude\\projects\\repo\\9a8b7c6d.jsonl",
+  "cwd": "C:\\Users\\dev\\repo",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "C:\\Users\\dev\\repo\\src\\dirty.ts",
+    "old_string": "  return 2;",
+    "new_string": "  console.log(\"debug\");\n  return 2;"
+  },
+  "tool_response": {
+    "filePath": "C:\\Users\\dev\\repo\\src\\dirty.ts",
+    "success": true
+  },
+  "tool_use_id": "toolu_01M2N3P4Q5R6S7T8U9V0W1X2"
+}

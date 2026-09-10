@@ -1,0 +1,17 @@
+{
+  "session_id": "5f3b2c1a-0d4e-4a7b-9c8d-1e2f3a4b5c6d",
+  "transcript_path": "/home/dev/.claude/projects/repo/5f3b2c1a.jsonl",
+  "cwd": "/home/dev/repo",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/home/dev/repo/src/dirty.ts",
+    "content": "export function bad(): number {\n  console.log(\"debug\");\n  return 2;\n}\n"
+  },
+  "tool_response": {
+    "filePath": "/home/dev/repo/src/dirty.ts",
+    "success": true
+  },
+  "tool_use_id": "toolu_01A1B2C3D4E5F6G7H8J9K0L1"
+}

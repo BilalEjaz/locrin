@@ -1,4 +1,5 @@
 mod git;
+mod hook;
 mod run;
 
 use std::path::PathBuf;
@@ -65,6 +66,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BaselineCmd,
     },
+    /// Run as an agent hook, reading the event as JSON on stdin
+    Hook {
+        #[command(subcommand)]
+        cmd: HookCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -86,6 +92,16 @@ enum BaselineCmd {
         #[arg(long)]
         offline: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// Check the file Claude Code just wrote and answer the agent
+    ///
+    /// The PostToolUse hook. It reads the tool event as JSON on stdin and
+    /// answers with one JSON object on stdout. There is no --offline flag: a
+    /// hook runs on every edit, so it is always offline.
+    PostEdit,
 }
 
 fn real_main() -> anyhow::Result<i32> {
@@ -138,6 +154,15 @@ fn real_main() -> anyhow::Result<i32> {
                 eprintln!("error: no current finding with id {id}");
                 Ok(2)
             }
+        }
+        Cmd::Hook { cmd: HookCmd::PostEdit } => {
+            // A payload the hook could not read has already been reported on
+            // stderr. The hook still exits 0 with an empty stdout, because the
+            // alternative is stalling the agent over a message it did not send.
+            let Some(input) = hook::read_input() else { return Ok(0) };
+            // Claude Code runs a hook in the project directory, so the current
+            // directory is the root unless --root says otherwise.
+            Ok(hook::post_edit(&root, input))
         }
     }
 }
