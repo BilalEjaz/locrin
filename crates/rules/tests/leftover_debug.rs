@@ -1,6 +1,6 @@
 mod common;
 
-use common::{fixture, run_on};
+use common::{fixture, hits, run_on};
 use locrin_core::config::Config;
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_debug::LeftoverDebug;
@@ -8,11 +8,35 @@ use locrin_rules::leftover_debug::LeftoverDebug;
 #[test]
 fn flags_console_log_debug_and_debugger() {
     let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "flag"), &Config::default());
-    let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
-    assert_eq!(lines, vec![2, 3, 4]);
+    assert_eq!(
+        hits(&out),
+        vec![
+            ("a.ts".to_string(), 2),
+            ("a.ts".to_string(), 3),
+            ("a.ts".to_string(), 4),
+            ("twice.ts".to_string(), 2),
+            ("twice.ts".to_string(), 3),
+        ]
+    );
     assert!(out.iter().all(|f| f.severity == Severity::High && f.confidence == Confidence::High));
     assert_eq!(out[0].evidence, "console.log(\"loading\", id);");
     assert_eq!(out[0].rule, "leftover-debug");
+}
+
+/// The same debug line twice in one function is two findings a reader has to
+/// remove separately, so it is two ids: with one id between them, accepting
+/// either into a baseline would silently accept the other.
+#[test]
+fn two_identical_debug_lines_in_one_function_get_two_ids() {
+    let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "flag"), &Config::default());
+    let twice: Vec<&str> = out.iter().filter(|f| f.file == "twice.ts").map(|f| f.id.as_str()).collect();
+    assert_eq!(twice.len(), 2, "the fixture holds the line twice: {:?}", hits(&out));
+    assert_ne!(twice[0], twice[1], "identical lines, separate findings");
+
+    let mut ids: Vec<&str> = out.iter().map(|f| f.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), out.len(), "no two findings of this rule share an id");
 }
 
 #[test]

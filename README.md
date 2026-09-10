@@ -219,8 +219,11 @@ where the acceptance is written down with a reason.
 
 `locrin-baseline.json` holds accepted findings by id, each with the rule, the
 file, a reason, an author and a date. A finding in the baseline is filtered out
-of every verdict. An id identifies a finding class within a symbol rather than
-one occurrence, so accepting one accepts the class.
+of every verdict. An id identifies whatever the rule that reported it anchored
+on: a rule that reports a line anchors on the enclosing symbol, the line's text
+and which of the identical lines in that symbol it is, so every occurrence is
+accepted on its own; a rule that reports a class, such as a secret's value,
+anchors on the class and one acceptance covers every place it appears.
 
 For a single line, the text `locrin:allow` on that line suppresses the findings
 reported there. The indexer records which lines carry it, so the suppression
