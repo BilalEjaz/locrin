@@ -12,6 +12,7 @@ path = "src/main.rs"
 locrin-core = { path = "../core" }
 locrin-rules = { path = "../rules" }
 locrin-reporters = { path = "../reporters" }
+locrin-mcp = { path = "../mcp" }
 anyhow.workspace = true
 clap.workspace = true
 serde = { workspace = true }

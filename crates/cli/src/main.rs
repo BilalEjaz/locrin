@@ -1,6 +1,7 @@
 mod git;
 mod hook;
 mod init;
+mod mcp_tools;
 mod run;
 
 /// `LOCRIN_CACHE_DIR` is process-wide, so every test in this binary that points
@@ -88,6 +89,18 @@ enum Cmd {
     Hook {
         #[command(subcommand)]
         cmd: HookCmd,
+    },
+    /// Serve the five tools over stdio as an MCP server
+    ///
+    /// Claude Code starts this from the `.mcp.json` entry `init` writes, in the
+    /// project directory, so the root is the current directory unless --root
+    /// says otherwise. Stdout carries protocol messages and nothing else;
+    /// anything for a human goes to stderr.
+    Mcp {
+        /// Let vulnerable-dependency query osv.dev; off by default so a tool
+        /// call never waits on the network
+        #[arg(long)]
+        online: bool,
     },
 }
 
@@ -229,6 +242,18 @@ fn real_main() -> anyhow::Result<i32> {
         // waving it through as a pass. The operator who disagrees has
         // `git commit --no-verify`.
         Cmd::Hook { cmd: HookCmd::PreCommit } => hook::pre_commit(&root),
+        Cmd::Mcp { online } => {
+            let mut tools = mcp_tools::Tools::new(root, !online);
+            locrin_mcp::serve(
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+                &mut tools,
+                "locrin",
+                env!("CARGO_PKG_VERSION"),
+            )?;
+            // Reached when the client closed stdin, which is how a session ends.
+            Ok(0)
+        }
     }
 }
 

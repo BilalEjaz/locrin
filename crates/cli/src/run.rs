@@ -38,6 +38,11 @@ struct Run {
     findings: Vec<Finding>,
     files: usize,
     changed: usize,
+    /// The connection the pass recorded through, handed back so a caller with
+    /// something more to write does not open the database a second time.
+    /// `Some` exactly when the pass recorded; a non-recording pass filled a
+    /// throwaway in-memory index and has nothing to lend.
+    index: Option<Index>,
     /// What the pass learned about the previous version of the files it reported
     /// for. The CLI needs only the findings; this exists so a test can check the
     /// capture without re-running the whole pipeline by hand, and so it is
@@ -772,14 +777,66 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         findings,
         files,
         changed,
+        index: record.then_some(ix),
         #[cfg(test)]
         previous,
     })
 }
 
 /// Every current finding for a run, with the index updated when `record`.
-fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Vec<Finding>> {
+///
+/// Crate-visible because `explain_finding` needs the unfiltered set: a finding
+/// the baseline already suppresses is exactly the one an agent asks about, and
+/// `check` would have filtered it out before the tool ever saw it.
+pub(crate) fn full_findings(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Vec<Finding>> {
     Ok(pass(root, opts, record)?.findings)
+}
+
+/// What this run was asked about, as the one word `status` reports back.
+///
+/// The order mirrors `pass`: a diff scope replaces a named-path scope, and
+/// `--changed` is a scope only when neither of those supplied one.
+fn scope_name(opts: &Options) -> String {
+    match &opts.diff {
+        Some(crate::git::DiffScope::Base(r)) => format!("base:{r}"),
+        Some(crate::git::DiffScope::Since(r)) => format!("since:{r}"),
+        None if !opts.paths.is_empty() => "paths".to_string(),
+        None if opts.changed_only => "changed".to_string(),
+        None => "repo".to_string(),
+    }
+}
+
+/// Leaves the verdict in the index for `status` to read back, on the connection
+/// the run itself recorded through.
+///
+/// The run's own, rather than a second [`Index::open`]: opening the database
+/// again pays for `init` and for a second commit, on the path a PostToolUse hook
+/// waits on. A run that did not record has no connection to lend and no index to
+/// write to either, which is the `None` arm.
+///
+/// Every failure here is a warning and nothing more. The verdict is the answer
+/// and the caller already has it; the note is a convenience for a later `status`
+/// call, and a read-only cache directory or a second locrin holding the write
+/// lock must not turn a successful check into a failed one.
+fn record_verdict(index: Option<Index>, opts: &Options, verdict: &Verdict) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let note = serde_json::json!({
+        "status": verdict.status,
+        "blocking": verdict.blocking,
+        "high": verdict.high,
+        "medium": verdict.medium,
+        "low": verdict.low,
+        "duration_ms": verdict.duration_ms,
+        "at": at,
+        "scope": scope_name(opts),
+    });
+    let recorded = match index {
+        Some(mut ix) => ix.meta_set("last_verdict", &note.to_string()),
+        None => Err(anyhow::anyhow!("the run kept no index to write to")),
+    };
+    if let Err(e) = recorded {
+        eprintln!("warning: could not record the last verdict: {e:#}");
+    }
 }
 
 pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
@@ -787,10 +844,15 @@ pub fn check(opts: &Options) -> anyhow::Result<Verdict> {
     // The walker returns canonical absolute paths, so the root that `rel_path`
     // strips has to be canonical too or nothing would strip.
     let root = canonical_root(&opts.root);
-    let findings = full_findings(&root, opts, true)?;
+    // `pass` rather than `full_findings`: the verdict is written back through
+    // this run's own connection, so the run has to be kept rather than reduced
+    // to its findings.
+    let run = pass(&root, opts, true)?;
     let baseline = Baseline::load(&root)?;
-    let findings = baseline.filter(findings);
-    Ok(Verdict::from_findings(findings, started.elapsed().as_millis()))
+    let findings = baseline.filter(run.findings);
+    let verdict = Verdict::from_findings(findings, started.elapsed().as_millis());
+    record_verdict(run.index, opts, &verdict);
+    Ok(verdict)
 }
 
 /// Indexes the repository and warms the findings cache, so the first `check`
@@ -827,14 +889,45 @@ pub fn baseline_create(root: &Path, offline: bool) -> anyhow::Result<usize> {
 ///
 /// `offline` as in [`baseline_create`]: accepting one finding runs the whole
 /// check that produced it.
+///
+/// The pass does not record. `baseline accept` is not a check, and the index is
+/// where `locrin check --changed` keeps its watermark: a recording pass here
+/// would answer for every pending edit and leave the next `--changed` check with
+/// nothing to report. The MCP server's accept is the other way round, and
+/// [`baseline_accept_as`] says why.
 pub fn baseline_accept(root: &Path, id: &str, reason: &str, offline: bool) -> anyhow::Result<bool> {
+    let author = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "unknown".into());
+    baseline_accept_as(root, id, reason, &author, offline, false)
+}
+
+/// [`baseline_accept`] with the author named by the caller, and the choice of
+/// whether the pass records.
+///
+/// The command line passes the login name, and the MCP server passes
+/// "agent via mcp": a reviewer reading the baseline months later has to be able
+/// to tell an agent's sign-off from a person's, and the login name of whoever
+/// happened to be running the editor would say the opposite of what happened.
+///
+/// `record` is the same split. The MCP server passes true, as `explain_finding`
+/// does: an agent accepting a finding has just run a recording `check_changes`
+/// to be shown it, so the index is already current and a non-recording pass
+/// would parse the whole repository from cold to learn what the last call
+/// wrote, up to once per finding per round. The command line passes false, for
+/// the reason on [`baseline_accept`].
+pub fn baseline_accept_as(
+    root: &Path,
+    id: &str,
+    reason: &str,
+    author: &str,
+    offline: bool,
+    record: bool,
+) -> anyhow::Result<bool> {
     let root = canonical_root(root);
     let opts = Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline, diff: None };
-    let findings = full_findings(&root, &opts, false)?;
+    let findings = full_findings(&root, &opts, record)?;
     let mut b = Baseline::load(&root)?;
     let Some(f) = findings.iter().find(|f| f.id == id) else { return Ok(false) };
-    let author = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "unknown".into());
-    b.accept(f, reason, &author);
+    b.accept(f, reason, author);
     b.save(&root)?;
     Ok(true)
 }
@@ -923,6 +1016,102 @@ mod tests {
             "an unchanged file the repair pass re-recorded still has the version the index held: {:?}",
             second.previous.skipped_tests
         );
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+    }
+
+    /// The two accepts differ in one thing and it is deliberate. The MCP loop
+    /// calls `accept_finding` straight after a recording `check_changes`, so its
+    /// pass writes through to the index the previous call has just made current;
+    /// a throwaway in-memory index there is a cold parse of the whole repository
+    /// per acceptance. The command line has the opposite duty: `baseline accept`
+    /// is not a check, and a recording pass would consume the changed set the
+    /// next `locrin check --changed` is owed.
+    ///
+    /// The changed count of a later `--changed` pass is what tells them apart:
+    /// an accept that recorded has already answered for the edit, and one that
+    /// did not has left it for the check.
+    #[test]
+    fn an_agent_accept_records_the_index_and_a_command_line_accept_leaves_it_alone() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        /// One accept, and how many files the next `--changed` pass still finds
+        /// changed after it.
+        fn changed_after_accept(record: bool) -> usize {
+            let dir = tempfile::tempdir().unwrap();
+            std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
+            let root = canonical_root(dir.path());
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("src/dirty.ts"),
+                "export function bad(): number {\n  console.log(\"x\");\n  return 2;\n}\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("src/quiet.ts"), "export const q = 1;\n").unwrap();
+
+            let opts = Options {
+                root: root.clone(),
+                paths: vec![],
+                changed_only: false,
+                json: false,
+                offline: true,
+                diff: None,
+            };
+            // The recording check the agent loop runs before it accepts anything.
+            let findings = full_findings(&root, &opts, true).unwrap();
+            let id = findings.first().expect("the fixture has a finding to accept").id.clone();
+
+            // An edit to a file the accept is not about, so what is measured is
+            // whether the accept's own pass wrote what it read.
+            std::fs::write(root.join("src/quiet.ts"), "export const q = 2;\n").unwrap();
+            let accepted = if record {
+                baseline_accept_as(&root, &id, "under review", "agent via mcp", true, true).unwrap()
+            } else {
+                baseline_accept(&root, &id, "under review", true).unwrap()
+            };
+            assert!(accepted, "the accept found nothing to accept, so it measured nothing");
+
+            let changed = Options { changed_only: true, ..opts };
+            let after = pass(&root, &changed, true).unwrap();
+            std::env::remove_var("LOCRIN_CACHE_DIR");
+            after.changed
+        }
+
+        assert_eq!(changed_after_accept(true), 0, "the agent's accept had already indexed the edit");
+        assert_eq!(changed_after_accept(false), 1, "the command line's accept must leave the edit for the check");
+    }
+
+    /// `status` answers from the index, so the verdict a check produced has to
+    /// outlive the process that produced it.
+    #[test]
+    fn check_records_the_last_verdict() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
+        let root = canonical_root(dir.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/dirty.ts"),
+            "export function bad(): number {\n  console.log(\"x\");\n  return 2;\n}\n",
+        )
+        .unwrap();
+
+        let opts =
+            Options { root: root.clone(), paths: vec![], changed_only: false, json: false, offline: true, diff: None };
+        let verdict = check(&opts).unwrap();
+        assert_eq!(verdict.status, locrin_core::finding::Status::Block);
+
+        let ix = Index::open(&root).unwrap();
+        let raw = ix.meta_get("last_verdict").unwrap().expect("check has to record the verdict it returned");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "block");
+        assert_eq!(v["scope"], "repo");
+        assert_eq!(v["blocking"], verdict.blocking as u64);
+        assert_eq!(v["high"], verdict.high as u64);
+        assert_eq!(v["medium"], verdict.medium as u64);
+        assert_eq!(v["low"], verdict.low as u64);
+        assert!(v["duration_ms"].as_u64().is_some(), "{v}");
+        assert!(v["at"].as_u64().unwrap_or(0) > 0, "{v}");
 
         std::env::remove_var("LOCRIN_CACHE_DIR");
     }

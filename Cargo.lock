@@ -610,6 +610,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "locrin-core",
+ "locrin-mcp",
  "locrin-reporters",
  "locrin-rules",
  "rayon",
@@ -635,6 +636,14 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-typescript",
  "ureq",
+]
+
+[[package]]
+name = "locrin-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,13 @@
+[package]
+name = "locrin-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "locrin_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true

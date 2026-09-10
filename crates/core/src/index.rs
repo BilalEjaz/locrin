@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 
 /// How long a statement waits for another process holding the same index before
 /// it gives up.
@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS symbols (
   start_col INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
   end_col INTEGER NOT NULL,
-  exported INTEGER NOT NULL
+  exported INTEGER NOT NULL,
+  -- How many parameters the symbol declares, NULL when it is not callable.
+  -- This is the signature the symbol search ranks on, so a class or a plain
+  -- const must be absent from that comparison rather than count as zero.
+  params INTEGER
 );
 CREATE INDEX IF NOT EXISTS symbols_rel ON symbols(rel);
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
@@ -441,11 +445,40 @@ impl Index {
             .optional()?)
     }
 
+    /// Reads one row of the key-value side table the schema version lives in.
+    ///
+    /// The table is the index's own scratch space, so anything stored here is as
+    /// disposable as the index: a rebuild takes it with everything else, and a
+    /// caller has to be able to answer without it.
+    pub fn meta_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT value FROM meta WHERE key = ?1")?
+            .query_row(params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Writes one row of that table, replacing whatever the key held.
+    pub fn meta_set(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn
+            .prepare_cached("INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+            .execute(params![key, value])?;
+        Ok(())
+    }
+
     /// Every indexed file, sorted, so callers iterate in a reproducible order.
     pub fn all_files(&self) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT rel FROM files ORDER BY rel")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Whether the index holds any file at all. The guards that refuse to answer
+    /// from an empty index ask only this, and asking it as `EXISTS` stops at the
+    /// first row instead of building every path in a large repository.
+    pub fn has_files(&self) -> anyhow::Result<bool> {
+        let found: i64 = self.conn.prepare("SELECT EXISTS(SELECT 1 FROM files)")?.query_row([], |r| r.get(0))?;
+        Ok(found != 0)
     }
 
     /// Records which lines of `rel` carry the allow marker, replacing whatever was
@@ -574,6 +607,17 @@ mod tests {
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h1"));
         ix.upsert_file("src/a.ts", "typescript", "h2", "ok").unwrap();
         assert_eq!(ix.file_hash("src/a.ts").unwrap().as_deref(), Some("h2"));
+    }
+
+    /// The question every empty-index guard actually asks is whether there is a
+    /// row at all, so it is answered without building the list of every path.
+    #[test]
+    fn has_files_answers_without_listing_them() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert!(!ix.has_files().unwrap(), "a database nothing has been written to holds no files");
+        ix.upsert_file("src/a.ts", "typescript", "h1", "ok").unwrap();
+        assert!(ix.has_files().unwrap());
+        assert_eq!(ix.all_files().unwrap(), vec!["src/a.ts".to_string()], "the two agree on the same database");
     }
 
     /// The stat check is only ever allowed to say "definitely unchanged". A
@@ -829,6 +873,47 @@ mod tests {
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         std::env::temp_dir().join(format!("locrin-test-{tag}-{}-{nanos}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn meta_round_trip() {
+        let mut ix = Index::open_in_memory().unwrap();
+        assert_eq!(ix.meta_get("last_verdict").unwrap(), None, "a key that was never written has no value");
+        ix.meta_set("last_verdict", r#"{"status":"pass"}"#).unwrap();
+        assert_eq!(ix.meta_get("last_verdict").unwrap().as_deref(), Some(r#"{"status":"pass"}"#));
+        // The second write replaces the first: one row per key, so a run reading
+        // this back sees the last verdict rather than a history of them.
+        ix.meta_set("last_verdict", r#"{"status":"block"}"#).unwrap();
+        assert_eq!(ix.meta_get("last_verdict").unwrap().as_deref(), Some(r#"{"status":"block"}"#));
+        assert_eq!(ix.meta_get("never_written").unwrap(), None);
+    }
+
+    /// The `params` column arrives with schema 5, so every index written by a
+    /// build that stamped 4 has to be thrown away rather than queried for a
+    /// column it does not have.
+    #[test]
+    fn schema_five_rebuilds_a_schema_four_index() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_cache_dir("schema-four");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("LOCRIN_CACHE_DIR", &dir);
+        let repo = Path::new("C:/repo/schema-four");
+
+        let mut ix = Index::open(repo).unwrap();
+        ix.upsert_file("marker.ts", "typescript", "h1", "ok").unwrap();
+        ix.conn().execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'", []).unwrap();
+        drop(ix);
+
+        let ix = Index::open(repo).unwrap();
+        let version: String =
+            ix.conn().query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, "5");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(ix.file_hash("marker.ts").unwrap().is_none(), "a schema 4 index must be rebuilt, not restamped");
+        drop(ix);
+
+        std::env::remove_var("LOCRIN_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
