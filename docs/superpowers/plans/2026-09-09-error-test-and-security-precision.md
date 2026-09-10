@@ -724,6 +724,42 @@ target was not lowered and the absolute miss is recorded here beside the control
 that explains it. A cold number worth a verdict needs a quiet box, and this one
 is not it today.
 
+#### Re-measured on a quiet box, 2026-09-10
+
+The ruling above left the cold gate red with the whole of the red attributed to
+the machine, and asked for a re-measurement on a quiet box. Re-measured on
+`c26c1e6` (main, PRs #6 and #7 merged), `cargo test --release -p locrin-cli --
+--ignored --nocapture` run four times in sequence, bench repository
+`<home>/fasting-app`, fresh temporary cache per benchmark, machine
+confirmed idle beforehand (`0` cargo, rustc or locrin processes, CPU load 0
+percent).
+
+| Benchmark | Target | Run 1 | Run 2 | Run 3 | Run 4 | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| cold index (`scan`, empty cache) | under 5000 ms | **25938 ms** | 3815 ms | 3810 ms | 3787 ms | PASS |
+| warm single-file check | under 300 ms | 171 ms | 187 ms | 171 ms | 179 ms | PASS |
+| warm 30-file check | under 1000 ms | 271 ms | 271 ms | 290 ms | 269 ms | PASS |
+| startup (`--help`) | under 50 ms | 18 ms | 19 ms | 19 ms | 20 ms | PASS |
+
+**Every gate is green, and the cold number is back where Part A left it.** Runs
+2 to 4 sit inside 28 ms of each other at 3787 to 3815 ms, against Part A's 3750
+to 3790 ms for code without Part B in it, so Part B's cold cost on a quiet box is
+inside 65 ms, well under the +481 ms the loaded-box control measured and far
+inside the 10 percent allowance. The 9078 to 9967 ms of the previous section
+was the machine, as that section argued, and the target stands at 5000 ms with
+about 1200 ms of headroom.
+
+Run 1 is the method's discarded first run and it is reported because it is the
+largest such number this ledger holds: **25.9 seconds**, with warm numbers on the
+same invocation (171 / 271 / 18 ms) that are as fast as any run after it, so the
+machine was not loaded. It is the operating system reading 1846 files off disk
+after the checkout had been evicted from the page cache overnight. That is not a
+benchmark of the engine, but it is what a person sees the first time they run
+`locrin scan` on a large repository after a reboot, and a first impression of 26
+seconds is worth a line in plan 4's `init` design (a progress line on the first
+scan, or a file-count-and-elapsed notice on any scan over a few seconds) rather
+than a lowered target. Carried as a follow-up, not a gate.
+
 #### Registry
 
 `all_rules()` lists **21** ids, asserted in order by `crates/rules/src/lib.rs`,
