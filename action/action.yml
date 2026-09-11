@@ -88,6 +88,9 @@ runs:
         OFFLINE: ${{ inputs.offline }}
       run: |
         set -uo pipefail
+        # The composite runner always invokes `shell: bash` with -e. A BLOCK
+        # verdict is an exit code we read, not a step failure, so clear errexit.
+        set +e
         sarif="${RUNNER_TEMP}/locrin.sarif"
         comment="${RUNNER_TEMP}/locrin-comment.md"
         mkdir -p "$(dirname "$sarif")"
