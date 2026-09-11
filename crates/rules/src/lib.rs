@@ -164,10 +164,10 @@ pub fn anchor_for(file: &ParsedFile, line: u32) -> String {
     // quadratically, and extracting here made a file with many findings pay for
     // one walk each. `symbols_of` extracts on the first call and hands back the
     // same table after it, so a file costs one walk however many findings it
-    // has. Resolving against that table picks exactly what `enclosing_symbol`
-    // picks: the first symbol in extraction order whose span covers the line.
+    // has. Resolving goes through the same `enclosing` the report uses, so an
+    // anchor and the symbol a finding names can never be two different answers.
     let symbols = locrin_core::symbols::symbols_of(file);
-    let enclosing = |at: u32| symbols.iter().find(|s| s.start_line <= at && at <= s.end_line).map(|s| s.name.as_str());
+    let enclosing = |at: u32| locrin_core::symbols::enclosing(symbols, at).map(|s| s.name.as_str());
     let symbol = enclosing(line);
     let text = line_text(file, line);
     // Only a line that reads the same can be an earlier occurrence, and reading
