@@ -1,0 +1,140 @@
+name: "Locrin"
+description: "Deterministic quality gate for code written by people and agents: verdict comment, SARIF upload, check status"
+branding:
+  icon: shield
+  color: gray-dark
+
+inputs:
+  version:
+    description: "Release tag (v0.3.0), latest, or local (a locrin already on PATH)"
+    default: latest
+  path:
+    description: "Repository-relative directory to check"
+    default: "."
+  base:
+    description: "Base ref for the pull-request view (files that differ from the merge base)"
+    default: ${{ github.event.pull_request.base.sha }}
+  since:
+    description: "Ref for the deployment gate (files changed by REF..HEAD); overrides base"
+    default: ""
+  comment:
+    description: "Post or update one summary comment on the pull request"
+    default: "true"
+  sarif:
+    description: "Upload SARIF to code scanning (needs security-events: write)"
+    default: "true"
+  offline:
+    description: "Never touch the network (vulnerable-dependency uses its snapshot or skips)"
+    default: "false"
+  fail-on-block:
+    description: "Fail the step when the verdict is BLOCK"
+    default: "true"
+  token:
+    description: "Token for the comment and the release download"
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: "The exit code of the locrin check run"
+    value: ${{ steps.check.outputs.exit-code }}
+  status:
+    description: "pass, advisory, block or error"
+    value: ${{ steps.check.outputs.status }}
+  sarif-file:
+    description: "Absolute path to the SARIF file the run wrote"
+    value: ${{ steps.check.outputs.sarif-file }}
+  comment-file:
+    description: "Absolute path to the Markdown summary the run wrote"
+    value: ${{ steps.check.outputs.comment-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install locrin
+      if: ${{ inputs.version != 'local' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: BilalEjaz/locrin
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   target=x86_64-unknown-linux-gnu; ext=tar.gz ;;
+          macOS-ARM64) target=aarch64-apple-darwin;    ext=tar.gz ;;
+          macOS-X64)   target=x86_64-apple-darwin;     ext=tar.gz ;;
+          Windows-X64) target=x86_64-pc-windows-msvc;  ext=zip ;;
+          *) echo "unsupported runner ${RUNNER_OS}-${RUNNER_ARCH}" >&2; exit 2 ;;
+        esac
+        if [[ "$VERSION" == "latest" ]]; then
+          VERSION=$(gh release view --repo "$REPO" --json tagName -q .tagName)
+        fi
+        dir="${RUNNER_TEMP}/locrin"
+        mkdir -p "$dir" && cd "$dir"
+        asset="locrin-${VERSION}-${target}.${ext}"
+        gh release download "$VERSION" --repo "$REPO" -p "$asset" -p SHA256SUMS --clobber
+        grep " $asset\$" SHA256SUMS | sha256sum -c -
+        if [[ "$ext" == "zip" ]]; then 7z x -y "$asset" >/dev/null; else tar -xzf "$asset"; fi
+        echo "$dir/locrin-${VERSION}-${target}" >> "$GITHUB_PATH"
+
+    - name: Check
+      id: check
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        LOCRIN_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        BASE: ${{ inputs.base }}
+        SINCE: ${{ inputs.since }}
+        OFFLINE: ${{ inputs.offline }}
+      run: |
+        set -uo pipefail
+        sarif="${RUNNER_TEMP}/locrin.sarif"
+        comment="${RUNNER_TEMP}/locrin-comment.md"
+        mkdir -p "$(dirname "$sarif")"
+        args=(check --markdown --sarif-file "$sarif")
+        if [[ -n "$SINCE" ]]; then args+=(--since "$SINCE"); elif [[ -n "$BASE" ]]; then args+=(--base "$BASE"); fi
+        if [[ "$OFFLINE" == "true" ]]; then args+=(--offline); fi
+        locrin --version
+        locrin "${args[@]}" > "$comment"; code=$?
+        cat "$comment"
+        case "$code" in
+          0) status=$(grep -q '### Locrin: ADVISORY' "$comment" && echo advisory || echo pass) ;;
+          1) status=block ;;
+          *) status=error ;;
+        esac
+        {
+          echo "exit-code=$code"; echo "status=$status"
+          echo "sarif-file=$sarif"; echo "comment-file=$comment"
+        } >> "$GITHUB_OUTPUT"
+        if [[ "$code" -ge 2 ]]; then exit "$code"; fi
+
+    - name: Upload SARIF
+      if: ${{ inputs.sarif == 'true' && steps.check.outputs.status != 'error' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.check.outputs.sarif-file }}
+        category: locrin
+      continue-on-error: true
+
+    - name: Comment on the pull request
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR: ${{ github.event.pull_request.number }}
+        FILE: ${{ steps.check.outputs.comment-file }}
+      run: |
+        set -euo pipefail
+        existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+          --jq '[.[] | select(.body | startswith("<!-- locrin-report -->"))][0].id // empty')
+        if [[ -n "$existing" ]]; then
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -F body=@"$FILE" >/dev/null
+        else
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"$FILE" >/dev/null
+        fi
+
+    - name: Verdict
+      if: ${{ inputs.fail-on-block == 'true' && steps.check.outputs.status == 'block' }}
+      shell: bash
+      run: |
+        echo "::error::Locrin: BLOCK. See the pull-request comment or the run log." && exit 1
