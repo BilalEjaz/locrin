@@ -7,6 +7,13 @@
 //! at least two lines look like code at all. Trailing comments are never part
 //! of a run, because a column of unit annotations beside real code is not a
 //! commented-out block.
+//!
+//! The run detection is the same in every language; only the vocabulary the run
+//! is tested against changes, because what a statement looks like is what the
+//! language says it looks like. A Python statement ends in a colon or in
+//! nothing at all, so a semicolon is no use there and `def `, `class ` and
+//! `return ` do the work instead. A PHP statement ends in a semicolon like a
+//! JavaScript one, and opens with a sigil, a visibility keyword or `foreach (`.
 
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
@@ -16,33 +23,79 @@ use crate::{clean_files, finding, Language, Rule, RuleContext, Scope, ALL};
 
 pub struct LeftoverCommented;
 
-const CODE_ENDINGS: &[char] = &[';', '{', '}', ')', ','];
-const STRONG_ENDINGS: &[char] = &[';', '{', '}'];
-const CODE_STARTS: &[&str] = &["const ", "let ", "var ", "return ", "if (", "for (", "import ", "export "];
-
-/// A line carrying at least a supporting signal of being code.
-fn looks_like_code(line: &str) -> bool {
-    let t = line.trim();
-    if t.is_empty() {
-        return false;
-    }
-    t.ends_with(CODE_ENDINGS) || CODE_STARTS.iter().any(|s| t.starts_with(s))
+/// What a statement looks like in one language: the endings only code produces,
+/// the endings prose produces too and that therefore only support a verdict,
+/// and the openings that can only begin a statement.
+struct Vocabulary {
+    /// An ending prose rarely produces. On its own it qualifies a run.
+    strong_endings: &'static [char],
+    /// The strong endings plus the supporting ones: a comma or a closing
+    /// parenthesis, which ordinary prose ends lines with all the time.
+    endings: &'static [char],
+    /// Openings that can only begin a statement. Each is strong on its own.
+    starts: &'static [&'static str],
 }
 
-/// A signal prose rarely produces: a statement terminator, a brace, or a
-/// keyword that can only open a statement.
-fn is_strong_code(line: &str) -> bool {
+const JS: Vocabulary = Vocabulary {
+    strong_endings: &[';', '{', '}'],
+    endings: &[';', '{', '}', ')', ','],
+    starts: &["const ", "let ", "var ", "return ", "if (", "for (", "import ", "export "],
+};
+
+const PHP: Vocabulary = Vocabulary {
+    strong_endings: &[';', '{', '}'],
+    endings: &[';', '{', '}', ')', ','],
+    // `$` on its own: every PHP variable carries the sigil, so a commented-out
+    // assignment opens with it where a sentence of prose does not.
+    starts: &["$", "function ", "return ", "if (", "foreach (", "echo ", "use ", "namespace ", "public ", "private "],
+};
+
+const PY: Vocabulary = Vocabulary {
+    // A colon: what opens every Python block, and what a sentence of prose
+    // almost never ends on. Python has no statement terminator, so this is the
+    // only ending worth anything and the openings carry the rest.
+    strong_endings: &[':'],
+    endings: &[':', ')', ','],
+    starts: &[
+        "def ", "class ", "import ", "from ", "return ", "if ", "for ", "while ", "with ", "try:", "except", "self.",
+        "print(",
+    ],
+};
+
+fn vocabulary(language: Language) -> &'static Vocabulary {
+    match language {
+        Language::TypeScript | Language::Tsx | Language::JavaScript => &JS,
+        Language::Php => &PHP,
+        Language::Python => &PY,
+    }
+}
+
+/// A line carrying at least a supporting signal of being code.
+fn looks_like_code(line: &str, language: Language) -> bool {
+    let v = vocabulary(language);
     let t = line.trim();
     if t.is_empty() {
         return false;
     }
-    t.ends_with(STRONG_ENDINGS) || CODE_STARTS.iter().any(|s| t.starts_with(s))
+    t.ends_with(v.endings) || v.starts.iter().any(|s| t.starts_with(s))
+}
+
+/// A signal prose rarely produces: a statement terminator, a brace, a colon
+/// opening a block, or a keyword that can only open a statement.
+fn is_strong_code(line: &str, language: Language) -> bool {
+    let v = vocabulary(language);
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    t.ends_with(v.strong_endings) || v.starts.iter().any(|s| t.starts_with(s))
 }
 
 /// The qualifying test for a run: one strong signal at minimum, and two lines
 /// that look like code in total.
-fn is_commented_code(lines: &[&str]) -> bool {
-    lines.iter().any(|l| is_strong_code(l)) && lines.iter().filter(|l| looks_like_code(l)).count() >= 2
+fn is_commented_code(lines: &[&str], language: Language) -> bool {
+    lines.iter().any(|l| is_strong_code(l, language))
+        && lines.iter().filter(|l| looks_like_code(l, language)).count() >= 2
 }
 
 fn is_license_or_doc(lines: &[&str]) -> bool {
@@ -50,8 +103,26 @@ fn is_license_or_doc(lines: &[&str]) -> bool {
         || lines.iter().all(|l| l.trim().starts_with('*'))
 }
 
-fn strip_line_comment(text: &str) -> &str {
-    text.trim().trim_start_matches("//").trim()
+/// The markers that open a line comment in a language. PHP writes one three
+/// ways and strips `#` exactly as it strips `//`; Python writes it one way.
+fn line_markers(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::TypeScript | Language::Tsx | Language::JavaScript => &["//"],
+        Language::Php => &["//", "#"],
+        Language::Python => &["#"],
+    }
+}
+
+fn is_line_comment(text: &str, language: Language) -> bool {
+    line_markers(language).iter().any(|m| text.starts_with(m))
+}
+
+fn strip_line_comment(text: &str, language: Language) -> &str {
+    let mut t = text.trim();
+    for marker in line_markers(language) {
+        t = t.trim_start_matches(marker);
+    }
+    t.trim()
 }
 
 /// True when nothing but whitespace precedes the comment on its own source
@@ -80,6 +151,7 @@ fn comments<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
 /// that line. The text is the evidence, so two blocks in one function do not
 /// read identically in a report.
 fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
+    let language = file.language;
     let src = file.source.as_bytes();
     let mut nodes = Vec::new();
     comments(file.tree.root_node(), &mut nodes);
@@ -90,7 +162,7 @@ fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
     let flush = |run: &mut Vec<(u32, String)>, hits: &mut Vec<(u32, String)>| {
         if run.len() >= 3 {
             let bodies: Vec<&str> = run.iter().map(|(_, s)| s.as_str()).collect();
-            if is_commented_code(&bodies) && !is_license_or_doc(&bodies) {
+            if is_commented_code(&bodies, language) && !is_license_or_doc(&bodies) {
                 hits.push((run[0].0, run[0].1.clone()));
             }
         }
@@ -101,17 +173,21 @@ fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
     for n in nodes {
         let text = n.utf8_text(src).unwrap_or("");
         let line = n.start_position().row as u32 + 1;
-        if text.starts_with("//") && is_own_line(file, n) {
+        if is_line_comment(text, language) && is_own_line(file, n) {
             if last_line.is_some_and(|l| l + 1 != line) {
                 flush(&mut run, &mut hits);
             }
-            run.push((line, strip_line_comment(text).to_string()));
+            run.push((line, strip_line_comment(text, language).to_string()));
             last_line = Some(line);
             continue;
         }
         flush(&mut run, &mut hits);
         last_line = None;
-        if text.starts_with("//") || text.starts_with("/**") {
+        // A trailing line comment, or a docblock. Python reaches neither block
+        // branch below: its only comment is the `#` line, and a docstring is a
+        // string inside an expression statement rather than a comment node, so
+        // it is never scanned at all.
+        if is_line_comment(text, language) || text.starts_with("/**") {
             continue;
         }
         // The licence and doc test runs on the raw lines, before the leading
@@ -128,7 +204,7 @@ fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
             continue;
         }
         let inner: Vec<&str> = raw.iter().map(|l| l.trim_start_matches('*').trim()).collect();
-        if is_commented_code(&inner) {
+        if is_commented_code(&inner, language) {
             hits.push((line, inner[0].to_string()));
         }
     }
