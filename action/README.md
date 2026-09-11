@@ -7,9 +7,9 @@ uploads SARIF to code scanning, and fails the job on a BLOCK verdict.
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: BilalEjaz/locrin/action@v0.3.0
+- uses: BilalEjaz/locrin/action@v0.4.0
   with:
-    version: v0.3.0
+    version: v0.4.0
 ```
 
 The default pull-request path (`--base`) diffs against the merge base, so the
