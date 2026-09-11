@@ -5,3 +5,5 @@ function total(): int
     # FIXME the rounding is wrong
     return 1;
 }
+//TODO: no space
+// TODO/FIXME both

@@ -12,7 +12,47 @@ const MARKERS: &[&str] = &["TODO", "FIXME", "HACK", "XXX"];
 /// The characters a path or a file name is spelled with. A marker word glued
 /// to one of them on either side is part of a name, not a note to a reader:
 /// `avatars/XXX.jpg`, `XXX-XXX-XXXX`, `fixtures/TODO_list.json`.
+///
+/// `/` is the one that is not a path character on its own, because it is also
+/// how three of the four languages open a comment and how a writer separates
+/// two markers. See [`preceded_by_path`] and [`followed_by_path`].
 const PATH_CHARS: &[char] = &['/', '.', '_', '-'];
+
+/// Whether what sits before a marker word puts it inside a path.
+///
+/// A `/` counts only when a name character sits before it: `avatars/TODO` is a
+/// path segment, and `//TODO` is the comment's own opener with the marker
+/// glued to it. The comment text a rule reads still carries that opener, so
+/// without the distinction every unspaced `//TODO:` in TypeScript, JavaScript
+/// and PHP was read as a file name and reported nothing. Python is unaffected:
+/// its comments open with `#`, which is not a path character.
+fn preceded_by_path(before: &str) -> bool {
+    let mut back = before.chars().rev();
+    let Some(c) = back.next() else { return false };
+    if !PATH_CHARS.contains(&c) {
+        return false;
+    }
+    c != '/' || back.next().is_some_and(|p| p.is_alphanumeric())
+}
+
+/// Whether what sits after a marker word puts it inside a path. A `.` is left
+/// to [`opens_extension`], which is the narrower question of a file extension.
+///
+/// A `/` counts only when what follows it is a name: `XXX/thumb.jpg` is a path,
+/// while `TODO/FIXME both` is one note written with two marker words and
+/// `TODO/ handle` is prose. So a `/` followed by another marker word or by a
+/// space is not a separator.
+fn followed_by_path(after: &str) -> bool {
+    let Some(c) = after.chars().next() else { return false };
+    if c == '.' || !PATH_CHARS.contains(&c) {
+        return false;
+    }
+    if c == '/' {
+        let rest = &after[1..];
+        return !rest.starts_with(' ') && !MARKERS.iter().any(|m| rest.starts_with(m));
+    }
+    true
+}
 
 /// Whether the text after a marker word opens a file extension: a `.` and one
 /// to five letters or digits, as in `XXX.jpg` or `TODO.md`. A `.` closing a
@@ -32,9 +72,7 @@ fn has_marker(text: &str) -> bool {
             let after = &text[i + m.len()..];
             let next = after.chars().next();
             let word = before.is_none_or(|c| !c.is_alphanumeric()) && next.is_none_or(|c| !c.is_alphanumeric());
-            let in_path = before.is_some_and(|c| PATH_CHARS.contains(&c))
-                || next.is_some_and(|c| c != '.' && PATH_CHARS.contains(&c))
-                || opens_extension(after);
+            let in_path = preceded_by_path(&text[..i]) || followed_by_path(after) || opens_extension(after);
             word && !in_path
         })
     })
