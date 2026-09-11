@@ -60,7 +60,7 @@ Going public is a one-way door. Every item below is done and checked while the r
 The existing release.yml builds four targets (Linux x86_64, macOS Intel, macOS Apple silicon, Windows x86_64) and SHA256SUMS on every tag. A new publish job runs after all four builds succeed and publishes every channel from the same run. If any channel fails, the workflow fails, the GitHub release is marked pre-release, and no channel advertises a version another channel lacks. Re-running the job after a fix completes the release.
 
 ### 4.2 npm
-- Packages: `locrin` (the entry point) and four platform packages `@locrin/linux-x64`, `@locrin/darwin-x64`, `@locrin/darwin-arm64`, `@locrin/win32-x64`. The `@locrin` npm scope is created by the founder before the first publish (the unscoped name `locrin` is already held). npm blocks automated availability checks for scopes, so the founder confirms it in the npm UI; if `@locrin` is taken, the platform packages publish under the founder's existing `@raxbi` scope instead (`@raxbi/locrin-linux-x64` and so on) and nothing else in this spec changes.
+- Packages: `locrin` (the entry point, already held by the founder's `raxbi` npm account) and four platform packages `@raxbi/locrin-linux-x64`, `@raxbi/locrin-darwin-x64`, `@raxbi/locrin-darwin-arm64`, `@raxbi/locrin-win32-x64`. The `@raxbi` scope belongs to the founder's npm account automatically, so no organisation is created. Users only ever type `locrin`; the platform packages are plumbing. Decided 2026-09-12.
 - Each platform package carries the binary for its `os` and `cpu` fields. The entry package lists all four under `optionalDependencies`; npm installs only the matching one.
 - The entry package's `bin` is a tiny Node launcher that resolves the platform package, executes the binary with the same arguments, and forwards stdin, stdout, stderr and the exit code unchanged, so exit codes 0, 1 and 2 keep their meaning.
 - No `postinstall`, no download at install time, no network.
@@ -118,7 +118,7 @@ The harness never runs or compares other vendors' tools. Head-to-head comparison
 1. Pre-flight (section 3.1 to 3.3) on a branch; merged while private.
 2. Packaging (section 4) built and dry-run tested while private.
 3. Benchmark repo created and its harness tested against 0.4.0 while the engine repo is still private (the benchmark repo can be public from day one; it contains no engine code).
-4. Founder creates the `@locrin` npm scope (or confirms the `@raxbi` fallback).
+4. Founder creates an npm automation token and stores it as the NPM_TOKEN secret on the repository (the local npm login has expired; CI publishes with the secret). The same for PyPI (PYPI_TOKEN) and crates.io (CARGO_REGISTRY_TOKEN).
 5. Public flip: one command, after 1 to 4 are green and the founder says "make it public".
 6. Tag 0.5.0 as the first public release; the publish job populates every channel; the benchmark CI publishes results for 0.5.0.
 7. Section 3.4 after-the-flip steps.
