@@ -1406,6 +1406,24 @@ fn php_and_python_are_skipped_until_enabled() {
     assert!(String::from_utf8(out.stderr).unwrap().contains("[languages] php = true"));
 }
 
+/// The note is one line per language, not one per file: `pre-commit` names every
+/// staged file, so a repository with a directory of Python in the stage would
+/// have read the same sentence once per file.
+#[test]
+fn a_skipped_language_is_reported_once_per_run() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("src/d.php"), "<?php\nfunction d() {}\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--offline", "src/b.php", "src/d.php", "src/c.py"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let err = String::from_utf8(out.stderr).unwrap();
+    let php: Vec<&str> = err.lines().filter(|l| l.contains("[languages] php = true")).collect();
+    let python: Vec<&str> = err.lines().filter(|l| l.contains("[languages] python = true")).collect();
+    assert_eq!(php.len(), 1, "{err}");
+    assert!(php[0].contains("src/b.php and 1 more php file skipped"), "{err}");
+    assert_eq!(python.len(), 1, "{err}");
+    assert!(python[0].contains("src/c.py skipped"), "{err}");
+}
+
 /// The other half of the test above: with both languages asked for, the findings
 /// carry PHP and Python files. Waits on Task 5, which teaches `leftover-debug`
 /// the `var_dump` and `breakpoint` calls these two fixture files hold.

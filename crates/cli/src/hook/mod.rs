@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::time::Duration;
 
+use locrin_core::config::Config;
 use locrin_core::lang::Language;
 use locrin_core::parse::rel_path;
 use locrin_core::walk::{canonical_path, canonical_root};
@@ -183,8 +184,16 @@ pub fn guarded(f: impl FnOnce() -> i32) -> i32 {
 }
 
 /// The file the payload names, once it is a file this engine can say something
-/// about: a source file it parses, that exists, and that lives inside the
-/// repository the hook was pointed at.
+/// about: a source file it parses, in a language this repository has asked for,
+/// that exists, and that lives inside the repository the hook was pointed at.
+///
+/// The language gate is here rather than left to the run because the run would
+/// do the whole pass first and drop the file at the end of it: a `.php` edit in
+/// a repository that has not enabled PHP would cost an index and a rule pass to
+/// produce nothing. A config that will not load is read as the default, which
+/// is a repository with no `[languages]` at all; the file still reaches
+/// `run::check` when its language needs no flag, and the run reports the broken
+/// config properly there rather than through a silent skip here.
 ///
 /// The path arrives absolute and in the native form of the platform Claude Code
 /// is running on, so `PathBuf::from` already reads it correctly and nothing
@@ -194,7 +203,10 @@ fn target(root: &Path, file_path: &str) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(file_path);
-    Language::from_path(&path)?;
+    let languages = Config::load(root).unwrap_or_default().languages;
+    if !Language::from_path(&path)?.enabled(&languages) {
+        return None;
+    }
     // Canonicalising is both the existence check and the way the containment
     // check below compares like with like: a symlink or a `..` inside the path
     // would otherwise let an edit outside the repository look like one inside
@@ -442,6 +454,22 @@ mod tests {
         let ts = root.join("a.ts");
         std::fs::write(&ts, "export const a = 1;\n").unwrap();
         assert_eq!(target(&root, &ts.display().to_string()), Some(canonical_path(&ts).unwrap()));
+    }
+
+    /// A `.php` file is a file the engine can parse and not a file it may read:
+    /// a run over a language the repository has not asked for indexes it and
+    /// then drops every finding, so the hook would pay for a whole pass to say
+    /// nothing. The gate belongs here, before the pass.
+    #[test]
+    fn target_skips_a_file_in_a_language_the_config_has_not_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical_root(dir.path());
+        let php = root.join("a.php");
+        std::fs::write(&php, "<?php\nfunction a() {}\n").unwrap();
+        assert_eq!(target(&root, &php.display().to_string()), None);
+
+        std::fs::write(root.join("locrin.toml"), "[languages]\nphp = true\n").unwrap();
+        assert_eq!(target(&root, &php.display().to_string()), Some(canonical_path(&php).unwrap()));
     }
 
     #[test]

@@ -249,6 +249,19 @@ fn collect_python(node: Node, src: &str, rel: &str, out: &mut Vec<Symbol>) {
     let (kind, named) = match node.kind() {
         "function_definition" => ("function", node.child_by_field_name("name")),
         "class_definition" => ("class", node.child_by_field_name("name")),
+        // `@app.route(...)` and `@dataclass` wrap what they decorate, so the
+        // `def` and the `class` stop being children of the module. A decorated
+        // function is still a function, and Python's frameworks decorate
+        // routes, fixtures and dataclasses everywhere; missing them would leave
+        // a typical web or test module with no symbols at all. The span is the
+        // definition's own, not the decorators', so a finding inside the body
+        // still resolves to it.
+        "decorated_definition" => {
+            if let Some(def) = node.child_by_field_name("definition") {
+                collect_python(def, src, rel, out);
+            }
+            return;
+        }
         "expression_statement" => {
             let Some(assign) = node.named_child(0).filter(|n| n.kind() == "assignment") else { return };
             // Only a plain name is a symbol: `a, b = f()` and `obj.x = 1` declare
@@ -294,21 +307,46 @@ pub fn symbols_of(file: &ParsedFile) -> &[Symbol] {
     file.symbols.get_or_init(|| extract(file))
 }
 
-/// The symbol a line sits in: the narrowest one whose span covers it.
+/// The start and the end of a span as one comparable pair each, so containment
+/// is two tuple comparisons rather than four field comparisons with the
+/// same-line case written out by hand.
+fn bounds(s: &Symbol) -> ((u32, u32), (u32, u32)) {
+    ((s.start_line, s.start_col), (s.end_line, s.end_col))
+}
+
+/// Whether `inner`'s span lies strictly inside `outer`'s: contained, and not the
+/// same span. Two symbols that merely share a line are not nested.
+fn inside(inner: &Symbol, outer: &Symbol) -> bool {
+    let ((os, oe), (is, ie)) = (bounds(outer), bounds(inner));
+    os <= is && ie <= oe && (os < is || ie < oe)
+}
+
+/// The symbol a line sits in: the first one whose span covers it, and then the
+/// narrowest symbol nested strictly inside that one which covers it too.
 ///
-/// Narrowest rather than first, because PHP nests: a method's span sits inside
-/// its class's, and a finding on the method's line belongs to the method. Ties
-/// keep the earlier symbol, so for a language whose symbols never nest this is
-/// the first match it always was.
+/// First rather than narrowest, because two top-level symbols can share a
+/// boundary line: `};` closes one and the next starts after it on the same line,
+/// and the line has always belonged to the one that opened first. Every anchor
+/// id in every existing baseline is keyed on that answer, so a narrowest-span
+/// rule would silently re-key them.
+///
+/// The descent is what PHP needs: a method's span sits strictly inside its
+/// class's, and a finding on the method's line belongs to the method. Only
+/// symbols after the first match are considered, because extraction emits an
+/// owner before what it owns, and ties keep the earlier one.
 ///
 /// Shared so that [`enclosing_symbol`] and the rules' anchor cannot drift apart:
 /// an anchor keyed on one symbol while the report names another would be two
 /// answers to one question.
 pub fn enclosing(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
-    symbols
+    let covers = |s: &Symbol| s.start_line <= line && line <= s.end_line;
+    let at = symbols.iter().position(&covers)?;
+    let first = &symbols[at];
+    let nested = symbols[at + 1..]
         .iter()
-        .filter(|s| s.start_line <= line && line <= s.end_line)
-        .min_by_key(|s| s.end_line.saturating_sub(s.start_line))
+        .filter(|s| covers(s) && inside(s, first))
+        .min_by_key(|s| s.end_line.saturating_sub(s.start_line));
+    Some(nested.unwrap_or(first))
 }
 
 pub fn enclosing_symbol(file: &ParsedFile, line: u32) -> Option<String> {
@@ -567,6 +605,21 @@ export enum Color { Red }
         assert_eq!(enclosing_symbol(&p, 1), None);
     }
 
+    /// Two top-level symbols can share a line: `};` closes the first and the
+    /// second starts after it on the same line. Nothing in TypeScript nests, so
+    /// the line belongs to the first symbol that covers it, which is what every
+    /// anchor id in every existing baseline was keyed on.
+    #[test]
+    fn a_boundary_line_belongs_to_the_first_symbol_that_covers_it() {
+        let src = "export const a = () => {\n}; export const b = 2;\n";
+        let p = parse_source(Path::new("src/c.ts"), "src/c.ts", src.to_string()).unwrap();
+        let syms = extract(&p);
+        assert_eq!(syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!((syms[0].start_line, syms[0].end_line), (1, 2));
+        assert_eq!((syms[1].start_line, syms[1].end_line), (2, 2), "the narrower symbol is the later one");
+        assert_eq!(enclosing_symbol(&p, 2).as_deref(), Some("a"));
+    }
+
     #[test]
     fn extracts_php_symbols() {
         let src = "<?php\nnamespace App;\nfunction helper() {}\nclass Repo {\n    public function find(int $id) {}\n}\ninterface Shape {}\n";
@@ -631,6 +684,28 @@ export enum Color { Red }
         assert_eq!((syms[2].start_line, syms[2].end_line), (4, 5), "a function spans its body");
         assert_eq!(syms[2].params, Some(0));
         assert_eq!(syms[0].params, None, "a module constant is not callable");
+    }
+
+    /// A decorator wraps the definition in a `decorated_definition`, so the
+    /// `def` and the `class` are no longer children of the module. A decorated
+    /// function is still a function.
+    #[test]
+    fn decorated_python_definitions_are_symbols() {
+        let src = r#"import functools
+
+@app.route("/x")
+def handler():
+    return 1
+
+@dataclass
+class Row:
+    id: int
+"#;
+        let p = parse_source(Path::new("bot/d.py"), "bot/d.py", src.to_string()).unwrap();
+        let view: Vec<(String, String, bool)> =
+            extract(&p).iter().map(|s| (s.kind.clone(), s.name.clone(), s.exported)).collect();
+        assert_eq!(view, vec![("function".into(), "handler".into(), true), ("class".into(), "Row".into(), true)]);
+        assert_eq!(enclosing_symbol(&p, 5).as_deref(), Some("handler"));
     }
 
     /// The table is extracted once per file and then shared. `extract` walks the

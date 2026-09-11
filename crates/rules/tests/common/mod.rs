@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use locrin_core::config::Config;
+use locrin_core::config::{Config, Languages};
 use locrin_core::entry::EntryPoints;
 use locrin_core::finding::Finding;
 use locrin_core::index::{content_hash, Index};
@@ -28,8 +28,16 @@ pub fn fixture(rule: &str, bucket: &str) -> PathBuf {
 }
 
 pub fn parse_dir(root: &Path) -> Vec<ParsedFile> {
+    parse_dir_langs(root, Languages::default())
+}
+
+/// The same walk, for a fixture written in PHP or Python: `source_files` drops
+/// a file whose language the options have not enabled, so a fixture in one of
+/// those languages is walked away silently unless the languages come from the
+/// config the test is running under.
+pub fn parse_dir_langs(root: &Path, languages: Languages) -> Vec<ParsedFile> {
     let root = canonical_root(root);
-    source_files(&root, &WalkOptions::default())
+    source_files(&root, &WalkOptions { languages, ..WalkOptions::default() })
         .unwrap()
         .into_iter()
         .filter_map(|p| parse_file(&root, &p).unwrap())
@@ -74,6 +82,16 @@ pub fn ctx_for<'a>(
 /// Runs one rule over a fixture directory with nothing known about the previous
 /// version of it, which is what almost every rule's tests want.
 pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
+    run_on_langs(rule, root, config)
+}
+
+/// The same, named for the call site whose fixture is PHP or Python, where the
+/// `[languages]` line in the config is the thing that makes the walk see the
+/// fixture at all. Every entry point below takes the walk's languages from
+/// `config.languages`, so `run_on` is this function; the name is here so a test
+/// reading a language-gated fixture says out loud that its config must enable
+/// the language.
+pub fn run_on_langs(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
     run_on_with(rule, root, config, &Previous::default())
 }
 
@@ -100,7 +118,7 @@ pub fn run_on_seeded(
     seed: impl FnOnce(&Index, &Path),
 ) -> Vec<Finding> {
     let root = canonical_root(root);
-    let files = parse_dir(&root);
+    let files = parse_dir_langs(&root, config.languages);
     let (ix, entries) = index_dir(&root, &files, config);
     seed(&ix, &root);
     let ctx = RuleContext {

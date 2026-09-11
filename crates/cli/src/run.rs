@@ -188,6 +188,9 @@ fn explicit_files(
     let mut files = Vec::new();
     let mut raw = Vec::new();
     let mut everything: Option<Vec<PathBuf>> = None;
+    // One entry per language the run had to skip: the language, the first file
+    // it skipped in it, and how many there were.
+    let mut skipped: Vec<(Language, String, usize)> = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() { p.clone() } else { root.join(p) };
         // Canonicalise before anything else: `src/../src/dirty.ts` and
@@ -216,23 +219,45 @@ fn explicit_files(
                 Some(lang) if lang.enabled(&walk_opts.languages) => files.push(canon),
                 // A file the engine could read, named outright, in a language the
                 // repository has not asked for. Checking nothing in silence would
-                // read as a clean file, so the skip is said once by name with the
-                // line that turns it on.
-                Some(lang) => eprintln!(
-                    "note: {} skipped; enable it with [languages] {} = true in {}",
-                    rel_path(root, &canon),
-                    lang.as_str(),
-                    locrin_core::config::CONFIG_FILE
-                ),
+                // read as a clean file, so the skip is said with the line that
+                // turns it on. Counted here and said after the loop: the
+                // pre-commit hook names every staged file, and a repository with
+                // fifty Python files staged would otherwise bury the commit's own
+                // output under fifty copies of the same sentence.
+                Some(lang) => {
+                    let rel = rel_path(root, &canon);
+                    match skipped.iter_mut().find(|(l, _, _)| *l == lang) {
+                        Some((_, _, n)) => *n += 1,
+                        None => skipped.push((lang, rel, 1)),
+                    }
+                }
                 None => {}
             }
         }
+    }
+    for (lang, first, count) in &skipped {
+        eprintln!("{}", skip_note(lang, first, *count));
     }
     for v in [&mut files, &mut raw] {
         v.sort();
         v.dedup();
     }
     Ok(Some(Explicit { files, raw }))
+}
+
+/// The one line a run says about the files it skipped for a language: the first
+/// one by name, so a person checking a single file still reads that file's name,
+/// and a count when there were more, so a staged commit full of them says how
+/// many without saying it fifty times.
+fn skip_note(lang: &Language, first: &str, count: usize) -> String {
+    let more = count.saturating_sub(1);
+    let what = if more == 0 {
+        format!("{first} skipped; enable it")
+    } else {
+        let files = if more == 1 { "file" } else { "files" };
+        format!("{first} and {more} more {} {files} skipped; enable them", lang.as_str())
+    };
+    format!("note: {what} with [languages] {} = true in {}", lang.as_str(), locrin_core::config::CONFIG_FILE)
 }
 
 /// Reads a candidate and hashes the bytes it read, or None when those bytes are
@@ -958,6 +983,27 @@ mod tests {
     // take turns on the lock the whole binary's tests share rather than one of
     // their own: a lock per module would not stop this module racing another.
     use crate::ENV_LOCK;
+
+    /// A run says the skip once for a language, however many files it skipped
+    /// in it: the pre-commit hook names every staged file, so one line each
+    /// would bury the commit's own output under copies of one sentence. The
+    /// first file is still named, because a person checking one file wants to
+    /// read that file's name.
+    #[test]
+    fn the_skip_note_is_one_line_per_language() {
+        assert_eq!(
+            skip_note(&Language::Php, "src/b.php", 1),
+            "note: src/b.php skipped; enable it with [languages] php = true in locrin.toml"
+        );
+        assert_eq!(
+            skip_note(&Language::Php, "src/b.php", 2),
+            "note: src/b.php and 1 more php file skipped; enable them with [languages] php = true in locrin.toml"
+        );
+        assert_eq!(
+            skip_note(&Language::Python, "bot/a.py", 4),
+            "note: bot/a.py and 3 more python files skipped; enable them with [languages] python = true in locrin.toml"
+        );
+    }
 
     /// The rules that answer with a change rather than a state need to know what
     /// the file used to say, and for a `--changed` run the index is where that
