@@ -1,10 +1,12 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use tree_sitter::{Node, Parser, Tree};
 
 use crate::lang::Language;
+use crate::symbols::Symbol;
 use crate::tree;
 
 #[derive(Debug)]
@@ -15,6 +17,15 @@ pub struct ParsedFile {
     pub source: String,
     pub tree: Tree,
     pub has_error: bool,
+    /// The file's symbol table, extracted on first use by
+    /// [`crate::symbols::symbols_of`] and shared from then on.
+    ///
+    /// Extracting walks the whole tree and allocates, and the callers that want
+    /// it want it once per finding rather than once per file: a file with a
+    /// hundred findings walked its tree a hundred times. A `OnceLock` rather
+    /// than a `OnceCell` because rules run over files in a rayon pool, so a
+    /// `&ParsedFile` crosses threads and the file has to stay `Sync`.
+    pub(crate) symbols: OnceLock<Vec<Symbol>>,
 }
 
 /// The bytes to hand the parser.
@@ -82,7 +93,15 @@ pub fn parse_source(path: &Path, rel: &str, source: String) -> Option<ParsedFile
     parser.set_language(&language.grammar()).expect("grammar version matches tree-sitter runtime");
     let tree = parser.parse(parser_bytes(&source).as_ref(), None)?;
     let has_error = has_blocking_error(tree.root_node(), &source);
-    Some(ParsedFile { path: path.to_path_buf(), rel: rel.to_string(), language, source, tree, has_error })
+    Some(ParsedFile {
+        path: path.to_path_buf(),
+        rel: rel.to_string(),
+        language,
+        source,
+        tree,
+        has_error,
+        symbols: OnceLock::new(),
+    })
 }
 
 pub fn rel_path(root: &Path, path: &Path) -> String {

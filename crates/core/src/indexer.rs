@@ -78,8 +78,10 @@ pub fn record_with_stat(
     stat: (i64, i64),
     skipped: &[String],
 ) -> anyhow::Result<()> {
-    let syms = symbols::extract(file);
-    symbols::store(ix, file, &syms)?;
+    // Through the file's own table rather than a walk of its own: a rule that
+    // anchors a finding in this file asks for the same table, and one of the two
+    // now pays for it instead of both.
+    symbols::store(ix, file, symbols::symbols_of(file))?;
     let edges = edges::from_imports(&file.rel, &file_imports(file), resolver);
     edges::store(ix, &file.rel, &edges)?;
     let allow: Vec<u32> =
