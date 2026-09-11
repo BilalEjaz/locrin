@@ -135,13 +135,21 @@ impl Config {
     }
 
     /// Checks that every name in a `[rules.<id>] languages` list is a language
-    /// the engine reads, naming the key and the value that is not.
+    /// the engine reads, naming the key and the value that is not, and that the
+    /// list names at least one.
     ///
     /// Whether the rule itself can read that language is a question only the
     /// rule set can answer, and this crate is the one the rule set depends on,
     /// so the CLI asks it separately once both are in hand.
     fn validate_rule_languages(&self) -> anyhow::Result<()> {
         for (id, over) in &self.rules {
+            // An empty list says the rule reports on no language at all, which
+            // is a rule turned off by the key for where it reports rather than
+            // by the key for whether it runs. Silently honoured it would read
+            // as a rule that had simply stopped finding anything.
+            if over.languages.as_ref().is_some_and(Vec::is_empty) {
+                anyhow::bail!("rules.{id}.languages names no language; use enabled = false to turn the rule off");
+            }
             for name in over.languages.iter().flatten() {
                 anyhow::ensure!(
                     Language::from_name(name).is_some(),
@@ -328,6 +336,19 @@ mod tests {
         assert!(err.contains("rules.leftover-commented-code.languages"), "{err}");
         assert!(err.contains("pyhton"), "{err}");
         assert!(err.contains("python"), "the known names are listed: {err}");
+    }
+
+    /// An empty list reads as "this rule reports nowhere", which is a rule
+    /// turned off by a key that does not say so. The key that says so is
+    /// `enabled`, and the config is told to use it.
+    #[test]
+    fn an_empty_rule_language_list_is_an_error() {
+        let dir = fresh("config-languages-empty");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[rules.leftover-commented-code]\nlanguages = []\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains(CONFIG_FILE), "{err}");
+        assert!(err.contains("rules.leftover-commented-code.languages"), "{err}");
+        assert!(err.contains("enabled = false"), "the key that turns a rule off is named: {err}");
     }
 
     #[test]

@@ -1521,6 +1521,21 @@ fn a_rule_language_override_a_rule_cannot_read_fails_the_run() {
     assert!(err.contains("pyhton"), "{err}");
 }
 
+/// `secret-exposed` is locked, so the `rules` table cannot turn it off or lower
+/// its severity. `languages` is the key it refuses out loud: narrowing where a
+/// locked rule reports is narrowing the lock, and a config that asks for it is
+/// told rather than quietly ignored.
+#[test]
+fn a_languages_override_on_the_locked_rule_fails_the_run() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.secret-exposed]\nlanguages = [\"php\"]\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--offline"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("rules.secret-exposed.languages"), "{err}");
+    assert!(err.contains("locked"), "the rule is named and so is the reason: {err}");
+}
+
 /// `dead-file` is a graph rule: it reads the index, which holds every file the
 /// walk indexed, and its resolver knows JavaScript resolution and nothing else.
 /// It declares the JavaScript family, so on a repository with PHP and Python

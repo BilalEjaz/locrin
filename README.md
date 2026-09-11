@@ -344,13 +344,15 @@ rule to the languages you name. It is the escape from a per-language off that
 languages = ["typescript", "tsx", "javascript", "python"]
 ```
 
-A name that is not a language, or a language the rule was not written against,
-fails the run and says which languages that rule reads. `enabled = false` still
-wins: this key says where a rule reports, not whether it runs.
+A name that is not a language, a language the rule was not written against, or
+an empty list fails the run and says what to write instead. `enabled = false`
+still wins: this key says where a rule reports, not whether it runs.
 
-`secret-exposed` is locked: it ignores both `rules` keys. A repository that
-wants a locked finding to stop failing the build accepts it into the baseline,
-where the acceptance is written down with a reason.
+`secret-exposed` is locked: it ignores `enabled` and `severity` and refuses
+`languages`, because narrowing where a locked rule reports is how it would be
+silenced. A repository that wants a locked finding to stop failing the build
+accepts it into the baseline, where the acceptance is written down with a
+reason.
 
 ## Baseline and suppression
 

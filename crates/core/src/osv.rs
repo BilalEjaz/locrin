@@ -573,52 +573,86 @@ fn containing_range(range: &Value, version: &str, ecosystem: &str) -> RangeSays 
     let Some(order) = range_order(range, ecosystem) else {
         return RangeSays::Unreadable;
     };
+    // One event object may carry more than one boundary, and OSV's schema lets
+    // an `introduced` share an object with the `fixed` that closes it, so the
+    // keys are read in this order and each becomes an event of its own: the
+    // interval has to be opened before it is closed.
+    let mut events: Vec<(Boundary, &str)> = Vec::new();
+    for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
+        for (key, boundary) in [
+            ("introduced", Boundary::Introduced),
+            ("fixed", Boundary::Fixed),
+            ("last_affected", Boundary::LastAffected),
+        ] {
+            if let Some(at) = event.get(key).and_then(Value::as_str) {
+                events.push((boundary, at));
+            }
+        }
+    }
     // Every boundary is compared against the one installed version, so an
     // unreadable one is either boundary or the version itself, and the answer
-    // is the same in all three cases.
-    let at_least = |boundary: &str| order(version, boundary).map(|o| o != Ordering::Less);
-    let mut introduced: Option<&str> = None;
-    for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
-        if let Some(at) = event.get("introduced").and_then(Value::as_str) {
-            introduced = Some(at);
-            continue;
-        }
-        // A half-open interval closed by its fix: `introduced <= v < fixed`.
-        if let Some(fixed) = event.get("fixed").and_then(Value::as_str) {
-            let opened = introduced.take();
-            let Some(after_start) = opened.map(at_least).unwrap_or(Some(false)) else {
-                return RangeSays::Unreadable;
-            };
-            let Some(order_to_fix) = order(version, fixed) else {
-                return RangeSays::Unreadable;
-            };
-            if after_start && order_to_fix == Ordering::Less {
-                return RangeSays::Holds(Some(fixed.to_string()));
+    // is the same in all three cases. Asked of every boundary before the walk
+    // rather than during it, because the walk now sorts first, and sorting
+    // compares the boundaries against each other: a range is read whole or not
+    // at all, which is what this function promises above.
+    let mut walk = Vec::with_capacity(events.len());
+    for (boundary, at) in events {
+        let Some(to_version) = order(version, at) else {
+            return RangeSays::Unreadable;
+        };
+        walk.push((boundary, at, to_version));
+    }
+    // OSV does not promise the events arrive in version order, and reading them
+    // as an interval list means reading them in one. Two boundaries at the same
+    // version are ordered by kind, which is the tie-break that keeps an
+    // `introduced` in front of the `fixed` it shares an object with.
+    //
+    // The comparator answered `Some` for every boundary against the installed
+    // version just above, which for all three comparators means every boundary
+    // parsed, so no pair of them can be incomparable here.
+    walk.sort_by(|(a_kind, a, _), (b_kind, b, _)| order(a, b).unwrap_or(Ordering::Equal).then(a_kind.cmp(b_kind)));
+    // The open interval, held as the comparison of the installed version against
+    // the `introduced` that opened it.
+    let mut introduced: Option<Ordering> = None;
+    for (boundary, at, to_version) in walk {
+        // An interval that was never opened holds nothing, which is what the
+        // `false` here says.
+        let after_start = |opened: Option<Ordering>| opened.is_some_and(|o| o != Ordering::Less);
+        match boundary {
+            Boundary::Introduced => introduced = Some(to_version),
+            // A half-open interval closed by its fix: `introduced <= v < fixed`.
+            Boundary::Fixed => {
+                if after_start(introduced.take()) && to_version == Ordering::Less {
+                    return RangeSays::Holds(Some(at.to_string()));
+                }
             }
-            continue;
-        }
-        // An interval closed by its last affected release instead, which is
-        // what an advisory writes when no fix has shipped: `introduced <= v <=
-        // last_affected`, and no version to upgrade to.
-        if let Some(last) = event.get("last_affected").and_then(Value::as_str) {
-            let opened = introduced.take();
-            let Some(after_start) = opened.map(at_least).unwrap_or(Some(false)) else {
-                return RangeSays::Unreadable;
-            };
-            let Some(order_to_last) = order(version, last) else {
-                return RangeSays::Unreadable;
-            };
-            if after_start && order_to_last != Ordering::Greater {
-                return RangeSays::Holds(None);
+            // An interval closed by its last affected release instead, which is
+            // what an advisory writes when no fix has shipped: `introduced <= v
+            // <= last_affected`, and no version to upgrade to.
+            Boundary::LastAffected => {
+                if after_start(introduced.take()) && to_version != Ordering::Greater {
+                    return RangeSays::Holds(None);
+                }
             }
         }
     }
     // An `introduced` with nothing closing it runs to the end of time.
-    match introduced.map(at_least) {
-        Some(None) => RangeSays::Unreadable,
-        Some(Some(true)) => RangeSays::Holds(None),
+    match introduced {
+        Some(o) if o != Ordering::Less => RangeSays::Holds(None),
         _ => RangeSays::Outside,
     }
+}
+
+/// One end of an interval inside a range's event list.
+///
+/// The declaration order is the order two boundaries at the same version are
+/// read in, which is why it derives `Ord`: an `introduced` opens the interval
+/// that a `fixed` or a `last_affected` at that same version closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Boundary {
+    Introduced,
+    Fixed,
+    LastAffected,
 }
 
 /// A PyPI version in the form PEP 440 compares by: the epoch, the release
@@ -1703,6 +1737,16 @@ mod tests {
             ("1.0b1", "1.0rc1", Ordering::Less),
             ("1.0rc1", "1.0", Ordering::Less),
             ("1.0", "1.0.post1", Ordering::Less),
+            // A post release of a pre-release sits between that pre-release and
+            // the release it precedes: `post` is read after `pre`, not instead.
+            ("1.0rc1", "1.0rc1.post1", Ordering::Less),
+            ("1.0rc1.post1", "1.0", Ordering::Less),
+            // Release segments are integers, so a leading zero is nothing.
+            ("01.0", "1.0", Ordering::Equal),
+            // "When comparing a numeric and lexicographic segment, the numeric
+            // section always compares greater than the lexicographic segment"
+            // (PEP 440, local version identifiers).
+            ("1.0+a", "1.0+1", Ordering::Less),
             ("1.0.dev1", "1.0a1", Ordering::Less),
             ("1.0.dev1", "1.0.dev2", Ordering::Less),
             ("1.0.post1.dev1", "1.0.post1", Ordering::Less),
@@ -1740,6 +1784,9 @@ mod tests {
             ("1.0", "1.0.0.0", Ordering::Equal),
             ("1.0.0-alpha1", "1.0.0-beta1", Ordering::Less),
             ("1.0.0-beta1", "1.0.0-RC1", Ordering::Less),
+            // A suffix with no number is that stability at zero, so the bare
+            // spelling precedes the numbered one rather than equalling it.
+            ("1.0.0-RC", "1.0.0-RC1", Ordering::Less),
             ("1.0.0-RC1", "1.0.0", Ordering::Less),
             ("1.0.0", "1.0.0-p1", Ordering::Less),
             ("1.0.0-dev", "1.0.0-alpha1", Ordering::Less),
@@ -1755,7 +1802,7 @@ mod tests {
             assert_eq!(composer_cmp(b, a), Some(want.reverse()), "{b} vs {a}");
         }
         // A branch name is not a release, and nothing else here is a version.
-        for unreadable in ["dev-main", "dev-feature/x", "1.0.x-dev", "", "1.0.0-frog", "v"] {
+        for unreadable in ["dev-main", "dev-feature/x", "1.0.x-dev", "2.x-dev", "", "1.0.0-frog", "v"] {
             assert_eq!(composer_cmp(unreadable, "1.0.0"), None, "{unreadable}");
             assert_eq!(composer_cmp("1.0.0", unreadable), None, "{unreadable}");
         }
@@ -1803,6 +1850,47 @@ mod tests {
           }]
         });
         assert_eq!(advisory_from("GHSA-npm-eco", &npm, "lodash", "4.17.19", "npm").fix, Fix::UnreadableRanges);
+    }
+
+    /// OSV does not promise a range's events arrive in version order, and one
+    /// event object may carry the `introduced` and the `fixed` that closes it
+    /// together. Both spellings describe the same two intervals as the
+    /// canonical one, so all three have to answer alike for every version.
+    #[test]
+    fn a_range_is_read_whatever_order_its_events_arrive_in() {
+        let entry = |events: Value| {
+            json!({
+              "id": "GHSA-order",
+              "affected": [{
+                "package": {"name": "pkg", "ecosystem": "npm"},
+                "ranges": [{"type": "SEMVER", "events": events}]
+              }]
+            })
+        };
+        let canonical = entry(json!([
+            {"introduced": "1.0.0"}, {"fixed": "1.5.0"}, {"introduced": "2.0.0"}, {"fixed": "2.5.0"}
+        ]));
+        let shuffled = entry(json!([
+            {"fixed": "2.5.0"}, {"introduced": "1.0.0"}, {"introduced": "2.0.0"}, {"fixed": "1.5.0"}
+        ]));
+        let paired = entry(json!([
+            {"introduced": "1.0.0", "fixed": "1.5.0"}, {"introduced": "2.0.0", "fixed": "2.5.0"}
+        ]));
+        let cases: &[(&str, Option<&str>)] = &[
+            ("1.2.0", Some("1.5.0")),
+            ("2.1.0", Some("2.5.0")),
+            // Between the two intervals, and past the last one: neither range
+            // holds the version, so there is nothing to move to.
+            ("1.7.0", None),
+            ("3.0.0", None),
+            ("0.9.0", None),
+        ];
+        for (version, want) in cases {
+            let want = want.map(str::to_string);
+            assert_eq!(first_fixed(&canonical, "pkg", version), want, "canonical {version}");
+            assert_eq!(first_fixed(&shuffled, "pkg", version), want, "out of order {version}");
+            assert_eq!(first_fixed(&paired, "pkg", version), want, "two keys in one event {version}");
+        }
     }
 
     /// The same for Packagist, whose advisories publish `ECOSYSTEM` ranges too.

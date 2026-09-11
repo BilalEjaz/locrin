@@ -18,10 +18,12 @@ the escape from a per-language off that `enabled = true` deliberately is not:
 `[rules.leftover-commented-code] languages = ["typescript", "tsx",
 "javascript", "python"]` turns the Python pair on, and a shorter list narrows a
 rule to the languages you name. `enabled = false` still wins. A name that is
-not a language, or a language the rule was not written against, fails the run
-and names what the rule does read. The key reaches the findings cache's key, so
-adding or changing one rebuilds the rows it affects, and a rule's SARIF
-`properties.languages` reports what it runs on in this repository.
+not a language, a language the rule was not written against, or an empty list
+fails the run and names what to write instead. The locked `secret-exposed`
+refuses the key outright: it reports on every language it reads, and narrowing
+that is how a locked rule would be silenced. The key reaches the findings
+cache's key, so adding or changing one rebuilds the rows it affects, and a
+rule's SARIF `properties.languages` reports what it runs on in this repository.
 
 ## 0.4.0
 
