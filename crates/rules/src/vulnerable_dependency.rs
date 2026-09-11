@@ -159,8 +159,10 @@ impl VulnerableDependency {
             // the three formats.
             let span = Span { start_line: package.line, start_col: 0, end_line: package.line, end_col: 0 };
             // The advisory id joins the package name in the anchor so that a
-            // package with two advisories is two findings, and so that a finding
-            // keeps its id when the lockfile is regenerated and the entry moves.
+            // package with two advisories is two findings (two ids that alias
+            // each other are one advisory, and `osv::check` reports the family
+            // once under its GHSA id), and so that a finding keeps its id when
+            // the lockfile is regenerated and the entry moves.
             // The version is there for the same reason: an install tree holding
             // three copies of one package at three versions is three findings
             // with three upgrades to make, and without the version they shared

@@ -209,7 +209,7 @@ pub fn check(
 
     let mut hits = Vec::new();
     for (package, ids) in lock.packages.iter().zip(per_package) {
-        for id in ids {
+        for id in one_per_family(&ids, &details) {
             let advisory = match details.get(&id) {
                 Some(detail) => advisory_from(&id, detail, &package.name, &package.version, package.ecosystem),
                 None => Advisory {
@@ -288,6 +288,53 @@ fn parse_batch(json: &str, packages: usize) -> Vec<Vec<String>> {
         ids.dedup();
         *slot = ids;
     }
+    out
+}
+
+/// One id per advisory family, out of the ids the batch endpoint returned for
+/// one package.
+///
+/// OSV publishes the same advisory under several ids: a GHSA record, and a
+/// `PYSEC-` (or `CVE-`) record that names it in its `aliases`, and the batch
+/// endpoint returns both. Reported as they come, a package with one flaw is two
+/// findings, and the copy is the poorer one: PyPI's PYSEC records rate
+/// nothing and often carry no title. So ids that alias each other, in either
+/// direction, are one family, and the family reports once under its GHSA id,
+/// which is the record that carries the rating and the summary. A family with
+/// no GHSA id reports under its first id in sort order. An alias that the
+/// batch did not return for this package joins nothing: it is a name for the
+/// same flaw, not a second finding, and there is nothing to merge it with.
+fn one_per_family(ids: &[String], details: &BTreeMap<String, Value>) -> Vec<String> {
+    let index: BTreeMap<&str, usize> = ids.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+    let mut parent: Vec<usize> = (0..ids.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for (i, id) in ids.iter().enumerate() {
+        let aliases = details.get(id).and_then(|d| d.get("aliases")).and_then(Value::as_array);
+        for alias in aliases.into_iter().flatten().filter_map(Value::as_str) {
+            if let Some(&j) = index.get(alias) {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+    }
+    let mut families: BTreeMap<usize, Vec<&String>> = BTreeMap::new();
+    for (i, id) in ids.iter().enumerate() {
+        families.entry(root(&mut parent, i)).or_default().push(id);
+    }
+    let mut out: Vec<String> = families
+        .into_values()
+        .map(|mut family| {
+            family.sort();
+            family.iter().find(|id| id.starts_with("GHSA-")).unwrap_or(&family[0]).to_string()
+        })
+        .collect();
+    out.sort();
     out
 }
 
@@ -1118,6 +1165,62 @@ mod tests {
         .unwrap();
         let advisory = advisory_from("GHSA-test", &open, "p", "2.5.0", "npm");
         assert_eq!(advisory.fix, Fix::NonePublished);
+    }
+
+    /// The PyPI shape: the batch names the GHSA record and the PYSEC record
+    /// that aliases it, and the package has one flaw, so it is one finding
+    /// under the GHSA id, which is the record that rates it.
+    #[test]
+    fn two_aliased_advisories_are_one_finding_under_the_ghsa_id() {
+        const PYSEC: &str = "PYSEC-2021-1";
+        let both = r#"{"results":[{},{},{},{"vulns":[{"id":"PYSEC-2021-1"},{"id":"GHSA-p6mc-m468-83gg"}]}]}"#;
+        let fetch = |url: &str, body: Option<&str>| -> anyhow::Result<String> {
+            if url == BATCH_URL {
+                return Ok(both.to_string());
+            }
+            if url == format!("{VULN_URL}{PYSEC}") {
+                return Ok(json!({"id": PYSEC, "aliases": [VULN_ID], "affected": []}).to_string());
+            }
+            canned(url, body)
+        };
+        let ix = Index::open_in_memory().unwrap();
+
+        let outcome = check(&ix, &fixture_lock(), false, &fetch).unwrap();
+
+        let hit = only_hit(&outcome);
+        assert_eq!(hit.advisory.id, VULN_ID);
+        assert_eq!(hit.advisory.severity, "HIGH", "the family reports with the GHSA record's rating");
+        assert_eq!(outcome.warnings, Vec::<String>::new());
+    }
+
+    /// The alias can be published on either record, a family can hold three
+    /// ids, an id whose detail is unavailable still joins through the other
+    /// side, and two advisories that name each other nowhere stay two.
+    #[test]
+    fn a_family_is_read_from_either_side_and_unrelated_advisories_stay_apart() {
+        let ids: Vec<String> =
+            ["PYSEC-2026-1", "GHSA-aaaa-bbbb-cccc", "CVE-2026-1", "GHSA-dddd-eeee-ffff", "PYSEC-2026-2"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let mut details = BTreeMap::new();
+        // The GHSA names the PYSEC; the PYSEC's own detail was never read.
+        details.insert("GHSA-aaaa-bbbb-cccc".to_string(), json!({"aliases": ["PYSEC-2026-1", "CVE-2026-1"]}));
+        details.insert("GHSA-dddd-eeee-ffff".to_string(), json!({"aliases": ["CVE-2026-9"]}));
+        details.insert("PYSEC-2026-2".to_string(), json!({}));
+
+        assert_eq!(one_per_family(&ids, &details), vec!["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff", "PYSEC-2026-2"]);
+    }
+
+    /// A family with no GHSA record reports under its first id in sort order,
+    /// so the choice is stable across runs and the anchor does not move.
+    #[test]
+    fn a_family_without_a_ghsa_id_reports_under_its_first_id() {
+        let ids: Vec<String> = ["PYSEC-2026-7", "CVE-2026-7"].into_iter().map(String::from).collect();
+        let mut details = BTreeMap::new();
+        details.insert("PYSEC-2026-7".to_string(), json!({"aliases": ["CVE-2026-7"]}));
+
+        assert_eq!(one_per_family(&ids, &details), vec!["CVE-2026-7"]);
     }
 
     #[test]
