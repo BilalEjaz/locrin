@@ -73,7 +73,7 @@ runs:
         mkdir -p "$dir" && cd "$dir"
         asset="locrin-${VERSION}-${target}.${ext}"
         gh release download "$VERSION" --repo "$REPO" -p "$asset" -p SHA256SUMS --clobber
-        grep " $asset\$" SHA256SUMS | sha256sum -c -
+        if command -v sha256sum >/dev/null; then grep " $asset\$" SHA256SUMS | sha256sum -c -; else grep " $asset\$" SHA256SUMS | shasum -a 256 -c -; fi
         if [[ "$ext" == "zip" ]]; then 7z x -y "$asset" >/dev/null; else tar -xzf "$asset"; fi
         echo "$dir/locrin-${VERSION}-${target}" >> "$GITHUB_PATH"
 
