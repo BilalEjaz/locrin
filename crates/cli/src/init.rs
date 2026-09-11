@@ -53,6 +53,11 @@ pub const CONFIG_TEMPLATE: &str = r#"# Locrin configuration. Every key is option
 # auth_middleware = ["requireAuth"]
 # server_paths = ["server/**"]
 
+# Read PHP or Python too; see "Languages" in README.md for the rules that run on them.
+# [languages]
+# php = true
+# python = true
+
 # Per-rule overrides. secret-exposed is locked and ignores these.
 # [rules.dead-file]
 # enabled = true

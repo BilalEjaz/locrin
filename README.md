@@ -326,7 +326,7 @@ override is in force when it is not.
 | `boundaries` | `[]` | Import directions. Each entry sets `from` and exactly one of `forbid` or `allow`, with an optional `name`. |
 | `framework.auth_middleware` | `[]` | Identifiers that mark an Express route as authenticated. `express-route-without-auth` runs only when you have named one. |
 | `framework.server_paths` | `["supabase/functions/**", "server/**", "api/**", "scripts/**", "**/*.server.*", "**/*.test.*", "**/*.spec.*"]` | Globs for code that runs on a server, so a service-role key there is not client exposure. |
-| `languages.php` | `false` | Reads `.php` and `.phtml` files too. See "PHP and Python" under Rules for what runs on them. |
+| `languages.php` | `false` | Reads `.php` and `.phtml` files too. See "Languages" for what runs on them. |
 | `languages.python` | `false` | Reads `.py` files too (`.pyi` stubs are never read). |
 | `rules.<id>.enabled` | the rule's own default | Turns one rule on or off. |
 | `rules.<id>.severity` | the rule's own default | Overrides one rule's severity. |
@@ -401,34 +401,128 @@ gate. Turn any of them on with `rules.<id>.enabled = true`.
 and `express-route-without-auth` is on but silent until you name an auth
 middleware.
 
-### PHP and Python
+## Languages
 
-Every rule runs on the JavaScript family. With `[languages] php = true` or
-`python = true` in `locrin.toml` the engine also reads that language, and five
-rules run on it: `leftover-debug` (PHP's dump family and `xdebug_break`;
-Python's `breakpoint()`, `pdb` and its relatives, never `print`),
+TypeScript, TSX and JavaScript are read with no configuration, and every rule
+runs on them. PHP and Python are read only when you ask:
+
+```toml
+[languages]
+php = true      # .php and .phtml
+python = true   # .py, never .pyi
+```
+
+`locrin init` writes that block commented out. Off is not a filter applied
+late: a file in a language you have not enabled is never opened, never parsed
+and never indexed, so turning the flag on is the only thing that changes what
+the engine sees. A scan that walks past such files says so in a note naming the
+flag, once per language, rather than silently skipping them.
+
+### What runs on them
+
+Five rules: `leftover-debug` (PHP's dump family and `xdebug_break`; Python's
+`breakpoint()`, `pdb` and its relatives, never `print`),
 `leftover-commented-code`, `leftover-agent-marker`, `secret-exposed` and
 `vulnerable-dependency` (`composer.lock` against Packagist; `requirements.txt`
-and `poetry.lock` against PyPI). The other sixteen rules are written against
-the TypeScript grammar and never see a PHP or Python file. Every rule can ship
-off for one language on its own once it fails the precision gate there, and
-one does today: all ten pairs were measured on real repositories
-(`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, three
-rounds: BookStack and FastSpot, then Monica and Poetry, then the fixes
-re-measured on the same corpora). `leftover-commented-code` ships off on
-Python (0 true of 14 on Poetry in round two, every one a prose comment whose
-header ends in a colon; a colon now counts only behind a suite keyword, and
-one prose `with ... :` header remains, so it stays off). `leftover-agent-marker`
-went off on PHP in round two over one `XXX` placeholder inside a path and is
-back on: a marker word inside a path or a file name no longer counts, and the
-re-measure on Monica is 4 true of 4. The other nine pairs ship on. PyPI and
-Packagist advisories arrive under several ids (a GHSA record and the PYSEC or
-CVE record that aliases it); `vulnerable-dependency` reports one finding per
-family, under the GHSA id. Neither registry's findings name a fixed version
-yet: both publish `ECOSYSTEM` ranges the engine does not order, so the finding
-points at the advisory instead. A per-language off is not something
-`rules.<id>.enabled = true` overrides; a `rules.<id>.languages` override is
-the intended knob and does not exist yet.
+and `poetry.lock` against PyPI).
+
+The other sixteen rules stay TypeScript-only. Every dead-code, import and
+boundary rule (`unused-import`, `unreachable`, `dead-export`, `dead-file`,
+`boundary-violation`), the two test rules, `swallowed-error`, `weak-crypto`,
+`injection-sink`, `html-injection` and all five framework rules (Supabase and
+Express) are written against the TypeScript grammar, and a rule declares the
+languages it can read, so they never see a PHP or Python file. That declaration
+is machine-readable: each rule in a SARIF report carries
+`properties.languages`, so a consumer can tell a rule that was silent because
+it found nothing from one that was never asked. PHP and Python symbols go into
+the same index as everything else, so a later plan can put the graph rules on
+them; today they do not run.
+
+PHP is parsed with the mixed HTML and PHP grammar, so Blade and plain templates
+parse rather than error. A file that fails to parse degrades the same way it
+does in TypeScript: the file is recorded with its error and the rules that need
+a tree skip it.
+
+### Per-language defaults
+
+A rule can ship off for one language while staying on for the others, and two
+pairs of the ten were decided that way:
+
+| Pair | Default | Why |
+| --- | --- | --- |
+| `leftover-commented-code` on Python | **off** | 0 true of 14 on Poetry in round two, every one a prose comment whose header ends in a colon. A colon now counts only behind a suite keyword, which removed thirteen; one prose `with ... :` header remains, and one false positive is still a fail |
+| `leftover-agent-marker` on PHP | **on** (was off in round two) | One `XXX` inside `avatars/XXX.jpg` on Monica. A marker word inside a path or a file name no longer counts, and the re-measure is 4 true of 4 |
+
+The other eight pairs ship on. A per-language off is not something
+`rules.<id>.enabled = true` overrides: that key says whether the rule runs at
+all, and the languages a rule failed on are the engine's measurement rather
+than the repository's choice. A `rules.<id>.languages` override is the intended
+knob and does not exist yet, so the escape today is the baseline.
+
+### Corpora and numbers
+
+All ten rule-and-language pairs were measured on real repositories over three
+rounds, written up in
+`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`:
+
+| Round | PHP corpus | Python corpus |
+| --- | --- | --- |
+| One | BookStack `v26.05.4`, 2152 files | FastSpot (a private bot), 96 files |
+| Two | Monica `v4.1.2`, 1800 files | Poetry `2.4.3`, 438 files |
+| Three | Monica again, after the fixes | Poetry again, after the fixes |
+
+Round three's numbers, each pair re-measured on the corpus that failed it:
+
+| Pair | Round two | Round three | True | Default |
+| --- | --- | --- | --- | --- |
+| `leftover-agent-marker` on PHP (Monica) | 5 findings | 4 | 4 of 4 | on |
+| `leftover-commented-code` on Python (Poetry) | 14 findings | 1 | 0 of 1 | off |
+| `vulnerable-dependency` on PyPI (Poetry) | 25 findings | 13 | 13 of 13 | on |
+
+The PyPI drop from 25 to 13 is not a precision fix but a de-duplication: PyPI
+and Packagist advisories arrive under several ids (a GHSA record and the PYSEC
+or CVE record that aliases it), and `vulnerable-dependency` now reports one
+finding per family, under the GHSA id. Every GHSA in the round-two list is
+still reported. Neither registry's findings name a fixed version yet: both
+publish `ECOSYSTEM` ranges the engine does not order, so the finding points at
+the advisory instead.
+
+Two limits worth knowing. Four of the ten pairs have never produced five
+findings on a real repository, which is the smallest sample the gate scores, so
+they ship on fixture evidence and a probe that the path works rather than on a
+measured rate. And the locked `secret-exposed` reported a private key in a
+BookStack test helper, which is accurate and is not something a maintainer
+acts on; a fixture key under `tests/` is accepted into the baseline with a
+reason, like any other locked finding.
+
+### Speed
+
+Spec 3.4's targets name a TypeScript repository, so the benchmark suite
+measures one (the FastLift checkout, 1846 files), and the PHP number is
+recorded beside it rather than gated. Release build, one repository at a time,
+each cold scan into a cache of its own after a warm-up spawn and a throwaway
+scan:
+
+| Benchmark | Target | Measured |
+| --- | --- | --- |
+| Cold index, whole repository (TypeScript, 1846 files) | under 5 s | 4.71 s |
+| Warm single-file check | under 300 ms | 215 ms |
+| Warm 30-file check (a typical pull request) | under 1 s | 362 ms |
+| PostToolUse hook, end to end | under 300 ms | 237 ms |
+| Startup (`--help`) | under 50 ms | 21 ms |
+| Cold index, PHP (BookStack, 2152 files, 1773 of them PHP) | recorded, not gated | 6.56 s |
+
+Run them with `cargo test --release -p locrin-cli -- --ignored --nocapture`;
+the PHP one needs `LOCRIN_PHP_BENCH_REPO` pointed at a checkout whose
+`locrin.toml` enables PHP, and says so and measures nothing without it.
+
+The two cold numbers are 2.6 ms and 3.0 ms per file, so the HTML-and-PHP
+grammar is roughly the cost of the TypeScript one and not a different order.
+Both cold figures move with the box: the same suite recorded 3.8 s for the
+TypeScript cold index the day before, on a quieter machine, and a first read of
+a checkout the operating system has just written costs several times either
+number while the file cache and the virus scanner catch up. The warm numbers,
+which are what a hook and a pull request actually wait for, are stable.
 
 ## The network
 

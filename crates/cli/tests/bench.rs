@@ -75,6 +75,50 @@ fn cold_index_under_five_seconds() {
     assert!(ms < 5_000, "cold index took {ms} ms");
 }
 
+/// Recorded, not gated: the cold index of a PHP repository.
+///
+/// Spec 3.4's five-second target names a TypeScript repository, and every other
+/// benchmark here measures that one. This measures a PHP checkout instead, so a
+/// later change to the PHP path has a number to be compared against, and it
+/// asserts nothing beyond the scan exiting cleanly: a PHP corpus is whatever the
+/// operator points it at, and a target derived from one repository's file count
+/// would fail on the next.
+///
+/// Set `LOCRIN_PHP_BENCH_REPO` to a checkout with `[languages] php = true` in
+/// its `locrin.toml`; without it the run is not a PHP benchmark at all, so the
+/// test says why it measured nothing and passes. The same warm-up as the cold
+/// TypeScript benchmark is bought first, for the same reason.
+#[test]
+#[ignore]
+fn php_cold_index_recorded() {
+    let _serial = serial();
+    let Ok(dir) = std::env::var("LOCRIN_PHP_BENCH_REPO") else {
+        println!("php cold scan: skipped, set LOCRIN_PHP_BENCH_REPO to a PHP checkout to record it");
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    assert!(dir.is_dir(), "LOCRIN_PHP_BENCH_REPO is {}, which is not a directory", dir.display());
+    Command::cargo_bin("locrin").unwrap().arg("--version").assert().success();
+    let warmup = tempfile::tempdir().unwrap();
+    Command::cargo_bin("locrin")
+        .unwrap()
+        .current_dir(&dir)
+        .env("LOCRIN_CACHE_DIR", warmup.path())
+        .args(["scan", "--offline"])
+        .assert()
+        .success();
+    let cache = tempfile::tempdir().unwrap();
+    let t = Instant::now();
+    Command::cargo_bin("locrin")
+        .unwrap()
+        .current_dir(&dir)
+        .env("LOCRIN_CACHE_DIR", cache.path())
+        .args(["scan", "--offline"])
+        .assert()
+        .success();
+    println!("php cold scan of {}: {} ms", dir.display(), t.elapsed().as_millis());
+}
+
 #[test]
 #[ignore]
 fn warm_single_file_check_under_300ms() {
