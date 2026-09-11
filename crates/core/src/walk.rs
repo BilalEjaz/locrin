@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{WalkBuilder, WalkState};
 
+use crate::config::Languages;
 use crate::lang::Language;
 
 pub const DEFAULT_EXCLUDES: &[&str] = &[
@@ -22,6 +23,10 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
 #[derive(Debug, Default, Clone)]
 pub struct WalkOptions {
     pub excludes: Vec<String>,
+    /// The languages the repository has asked for beyond the JavaScript family.
+    /// All false by default, which is the answer for a caller that has no config
+    /// to hand: a walk cannot start reading PHP because it forgot to ask.
+    pub languages: Languages,
 }
 
 /// Counters describing the work a walk actually did.
@@ -172,7 +177,9 @@ fn walk_inner(root: &Path, opts: &WalkOptions, source_only: bool) -> anyhow::Res
             if excludes.is_match(&rel) {
                 return WalkState::Continue;
             }
-            if source_only && Language::from_path(path).is_none() {
+            // An unsupported extension and a language the repository has not
+            // asked for are the same answer here: not a file this run parses.
+            if source_only && !Language::from_path(path).is_some_and(|l| l.enabled(&opts.languages)) {
                 return WalkState::Continue;
             }
             // The lock is taken once per matching file, never while reading the
@@ -226,10 +233,43 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("dist/")), "the gitignore still applies: {names:?}");
     }
 
+    /// The walk is where a language the repository has not asked for stops: a
+    /// `.php` file under a TypeScript repository is not read, not parsed and not
+    /// reported on until `[languages]` says so.
+    #[test]
+    fn languages_the_config_has_not_asked_for_are_not_walked() {
+        let dir = std::env::temp_dir().join(format!("locrin-walk-langs-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.ts"), "export const a = 1;\n").unwrap();
+        std::fs::write(dir.join("src/b.php"), "<?php\n").unwrap();
+        std::fs::write(dir.join("src/c.py"), "x = 1\n").unwrap();
+
+        let root = canonical_root(&dir);
+        let names = |opts: &WalkOptions| -> Vec<String> {
+            let files = source_files(&dir, opts).unwrap();
+            files.iter().map(|p| rel_of(p, &root)).collect()
+        };
+
+        assert_eq!(names(&WalkOptions::default()), vec!["src/a.ts"]);
+
+        let php = WalkOptions { languages: Languages { php: true, python: false }, ..Default::default() };
+        assert_eq!(names(&php), vec!["src/a.ts", "src/b.php"]);
+
+        let both = WalkOptions { languages: Languages { php: true, python: true }, ..Default::default() };
+        assert_eq!(names(&both), vec!["src/a.ts", "src/b.php", "src/c.py"]);
+
+        // The listing that skips the language filter keeps every file either way.
+        let all = all_files(&dir, &WalkOptions::default()).unwrap();
+        assert_eq!(all.len(), 3, "{all:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn extra_excludes_apply() {
         let all = source_files(&fixture(), &WalkOptions::default()).unwrap();
-        let opts = WalkOptions { excludes: vec!["src/util.ts".into()] };
+        let opts = WalkOptions { excludes: vec!["src/util.ts".into()], ..Default::default() };
         let files = source_files(&fixture(), &opts).unwrap();
         assert_eq!(files.len(), all.len() - 1);
         assert!(!files.iter().any(|p| p.ends_with("util.ts")));
@@ -270,7 +310,7 @@ mod tests {
             if excludes.is_match(rel_of(path, &root)) {
                 continue;
             }
-            if Language::from_path(path).is_none() {
+            if !Language::from_path(path).is_some_and(|l| l.enabled(&Languages::default())) {
                 continue;
             }
             sequential.push(path.to_path_buf());
@@ -288,7 +328,7 @@ mod tests {
         let (all, all_stats) = walk_with_stats(&fixture(), &WalkOptions::default()).unwrap();
         assert!(all.iter().any(|p| p.ends_with("x.ts")), "fixture must contain the prunable file");
 
-        let opts = WalkOptions { excludes: vec!["**/.git_fake/**".into()] };
+        let opts = WalkOptions { excludes: vec!["**/.git_fake/**".into()], ..Default::default() };
         let (files, stats) = walk_with_stats(&fixture(), &opts).unwrap();
         assert!(!files.iter().any(|p| p.ends_with("x.ts")), "excluded file must not be returned");
         assert!(

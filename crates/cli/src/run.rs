@@ -212,8 +212,19 @@ fn explicit_files(
             }
         } else {
             raw.push(canon.clone());
-            if Language::from_path(&canon).is_some() {
-                files.push(canon);
+            match Language::from_path(&canon) {
+                Some(lang) if lang.enabled(&walk_opts.languages) => files.push(canon),
+                // A file the engine could read, named outright, in a language the
+                // repository has not asked for. Checking nothing in silence would
+                // read as a clean file, so the skip is said once by name with the
+                // line that turns it on.
+                Some(lang) => eprintln!(
+                    "note: {} skipped; enable it with [languages] {} = true in {}",
+                    rel_path(root, &canon),
+                    lang.as_str(),
+                    locrin_core::config::CONFIG_FILE
+                ),
+                None => {}
             }
         }
     }
@@ -601,7 +612,7 @@ fn write_cache(ix: &mut Index, indexed: &Indexed, fresh: &[Finding], key: &Cache
 /// `lock_in_scope` and `rls_in_scope`.
 fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
-    let walk_opts = WalkOptions { excludes: config.excludes.clone() };
+    let walk_opts = WalkOptions { excludes: config.excludes.clone(), languages: config.languages };
     let walked = source_files(root, &walk_opts)?;
     // Which file the advisory rule would answer for, found without reading it.
     // Located once and handed to everything that asks: the question costs a

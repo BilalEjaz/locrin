@@ -121,7 +121,7 @@ pub fn run(
     // The config was loaded before any write, when `locrin.toml` was whatever
     // the operator had. That is the same value the template above would load as,
     // because every setting in it is commented out.
-    let n = source_files(root, &WalkOptions { excludes: config.excludes })?.len();
+    let n = source_files(root, &WalkOptions { languages: config.languages, excludes: config.excludes })?.len();
     progress(&format!("indexing {n} source file(s) under {}", root.display()));
     let started = Instant::now();
     let (files, _changed) = run::scan(root, offline)?;

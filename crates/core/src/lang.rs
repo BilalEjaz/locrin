@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::config::Languages;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     TypeScript,
@@ -30,8 +32,26 @@ impl Language {
             "tsx" => Some(Language::Tsx),
             "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
             "php" | "phtml" => Some(Language::Php),
-            "py" | "pyi" => Some(Language::Python),
+            // `.pyi` is left out for the reason `.d.ts` is: a stub file declares
+            // signatures and holds no bodies, so it is not the code that runs and
+            // every rule reading a body would be reporting on a shadow of it.
+            "py" => Some(Language::Python),
             _ => None,
+        }
+    }
+
+    /// Whether this language is one the run reads, given what the repository
+    /// asked for in `[languages]`.
+    ///
+    /// The JavaScript family is always on: it is what the engine is, and there is
+    /// no flag to turn it off. PHP and Python are read only when the repository
+    /// has opted in, so the gate sits here rather than in each of the walker, the
+    /// explicit-path list and the rules, which would each have to remember it.
+    pub fn enabled(&self, langs: &Languages) -> bool {
+        match self {
+            Language::TypeScript | Language::Tsx | Language::JavaScript => true,
+            Language::Php => langs.php,
+            Language::Python => langs.python,
         }
     }
 
@@ -84,6 +104,9 @@ mod tests {
         assert_eq!(Language::from_path(Path::new("a/b.d.ts")), None);
         assert_eq!(Language::from_path(Path::new("a/b.d.mts")), None);
         assert_eq!(Language::from_path(Path::new("a/b.d.cts")), None);
+        // A `.pyi` stub is Python's `.d.ts`: signatures with no bodies, so every
+        // rule that reads a body would report on a file that runs nothing.
+        assert_eq!(Language::from_path(Path::new("a/b.pyi")), None);
         assert_eq!(Language::from_path(Path::new("a/b.rb")), None);
         assert_eq!(Language::from_path(Path::new("a/README.md")), None);
     }
@@ -93,10 +116,29 @@ mod tests {
         assert_eq!(Language::from_path(Path::new("app/Http/Kernel.php")), Some(Language::Php));
         assert_eq!(Language::from_path(Path::new("views/x.phtml")), Some(Language::Php));
         assert_eq!(Language::from_path(Path::new("bot/main.py")), Some(Language::Python));
-        assert_eq!(Language::from_path(Path::new("bot/types.pyi")), Some(Language::Python));
         assert_eq!(Language::Php.as_str(), "php");
         assert_eq!(Language::Python.as_str(), "python");
         assert_eq!(JS_FAMILY.len(), 3);
         assert_eq!(ALL.len(), 5);
+    }
+
+    /// The JavaScript family is the engine's own language and is never gated.
+    /// PHP and Python are read only once the repository has asked for them.
+    #[test]
+    fn php_and_python_are_enabled_only_by_the_config() {
+        let off = Languages::default();
+        for lang in JS_FAMILY {
+            assert!(lang.enabled(&off), "{lang:?} must not need a flag");
+        }
+        assert!(!Language::Php.enabled(&off));
+        assert!(!Language::Python.enabled(&off));
+
+        let php_only = Languages { php: true, python: false };
+        assert!(Language::Php.enabled(&php_only));
+        assert!(!Language::Python.enabled(&php_only));
+
+        let both = Languages { php: true, python: true };
+        assert!(Language::Php.enabled(&both));
+        assert!(Language::Python.enabled(&both));
     }
 }
