@@ -54,7 +54,7 @@ fn seed<'a>(rating: &'a str, fixed: Option<&'a str>, summary: &'a str) -> impl F
             assert_eq!(url, format!("{}{VULN_ID}", osv::VULN_URL), "no other endpoint is asked");
             Ok(detail.clone())
         };
-        let lock = lockfile::read(root).unwrap().expect("the fixture directory has a lockfile");
+        let lock = lockfile::read(root).unwrap().into_iter().next().expect("the fixture directory has a lockfile");
         let outcome = osv::check(ix, &lock, false, &canned).unwrap();
         assert_eq!(outcome.warnings, Vec::<String>::new(), "the seed itself must be clean");
         assert_eq!(outcome.hits.len(), 1, "one advisory to report");
@@ -127,6 +127,75 @@ fn the_finding_id_survives_the_entry_moving_to_another_line() {
     assert_eq!(f.id, only(&npm).id, "the id follows the package and the advisory, not the line");
 }
 
+/// An advisory document carrying three ecosystems, one of them a decoy: the npm
+/// entry names `urllib3` too, at a version that would be a wrong upgrade to put
+/// in front of a reader. `GHSA-id` is replaced with the id actually asked for.
+const THREE_ECOSYSTEMS: &str = r#"{
+  "id": "GHSA-id",
+  "summary": "Affects more than one registry",
+  "database_specific": {"severity": "high"},
+  "affected": [
+    {
+      "package": {"name": "monolog/monolog", "ecosystem": "Packagist"},
+      "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "2.0.1"}]}]
+    },
+    {
+      "package": {"name": "urllib3", "ecosystem": "npm"},
+      "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.9.9"}]}]
+    },
+    {
+      "package": {"name": "urllib3", "ecosystem": "PyPI"},
+      "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.26.5"}]}]
+    }
+  ]
+}"#;
+
+/// A repository that installs from two registries asks two questions and gets
+/// two answers, each reported against the lockfile its package came from.
+///
+/// Three things are pinned at once. Both lockfiles are read, where the rule used
+/// to read the first one and stop. Neither finding is dropped on its way out,
+/// which is the language filter keeping a finding whose file is in no language
+/// the engine parses. And the upgrade named is the one from the package's own
+/// ecosystem: the npm entry in the same document says `9.9.9`, which for a
+/// package installed from PyPI is a version that does not exist.
+#[test]
+fn a_composer_and_a_requirements_lockfile_are_both_checked_in_their_own_ecosystem() {
+    let root = fixture("vulnerable_dependency", "polyglot");
+    let config = locrin_core::config::Config::default();
+    let seed = |ix: &Index, root: &Path| {
+        let canned = |url: &str, body: Option<&str>| -> anyhow::Result<String> {
+            if url == osv::BATCH_URL {
+                let body = body.expect("the batch endpoint is a POST");
+                let id = if body.contains("Packagist") { "GHSA-php" } else { "GHSA-py" };
+                return Ok(format!(r#"{{"results":[{{"vulns":[{{"id":"{id}"}}]}}]}}"#));
+            }
+            let id = url.rsplit('/').next().expect("the detail endpoint ends in an id");
+            Ok(THREE_ECOSYSTEMS.replace("GHSA-id", id))
+        };
+        let locks = lockfile::read(root).unwrap();
+        assert_eq!(locks.len(), 2, "the fixture has a Composer and a requirements lockfile");
+        for lock in &locks {
+            let outcome = osv::check(ix, lock, false, &canned).unwrap();
+            assert_eq!(outcome.warnings, Vec::<String>::new(), "the seed itself must be clean");
+            assert_eq!(outcome.hits.len(), 1, "one advisory per lockfile");
+        }
+    };
+
+    let findings = run_on_seeded(Box::new(VulnerableDependency), &root, &config, &Previous::default(), seed);
+
+    let mut seen: Vec<(String, u32, String)> =
+        findings.iter().map(|f| (f.file.clone(), f.span.start_line, f.fix.clone())).collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("composer.lock".to_string(), 5, "Upgrade monolog/monolog to 2.0.1".to_string()),
+            ("requirements.txt".to_string(), 1, "Upgrade urllib3 to 1.26.5".to_string()),
+        ]
+    );
+}
+
 /// One package installed at two versions, both hit by one advisory, is two
 /// findings with two ids: each version is upgraded in its own place in the
 /// dependency tree, so accepting one of them must not accept the other. This is
@@ -150,7 +219,7 @@ fn two_installed_versions_of_one_package_are_two_findings() {
             }
             Ok(detail.clone())
         };
-        let lock = lockfile::read(root).unwrap().expect("the fixture directory has a lockfile");
+        let lock = lockfile::read(root).unwrap().into_iter().next().expect("the fixture directory has a lockfile");
         let outcome = osv::check(ix, &lock, false, &canned).unwrap();
         assert_eq!(outcome.warnings, Vec::<String>::new(), "the seed itself must be clean");
         assert_eq!(outcome.hits.len(), 2, "the advisory covers both installed versions");
@@ -254,7 +323,7 @@ fn an_offline_run_without_a_snapshot_reports_nothing_and_its_osv_call_warns() {
 
     // The warning the rule printed, from the same call the rule makes.
     let ix = Index::open_in_memory().unwrap();
-    let lock = lockfile::read(&root).unwrap().unwrap();
+    let lock = lockfile::read(&root).unwrap().into_iter().next().unwrap();
     let refuse = |_url: &str, _body: Option<&str>| -> anyhow::Result<String> { anyhow::bail!("offline") };
     let outcome = osv::check(&ix, &lock, true, &refuse).unwrap();
     assert_eq!(outcome.warnings, vec!["no cached advisory snapshot; vulnerable-dependency skipped"]);
@@ -308,7 +377,7 @@ fn an_advisory_that_does_not_cover_the_installed_version_says_so() {
             }
             Ok(document.clone())
         };
-        let lock = lockfile::read(root).unwrap().expect("the fixture directory has a lockfile");
+        let lock = lockfile::read(root).unwrap().into_iter().next().expect("the fixture directory has a lockfile");
         assert_eq!(osv::check(ix, &lock, false, &canned).unwrap().hits.len(), 1, "one advisory to report");
     };
 
@@ -320,4 +389,52 @@ fn an_advisory_that_does_not_cover_the_installed_version_says_so() {
         format!("No fixed version applies to this version; review {VULN_ID} and pin or replace the package")
     );
     assert_eq!(f.confidence, Confidence::Medium, "an advisory with no upgrade to name is not a full instruction");
+}
+
+/// Most PyPI and Packagist advisories publish `ECOSYSTEM` ranges, which the
+/// engine does not order. It therefore never compared the installed version
+/// against them, and the fix sentence says exactly that: the reader is sent to
+/// the advisory for the version to move to, rather than told that no fix
+/// applies to a version nothing was compared against. The finding itself is not
+/// in doubt, because the batch endpoint matched this exact version server side,
+/// so the confidence stays High.
+#[test]
+fn an_advisory_whose_ranges_are_not_ordered_says_the_fix_was_not_read() {
+    let root = fixture("vulnerable_dependency", "npm");
+    let config = locrin_core::config::Config::default();
+    let document = format!(
+        r#"{{
+          "id": "{VULN_ID}",
+          "summary": "Prototype Pollution in lodash",
+          "database_specific": {{"severity": "high"}},
+          "affected": [{{
+            "package": {{"name": "lodash", "ecosystem": "npm"}},
+            "ranges": [{{"type": "ECOSYSTEM", "events": [{{"introduced": "0"}}, {{"fixed": "4.17.21"}}]}}]
+          }}]
+        }}"#
+    );
+    let seed = move |ix: &Index, root: &Path| {
+        let canned = |url: &str, _body: Option<&str>| -> anyhow::Result<String> {
+            if url == osv::BATCH_URL {
+                return Ok(BATCH.to_string());
+            }
+            Ok(document.clone())
+        };
+        let lock = lockfile::read(root).unwrap().into_iter().next().expect("the fixture directory has a lockfile");
+        assert_eq!(osv::check(ix, &lock, false, &canned).unwrap().hits.len(), 1, "one advisory to report");
+    };
+
+    let findings = run_on_seeded(Box::new(VulnerableDependency), &root, &config, &Previous::default(), seed);
+
+    let f = only(&findings);
+    assert_eq!(
+        f.fix,
+        format!(
+            "Fixed version not read from this advisory (its ranges are not in a form this engine orders); \
+             review {VULN_ID} for the version to move to"
+        ),
+        "the ECOSYSTEM fixed event is not taken and not claimed to be absent"
+    );
+    assert_eq!(f.severity, Severity::High);
+    assert_eq!(f.confidence, Confidence::High, "the batch endpoint matched this version server side");
 }

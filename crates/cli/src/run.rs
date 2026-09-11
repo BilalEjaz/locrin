@@ -52,10 +52,16 @@ struct Run {
     previous: Previous,
 }
 
-/// The two things that decide whether a cached row may be served: the hash of
-/// the config the rules run under, and which file rules are on. A row written
-/// under a different config, or under a rule set that did not include one of the
-/// rules this run wants, is not this run's answer.
+/// The two things that decide whether a cached row may be served: the hash the
+/// rules ran under, and which file rules are on.
+///
+/// `config_hash` is the whole of the first: the crate version, the rule set's
+/// fingerprint ([`locrin_rules::rules_fingerprint`], which carries every rule's
+/// id, languages, per-language defaults, severity, confidence, whether it ships
+/// on, and `RULES_REVISION` for a change in a rule's body) and the config. So a
+/// row written under a different config, under a different build of the rules,
+/// or under a rule set that did not include one of the rules this run wants, is
+/// not this run's answer.
 struct CacheKey<'a> {
     config_hash: &'a str,
     enabled: &'a [&'static str],
@@ -171,23 +177,25 @@ struct Explicit {
 ///
 /// The full listing is walked at most once and only when a directory is named,
 /// which is the only case where it can say anything a named path does not. The
-/// lockfile is added on top of it because a repository may have chosen to
-/// gitignore its lockfile, and a file the walk skips is still a file the rule
-/// reads.
+/// lockfiles are added on top of it because a repository may have chosen to
+/// gitignore one, and a file the walk skips is still a file the rule reads.
 fn explicit_files(
     root: &Path,
     paths: &[PathBuf],
     walked: &[PathBuf],
-    lockfile_rel: Option<&str>,
+    lockfile_rels: &[&str],
     walk_opts: &WalkOptions,
 ) -> anyhow::Result<Option<Explicit>> {
     if paths.is_empty() {
         return Ok(None);
     }
-    let lockfile = lockfile_rel.map(|rel| root.join(rel));
+    let lockfiles: Vec<PathBuf> = lockfile_rels.iter().map(|rel| root.join(rel)).collect();
     let mut files = Vec::new();
     let mut raw = Vec::new();
     let mut everything: Option<Vec<PathBuf>> = None;
+    // One entry per language the run had to skip: the language, the first file
+    // it skipped in it, and how many there were.
+    let mut skipped: Vec<(Language, String, usize)> = Vec::new();
     for p in paths {
         let abs = if p.is_absolute() { p.clone() } else { root.join(p) };
         // Canonicalise before anything else: `src/../src/dirty.ts` and
@@ -207,21 +215,52 @@ fn explicit_files(
             }
             let all = everything.as_ref().expect("just filled");
             raw.extend(all.iter().filter(|f| f.starts_with(&canon)).cloned());
-            if let Some(lock) = lockfile.as_ref().filter(|lock| lock.starts_with(&canon)) {
-                raw.push(lock.clone());
-            }
+            raw.extend(lockfiles.iter().filter(|lock| lock.starts_with(&canon)).cloned());
         } else {
             raw.push(canon.clone());
-            if Language::from_path(&canon).is_some() {
-                files.push(canon);
+            match Language::from_path(&canon) {
+                Some(lang) if lang.enabled(&walk_opts.languages) => files.push(canon),
+                // A file the engine could read, named outright, in a language the
+                // repository has not asked for. Checking nothing in silence would
+                // read as a clean file, so the skip is said with the line that
+                // turns it on. Counted here and said after the loop: the
+                // pre-commit hook names every staged file, and a repository with
+                // fifty Python files staged would otherwise bury the commit's own
+                // output under fifty copies of the same sentence.
+                Some(lang) => {
+                    let rel = rel_path(root, &canon);
+                    match skipped.iter_mut().find(|(l, _, _)| *l == lang) {
+                        Some((_, _, n)) => *n += 1,
+                        None => skipped.push((lang, rel, 1)),
+                    }
+                }
+                None => {}
             }
         }
+    }
+    for (lang, first, count) in &skipped {
+        eprintln!("{}", skip_note(lang, first, *count));
     }
     for v in [&mut files, &mut raw] {
         v.sort();
         v.dedup();
     }
     Ok(Some(Explicit { files, raw }))
+}
+
+/// The one line a run says about the files it skipped for a language: the first
+/// one by name, so a person checking a single file still reads that file's name,
+/// and a count when there were more, so a staged commit full of them says how
+/// many without saying it fifty times.
+fn skip_note(lang: &Language, first: &str, count: usize) -> String {
+    let more = count.saturating_sub(1);
+    let what = if more == 0 {
+        format!("{first} skipped; enable it")
+    } else {
+        let files = if more == 1 { "file" } else { "files" };
+        format!("{first} and {more} more {} {files} skipped; enable them", lang.as_str())
+    };
+    format!("note: {what} with [languages] {} = true in {}", lang.as_str(), locrin_core::config::CONFIG_FILE)
 }
 
 /// Reads a candidate and hashes the bytes it read, or None when those bytes are
@@ -601,13 +640,14 @@ fn write_cache(ix: &mut Index, indexed: &Indexed, fresh: &[Finding], key: &Cache
 /// `lock_in_scope` and `rls_in_scope`.
 fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
-    let walk_opts = WalkOptions { excludes: config.excludes.clone() };
+    let walk_opts = WalkOptions { excludes: config.excludes.clone(), languages: config.languages };
     let walked = source_files(root, &walk_opts)?;
-    // Which file the advisory rule would answer for, found without reading it.
-    // Located once and handed to everything that asks: the question costs a
-    // `stat` per candidate lockfile and has one answer for the whole pass.
-    let lockfile_rel = locrin_core::lockfile::locate(root);
-    let explicit = explicit_files(root, &opts.paths, &walked, lockfile_rel, &walk_opts)?;
+    // Which files the advisory rule would answer for, found without reading
+    // them. Located once and handed to everything that asks: the question costs
+    // a `stat` per candidate lockfile and has one answer for the whole pass. A
+    // polyglot repository has several, one per ecosystem it installs from.
+    let lockfile_rels = locrin_core::lockfile::locate(root);
+    let explicit = explicit_files(root, &opts.paths, &walked, &lockfile_rels, &walk_opts)?;
     let mut candidates = walked;
     if let Some(e) = &explicit {
         candidates.extend(e.files.iter().cloned());
@@ -652,7 +692,7 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let lock_in_scope = if opts.changed_only {
         false
     } else {
-        raw_scope.as_ref().is_none_or(|raw| lockfile_rel.is_some_and(|rel| raw.contains(rel)))
+        raw_scope.as_ref().is_none_or(|raw| lockfile_rels.iter().any(|rel| raw.contains(*rel)))
     };
     let rls_in_scope = if opts.changed_only {
         false
@@ -664,7 +704,11 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
 
     let rules = file_rules();
     let enabled: Vec<&'static str> = rules.iter().filter(|r| rule_runs(r.as_ref(), &config)).map(|r| r.id()).collect();
-    let config_hash = cache::config_hash(&config);
+    // The rule set is the other half of the key, and it is threaded from here
+    // because the CLI is the one crate that has both: `locrin-core` owns the
+    // cache and `locrin-rules` depends on `locrin-core`, so the hash cannot ask
+    // the rules for their fingerprint itself.
+    let config_hash = cache::config_hash(&config, &locrin_rules::rules_fingerprint());
     let key = CacheKey { config_hash: &config_hash, enabled: &enabled };
 
     // A whole-repository check has to answer for every file, so each candidate is
@@ -710,6 +754,10 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         root,
         offline: opts.offline,
         previous: &previous,
+        // The widest set: `run_rules` narrows it to each rule's own languages,
+        // so the per-rule filter is decided in the one place that decides
+        // enablement and severity too.
+        rule_languages: locrin_core::lang::ALL,
     };
     let fresh = run_file_rules(&rules, &indexed.files, &base)?;
     let graph = {
@@ -948,6 +996,27 @@ mod tests {
     // their own: a lock per module would not stop this module racing another.
     use crate::ENV_LOCK;
 
+    /// A run says the skip once for a language, however many files it skipped
+    /// in it: the pre-commit hook names every staged file, so one line each
+    /// would bury the commit's own output under copies of one sentence. The
+    /// first file is still named, because a person checking one file wants to
+    /// read that file's name.
+    #[test]
+    fn the_skip_note_is_one_line_per_language() {
+        assert_eq!(
+            skip_note(&Language::Php, "src/b.php", 1),
+            "note: src/b.php skipped; enable it with [languages] php = true in locrin.toml"
+        );
+        assert_eq!(
+            skip_note(&Language::Php, "src/b.php", 2),
+            "note: src/b.php and 1 more php file skipped; enable them with [languages] php = true in locrin.toml"
+        );
+        assert_eq!(
+            skip_note(&Language::Python, "bot/a.py", 4),
+            "note: bot/a.py and 3 more python files skipped; enable them with [languages] python = true in locrin.toml"
+        );
+    }
+
     /// The rules that answer with a change rather than a state need to know what
     /// the file used to say, and for a `--changed` run the index is where that
     /// comes from: it holds the last recorded version until this run replaces it.
@@ -1086,6 +1155,44 @@ mod tests {
 
         assert_eq!(changed_after_accept(true), 0, "the agent's accept had already indexed the edit");
         assert_eq!(changed_after_accept(false), 1, "the command line's accept must leave the edit for the check");
+    }
+
+    /// The cache key has to carry the rule set, not only the crate version and
+    /// the config. Turning a rule off for a language, moving a severity, or
+    /// correcting a rule's body touches no source byte and no config line, so a
+    /// key blind to the rules would answer an unedited repository from the rows
+    /// the old rules wrote until somebody released or deleted the cache
+    /// directory. A locrin that is wrong about its own fix is the one bug this
+    /// engine cannot afford.
+    ///
+    /// The fingerprint is simulated rather than bumped: `RULES_REVISION` is a
+    /// constant of the binary, so the seam a test can move is the value that
+    /// reaches `config_hash`, which is exactly what a new build would hand it.
+    #[test]
+    fn a_change_to_the_rule_set_misses_the_findings_cache() {
+        let config = Config::default();
+        let fingerprint = locrin_rules::rules_fingerprint();
+        let before = cache::config_hash(&config, &fingerprint);
+        let rule = "leftover-agent-marker";
+        let enabled = [rule];
+
+        let mut ix = Index::open_in_memory().unwrap();
+        cache::put(&mut ix, "src/a.ts", "h1", &before, rule, &[]).unwrap();
+        let cached = cache::load_all(&ix).unwrap();
+
+        let same = CacheKey { config_hash: &before, enabled: &enabled };
+        assert!(
+            serve(&cached, "src/a.ts", "h1", &same).is_some(),
+            "the row this rule set wrote is this rule set's answer"
+        );
+
+        let after = cache::config_hash(&config, &format!("{fingerprint}-after-a-rule-changed"));
+        assert_ne!(before, after, "the fingerprint has to reach the key or nothing below measures anything");
+        let moved = CacheKey { config_hash: &after, enabled: &enabled };
+        assert!(
+            serve(&cached, "src/a.ts", "h1", &moved).is_none(),
+            "a run under a changed rule set may not be answered from the old rows"
+        );
     }
 
     /// `status` answers from the index, so the verdict a check produced has to

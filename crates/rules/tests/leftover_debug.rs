@@ -1,7 +1,7 @@
 mod common;
 
-use common::{fixture, hits, parse_dir, run_on};
-use locrin_core::config::Config;
+use common::{fixture, hits, parse_dir, run_on, run_on_langs};
+use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_debug::LeftoverDebug;
 use locrin_rules::line_text;
@@ -121,4 +121,86 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
     let out = rule.run(&ctx).unwrap();
     assert_eq!(out.len(), 1, "with no allow list the script's debug line is a finding: {out:?}");
     assert_eq!(out[0].file, "scripts/build.ts");
+}
+
+/// PHP's debug sinks are ordinary function calls, so the rule matches them by
+/// the called name rather than by a `console` member expression. Every sink the
+/// rule knows sits on its own line in the fixture, and line 11 is the spelling a
+/// file inside a namespace uses to reach the global function: `\var_dump($x)`.
+/// Lines 12 and 13 are `print_r` and `var_export` whose second argument is not
+/// the literal `true`, so they still print and are still sinks.
+#[test]
+fn flags_php_debug_sinks() {
+    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "php/flag"), &config);
+    assert_eq!(
+        hits(&out),
+        vec![
+            ("a.php".to_string(), 4),
+            ("a.php".to_string(), 5),
+            ("a.php".to_string(), 6),
+            ("a.php".to_string(), 7),
+            ("a.php".to_string(), 8),
+            ("a.php".to_string(), 9),
+            ("a.php".to_string(), 10),
+            ("a.php".to_string(), 11),
+            ("a.php".to_string(), 12),
+            ("a.php".to_string(), 13),
+        ],
+        "{out:?}"
+    );
+    assert!(out.iter().all(|f| f.severity == Severity::High && f.confidence == Confidence::High));
+    assert_eq!(out[0].evidence, "var_dump($rows);");
+}
+
+/// `error_log`, `echo` and `printf` are how PHP writes output on purpose, and a
+/// `->debug()` call is a logger, not a leftover. `Acme\dump()` is a function in
+/// somebody's namespace that happens to share a name with the sink: one leading
+/// backslash and no other is what makes a qualified name the global function.
+/// `print_r($x, true)`, `var_export($x, true)` and the named
+/// `print_r($x, return: true)` return a string instead of printing and are the
+/// legitimate way to render a value into a message.
+#[test]
+fn ignores_php_logging_and_output() {
+    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "php/clean"), &config);
+    assert!(out.is_empty(), "got {out:?}");
+}
+
+/// Python's sinks are the debugger entry points and the imports that reach
+/// them: an `import pdb` left at the top of a module is the same leftover as
+/// the `set_trace()` it was added for. Line 4 is the aliased spelling,
+/// `import pdb as p`, which names the same module.
+#[test]
+fn flags_python_breakpoints_and_debugger_imports() {
+    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "py/flag"), &config);
+    assert_eq!(
+        hits(&out),
+        vec![
+            ("a.py".to_string(), 1),
+            ("a.py".to_string(), 2),
+            ("a.py".to_string(), 3),
+            ("a.py".to_string(), 4),
+            ("a.py".to_string(), 8),
+            ("a.py".to_string(), 9),
+            ("a.py".to_string(), 10),
+            ("a.py".to_string(), 11),
+        ],
+        "{out:?}"
+    );
+    assert!(out.iter().all(|f| f.severity == Severity::High && f.confidence == Confidence::High));
+    assert_eq!(out[0].evidence, "import pdb");
+}
+
+/// `print(` is not a sink: it is how a Python script speaks, and flagging it
+/// would fail the precision gate on the first repository with a management
+/// command in it. `logging.debug` is a logger, and `from myapp.pdb import
+/// models` imports somebody's own module whose last segment reads like the
+/// debugger's name.
+#[test]
+fn print_and_logging_are_not_python_sinks() {
+    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "py/clean"), &config);
+    assert!(out.is_empty(), "got {out:?}");
 }

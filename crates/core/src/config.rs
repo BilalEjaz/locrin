@@ -65,6 +65,22 @@ impl Default for Framework {
     }
 }
 
+/// The languages beyond the JavaScript family this repository has asked the
+/// engine to read (`[languages]`).
+///
+/// Both are false by default. A repository that has not opted in is not slowed
+/// down by files it does not think of as code, and is not handed findings from
+/// rules it has never seen; opting in is one line per language.
+///
+/// Unknown keys are rejected like everywhere else: `pyhton = true` would load as
+/// a config that reads no Python while its author believes it does.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Languages {
+    pub php: bool,
+    pub python: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -73,6 +89,7 @@ pub struct Config {
     pub entry_points: Vec<String>,
     pub boundaries: Vec<Boundary>,
     pub framework: Framework,
+    pub languages: Languages,
     pub rules: BTreeMap<String, RuleOverride>,
 }
 
@@ -84,6 +101,7 @@ impl Default for Config {
             entry_points: vec![],
             boundaries: vec![],
             framework: Framework::default(),
+            languages: Languages::default(),
             rules: BTreeMap::new(),
         }
     }
@@ -355,6 +373,39 @@ mod tests {
         let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
         assert!(err.contains(CONFIG_FILE), "{err}");
         assert!(err.contains("auth_middlewares"), "{err}");
+    }
+
+    /// PHP and Python are read only when the repository asks for them, so a
+    /// TypeScript repository cannot be slowed down or surprised by a language it
+    /// never opted into. Silence means both off.
+    #[test]
+    fn languages_are_off_until_the_config_asks_for_them() {
+        let dir = fresh("config16");
+        let c = Config::load(path(&dir)).unwrap();
+        assert!(!c.languages.php);
+        assert!(!c.languages.python);
+
+        let dir = fresh("config17");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[languages]\nphp = true\n").unwrap();
+        let c = Config::load(path(&dir)).unwrap();
+        assert!(c.languages.php);
+        assert!(!c.languages.python, "one language asked for is not both");
+
+        let dir = fresh("config18");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[languages]\nphp = true\npython = true\n").unwrap();
+        let c = Config::load(path(&dir)).unwrap();
+        assert_eq!(c.languages, Languages { php: true, python: true });
+    }
+
+    /// `pyhton = true` would otherwise load as a config that reads no Python
+    /// while its author believes it does.
+    #[test]
+    fn an_unknown_language_key_is_an_error() {
+        let dir = fresh("config19");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[languages]\npyhton = true\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains(CONFIG_FILE), "{err}");
+        assert!(err.contains("pyhton"), "{err}");
     }
 
     /// `server_paths` is a glob list like every other, so a typo in it fails at

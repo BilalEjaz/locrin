@@ -7,42 +7,162 @@
 //! at least two lines look like code at all. Trailing comments are never part
 //! of a run, because a column of unit annotations beside real code is not a
 //! commented-out block.
+//!
+//! The run detection is the same in every language; only the vocabulary the run
+//! is tested against changes, because what a statement looks like is what the
+//! language says it looks like. A Python statement ends in a colon or in
+//! nothing at all, so a semicolon is no use there and `return `, `import ` and
+//! the block headers do the work instead. A PHP statement ends in a semicolon
+//! like a JavaScript one, and opens with a sigil, a visibility keyword or
+//! `foreach (`.
+//!
+//! Python's keywords are also ordinary English words, which JavaScript's
+//! punctuation-carrying `if (` and `for (` are not, so a block header counts
+//! only with the colon that closes it and `from ` only with the ` import ` that
+//! follows it. Without that, three sentences of prose opening "for now..." and
+//! "if the input..." read as a commented-out loop. The colon cuts the other
+//! way too: a trailing colon alone is a prose header (`# Note:`, `# Returns:`)
+//! as often as it is a block, so it is strong only behind a suite keyword.
 
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, Rule, RuleContext, Scope};
+use crate::{clean_files, finding, Language, Rule, RuleContext, Scope, ALL};
 
 pub struct LeftoverCommented;
 
-const CODE_ENDINGS: &[char] = &[';', '{', '}', ')', ','];
-const STRONG_ENDINGS: &[char] = &[';', '{', '}'];
-const CODE_STARTS: &[&str] = &["const ", "let ", "var ", "return ", "if (", "for (", "import ", "export "];
-
-/// A line carrying at least a supporting signal of being code.
-fn looks_like_code(line: &str) -> bool {
-    let t = line.trim();
-    if t.is_empty() {
-        return false;
-    }
-    t.ends_with(CODE_ENDINGS) || CODE_STARTS.iter().any(|s| t.starts_with(s))
+/// What a statement looks like in one language: the endings only code produces,
+/// the endings prose produces too and that therefore only support a verdict,
+/// and the openings that can only begin a statement.
+struct Vocabulary {
+    /// An ending prose rarely produces. On its own it qualifies a run.
+    strong_endings: &'static [char],
+    /// The strong endings plus the supporting ones: a comma or a closing
+    /// parenthesis, which ordinary prose ends lines with all the time.
+    endings: &'static [char],
+    /// Openings that can only begin a statement. Each is strong on its own.
+    starts: &'static [&'static str],
+    /// Openings that begin a statement only when the rest of the line agrees.
+    /// Python's keywords are ordinary English words, so the prefix alone says
+    /// nothing: see [`Needs`].
+    qualified_starts: &'static [(&'static str, Needs)],
 }
 
-/// A signal prose rarely produces: a statement terminator, a brace, or a
-/// keyword that can only open a statement.
-fn is_strong_code(line: &str) -> bool {
+/// What the rest of a line has to carry before a qualified opening counts as a
+/// statement.
+#[derive(Clone, Copy)]
+enum Needs {
+    /// The colon that opens the block. `for row in rows:` is code and `for now
+    /// this is fine.` is a sentence, and the colon is the whole difference; the
+    /// same holds for every Python keyword that opens a suite.
+    BlockColon,
+    /// An ` import ` later in the line. `from ` opens an import and opens about
+    /// as many sentences of prose.
+    Import,
+}
+
+impl Needs {
+    fn met(self, trimmed: &str) -> bool {
+        match self {
+            Needs::BlockColon => trimmed.ends_with(':'),
+            Needs::Import => trimmed.contains(" import "),
+        }
+    }
+}
+
+const JS: Vocabulary = Vocabulary {
+    strong_endings: &[';', '{', '}'],
+    endings: &[';', '{', '}', ')', ','],
+    starts: &["const ", "let ", "var ", "return ", "if (", "for (", "import ", "export "],
+    // A JavaScript keyword carries its own punctuation: `if (` and `for (` are
+    // already the shapes prose does not write.
+    qualified_starts: &[],
+};
+
+const PHP: Vocabulary = Vocabulary {
+    strong_endings: &[';', '{', '}'],
+    endings: &[';', '{', '}', ')', ','],
+    // `$` on its own: every PHP variable carries the sigil, so a commented-out
+    // assignment opens with it where a sentence of prose does not.
+    starts: &["$", "function ", "return ", "if (", "foreach (", "echo ", "use ", "namespace ", "public ", "private "],
+    qualified_starts: &[],
+};
+
+const PY: Vocabulary = Vocabulary {
+    // No ending is strong on its own. Python has no statement terminator, and
+    // the colon that opens every block is also what a prose header ends on:
+    // `# Note:`, `# Args:`, `# Options Used:`. A colon is therefore strong only
+    // behind a suite keyword, which is what the `BlockColon` starts below say,
+    // and on its own it is a supporting signal like a comma.
+    strong_endings: &[],
+    endings: &[':', ')', ','],
+    // The bare ones are the openings that are not English: `return ` and
+    // `import ` head a sentence far more rarely than `if` or `for` do, `self.`
+    // is a name, and `print(` carries its own parenthesis.
+    starts: &["return ", "import ", "self.", "print("],
+    // Everything that opens a Python suite is a word a comment is written with,
+    // so each is read only with the colon that closes its header. `#  for now
+    // this handles the simple case.` is prose, and nothing about its first two
+    // characters says otherwise.
+    qualified_starts: &[
+        ("if ", Needs::BlockColon),
+        ("elif ", Needs::BlockColon),
+        ("else", Needs::BlockColon),
+        ("for ", Needs::BlockColon),
+        ("while ", Needs::BlockColon),
+        ("with ", Needs::BlockColon),
+        ("try", Needs::BlockColon),
+        ("except", Needs::BlockColon),
+        ("class ", Needs::BlockColon),
+        ("def ", Needs::BlockColon),
+        ("from ", Needs::Import),
+    ],
+};
+
+fn vocabulary(language: Language) -> &'static Vocabulary {
+    match language {
+        Language::TypeScript | Language::Tsx | Language::JavaScript => &JS,
+        Language::Php => &PHP,
+        Language::Python => &PY,
+    }
+}
+
+/// Whether a trimmed line opens with something that can only open a statement.
+/// One test for both predicates: an opening that is too weak to qualify a run
+/// is too weak to support one either, or a page of prose about a `for` loop
+/// would be two supporting signals away from a finding.
+fn starts_a_statement(trimmed: &str, v: &Vocabulary) -> bool {
+    v.starts.iter().any(|s| trimmed.starts_with(s))
+        || v.qualified_starts.iter().any(|(prefix, needs)| trimmed.starts_with(prefix) && needs.met(trimmed))
+}
+
+/// A line carrying at least a supporting signal of being code.
+fn looks_like_code(line: &str, language: Language) -> bool {
+    let v = vocabulary(language);
     let t = line.trim();
     if t.is_empty() {
         return false;
     }
-    t.ends_with(STRONG_ENDINGS) || CODE_STARTS.iter().any(|s| t.starts_with(s))
+    t.ends_with(v.endings) || starts_a_statement(t, v)
+}
+
+/// A signal prose rarely produces: a statement terminator, a brace, a colon
+/// opening a block, or a keyword that can only open a statement.
+fn is_strong_code(line: &str, language: Language) -> bool {
+    let v = vocabulary(language);
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    t.ends_with(v.strong_endings) || starts_a_statement(t, v)
 }
 
 /// The qualifying test for a run: one strong signal at minimum, and two lines
 /// that look like code in total.
-fn is_commented_code(lines: &[&str]) -> bool {
-    lines.iter().any(|l| is_strong_code(l)) && lines.iter().filter(|l| looks_like_code(l)).count() >= 2
+fn is_commented_code(lines: &[&str], language: Language) -> bool {
+    lines.iter().any(|l| is_strong_code(l, language))
+        && lines.iter().filter(|l| looks_like_code(l, language)).count() >= 2
 }
 
 fn is_license_or_doc(lines: &[&str]) -> bool {
@@ -50,8 +170,26 @@ fn is_license_or_doc(lines: &[&str]) -> bool {
         || lines.iter().all(|l| l.trim().starts_with('*'))
 }
 
-fn strip_line_comment(text: &str) -> &str {
-    text.trim().trim_start_matches("//").trim()
+/// The markers that open a line comment in a language. PHP writes one three
+/// ways and strips `#` exactly as it strips `//`; Python writes it one way.
+fn line_markers(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::TypeScript | Language::Tsx | Language::JavaScript => &["//"],
+        Language::Php => &["//", "#"],
+        Language::Python => &["#"],
+    }
+}
+
+fn is_line_comment(text: &str, language: Language) -> bool {
+    line_markers(language).iter().any(|m| text.starts_with(m))
+}
+
+fn strip_line_comment(text: &str, language: Language) -> &str {
+    let mut t = text.trim();
+    for marker in line_markers(language) {
+        t = t.trim_start_matches(marker);
+    }
+    t.trim()
 }
 
 /// True when nothing but whitespace precedes the comment on its own source
@@ -80,6 +218,7 @@ fn comments<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
 /// that line. The text is the evidence, so two blocks in one function do not
 /// read identically in a report.
 fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
+    let language = file.language;
     let src = file.source.as_bytes();
     let mut nodes = Vec::new();
     comments(file.tree.root_node(), &mut nodes);
@@ -90,7 +229,7 @@ fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
     let flush = |run: &mut Vec<(u32, String)>, hits: &mut Vec<(u32, String)>| {
         if run.len() >= 3 {
             let bodies: Vec<&str> = run.iter().map(|(_, s)| s.as_str()).collect();
-            if is_commented_code(&bodies) && !is_license_or_doc(&bodies) {
+            if is_commented_code(&bodies, language) && !is_license_or_doc(&bodies) {
                 hits.push((run[0].0, run[0].1.clone()));
             }
         }
@@ -101,17 +240,21 @@ fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
     for n in nodes {
         let text = n.utf8_text(src).unwrap_or("");
         let line = n.start_position().row as u32 + 1;
-        if text.starts_with("//") && is_own_line(file, n) {
+        if is_line_comment(text, language) && is_own_line(file, n) {
             if last_line.is_some_and(|l| l + 1 != line) {
                 flush(&mut run, &mut hits);
             }
-            run.push((line, strip_line_comment(text).to_string()));
+            run.push((line, strip_line_comment(text, language).to_string()));
             last_line = Some(line);
             continue;
         }
         flush(&mut run, &mut hits);
         last_line = None;
-        if text.starts_with("//") || text.starts_with("/**") {
+        // A trailing line comment, or a docblock. Python reaches neither block
+        // branch below: its only comment is the `#` line, and a docstring is a
+        // string inside an expression statement rather than a comment node, so
+        // it is never scanned at all.
+        if is_line_comment(text, language) || text.starts_with("/**") {
             continue;
         }
         // The licence and doc test runs on the raw lines, before the leading
@@ -128,7 +271,7 @@ fn runs(file: &ParsedFile) -> Vec<(u32, String)> {
             continue;
         }
         let inner: Vec<&str> = raw.iter().map(|l| l.trim_start_matches('*').trim()).collect();
-        if is_commented_code(&inner) {
+        if is_commented_code(&inner, language) {
             hits.push((line, inner[0].to_string()));
         }
     }
@@ -154,6 +297,30 @@ impl Rule for LeftoverCommented {
     }
     fn confidence(&self) -> Confidence {
         Confidence::Medium
+    }
+    /// Every language: a run of commented-out statements is a comment shape,
+    /// not a grammar shape. What changes per language is the vocabulary the run
+    /// is tested against, which [`looks_like_code`] and [`is_strong_code`] take
+    /// from the file's own language.
+    fn languages(&self) -> &'static [Language] {
+        ALL
+    }
+    /// Off for Python: the precision gate's second round
+    /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, round
+    /// two, Poetry 2.4.3) scored 0 true of 14. Every finding was a prose
+    /// comment whose header line ends in a colon (`# Options Used:`,
+    /// `# For instance:`), which was the one ending the Python vocabulary
+    /// treated as strong. Round three made a colon strong only behind a suite
+    /// keyword, and the re-run (round three of the same document) left 1 of
+    /// the 14 on Poetry and 0 on FastSpot: `# with the following overrides:`
+    /// opens with `with ` and ends in a colon, so it reads as a `with` block
+    /// header, and it is prose. One false positive of one finding is still
+    /// a fail, so the pair stays off; the vocabulary and its fixture tests
+    /// still run it directly, and it comes back on once a `with` header
+    /// needs the shape of one (a `(`, an ` as `, or a dotted name) and the
+    /// pair is re-measured.
+    fn enabled_for(&self, lang: Language) -> bool {
+        lang != Language::Python
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

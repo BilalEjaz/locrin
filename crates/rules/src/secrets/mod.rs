@@ -74,7 +74,7 @@ use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
 use regex::Regex;
 
-use crate::{clean_files, finding_at, line_span, Rule, RuleContext, Scope};
+use crate::{clean_files, finding_at, line_span, Language, Rule, RuleContext, Scope, ALL};
 
 pub struct SecretExposed;
 
@@ -390,6 +390,13 @@ impl Rule for SecretExposed {
     /// so in the baseline.
     fn locked(&self) -> bool {
         true
+    }
+    /// Every language: a key is a string literal, and a key committed in a PHP
+    /// config or a Python settings module is the same leak as one committed in
+    /// a TypeScript module. The scan reads the line's text, not a node kind the
+    /// TypeScript grammar owns.
+    fn languages(&self) -> &'static [Language] {
+        ALL
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

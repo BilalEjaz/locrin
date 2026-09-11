@@ -1,29 +1,36 @@
-//! Flags an installed npm package that a published advisory says is vulnerable.
+//! Flags an installed package that a published advisory says is vulnerable, in
+//! any of the registries the engine reads a lockfile for: npm, Packagist, PyPI.
 //!
 //! The rule is a thin reading of two core modules. `lockfile::read` says what an
-//! install of this repository puts on disk and which line of the lockfile
-//! declares each package; `osv::check` says which of those versions osv.dev has
-//! an advisory for, from the network when the run allows it and from the index's
-//! snapshot otherwise. Nothing here parses a package or resolves a version
-//! range: the answer belongs to the advisory database, and this file's whole job
-//! is to turn it into findings a reader can act on.
+//! install of this repository puts on disk, which registry each package came
+//! from, and which line of which lockfile declares it; `osv::check` says which
+//! of those versions osv.dev has an advisory for, from the network when the run
+//! allows it and from the index's snapshot otherwise. Nothing here parses a
+//! package or resolves a version range: the answer belongs to the advisory
+//! database, and this file's whole job is to turn it into findings a reader can
+//! act on.
+//!
+//! A repository can install from more than one registry, and each lockfile is
+//! its own question: its own package list, its own ecosystem, its own snapshot,
+//! and findings against its own path. So the rule loops, and an answer about one
+//! lockfile is never reused for another.
 //!
 //! Graph scope, so it runs on every whole-repository pass. A file rule would
-//! never fire, because the lockfile is not a source file the engine parses, and
+//! never fire, because a lockfile is not a source file the engine parses, and
 //! the answer can change without any file changing at all: an advisory published
 //! this morning affects a repository nobody has touched.
 //!
 //! Which is also the scoping contract, and the CLI enforces it before the rule
 //! is asked to run (see `lock_in_scope` in `crates/cli/src/run.rs`). A run
-//! narrowed to a scope answers for the lockfile only when the scope names the
-//! lockfile itself: a diff whose git file list includes it, or a path argument
-//! naming it. Any other scope skips the rule outright, reading neither the
-//! lockfile nor the snapshot and making no request, because nothing else can put
-//! the lockfile in scope: it is in no walk, no index and no import
-//! neighbourhood, so every finding would have been discarded after being paid
-//! for. `--changed` is therefore never a run that reports advisories, whatever
-//! was done to the lockfile: that scope is the index's watermark and the index
-//! holds source files only.
+//! narrowed to a scope answers for the lockfiles only when the scope names one
+//! of them: a diff whose git file list includes it, or a path argument naming
+//! it. Any other scope skips the rule outright, reading no lockfile and no
+//! snapshot and making no request, because nothing else can put a lockfile in
+//! scope: it is in no walk, no index and no import neighbourhood, so every
+//! finding would have been discarded after being paid for. `--changed` is
+//! therefore never a run that reports advisories, whatever was done to a
+//! lockfile: that scope is the index's watermark and the index holds source
+//! files only.
 //!
 //! Severity comes from the advisory rather than from the rule, which is why
 //! [`crate::run_rules`] overwrites a finding's severity only when the config
@@ -32,13 +39,16 @@
 //!
 //! Confidence says how much of the advisory the run actually has. A High-rated
 //! advisory that names the version to upgrade to is a complete instruction and
-//! reads High; anything else, including a rating this engine had to guess at
-//! because the detail document was unavailable, reads Medium.
+//! reads High, and so does one whose ranges the engine does not order: the
+//! batch endpoint matched the installed version server side, so the finding is
+//! not in doubt and only the upgrade sentence is thinner. Anything else,
+//! including a rating this engine had to guess at because the detail document
+//! was unavailable, reads Medium.
 
 use locrin_core::finding::{Category, Confidence, Finding, Severity, Span};
 use locrin_core::{lockfile, osv};
 
-use crate::{finding_at, Rule, RuleContext, Scope};
+use crate::{finding_at, Language, Rule, RuleContext, Scope, ALL};
 
 /// How much of an advisory summary the evidence carries. Summaries are usually
 /// one line; a few are a paragraph, and a finding is a pointer to the advisory,
@@ -101,36 +111,58 @@ impl Rule for VulnerableDependency {
     fn confidence(&self) -> Confidence {
         Confidence::Medium
     }
+    /// Every language: this rule reads a lockfile off disk rather than a parsed
+    /// file, so the languages of the run say nothing about whether it applies.
+    fn languages(&self) -> &'static [Language] {
+        ALL
+    }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
-        let Some(lock) = lockfile::read(ctx.root)? else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for lock in lockfile::read(ctx.root)? {
+            out.extend(self.check_one(ctx, &lock)?);
+        }
+        Ok(out)
+    }
+}
+
+impl VulnerableDependency {
+    /// The findings for one lockfile. A repository can hold several, and each is
+    /// its own package list, its own ecosystem and its own snapshot: an npm
+    /// answer says nothing about a `requirements.txt` beside it.
+    fn check_one(&self, ctx: &RuleContext, lock: &lockfile::Lockfile) -> anyhow::Result<Vec<Finding>> {
         let fetch: &dyn Fn(&str, Option<&str>) -> anyhow::Result<String> =
             if ctx.offline { &no_network } else { &osv::http_fetch };
-        let outcome = osv::check(ctx.index()?, &lock, ctx.offline, fetch)?;
-        // The rule runs once per run, so each warning is printed once. They go to
-        // stderr and not into the findings: a stale snapshot or an unreachable
-        // registry is something the reader should know about the run, not
-        // something the repository has to fix (spec 9).
+        let outcome = osv::check(ctx.index()?, lock, ctx.offline, fetch)?;
+        // The rule runs once per run and once per lockfile, so each warning is
+        // printed once for the file it is about. They go to stderr and not into
+        // the findings: a stale snapshot or an unreachable registry is something
+        // the reader should know about the run, not something the repository has
+        // to fix (spec 9).
         for warning in &outcome.warnings {
-            eprintln!("warning: {warning}");
+            eprintln!("warning: {}: {warning}", lock.rel);
         }
 
         let mut out = Vec::new();
         for hit in outcome.hits {
             let (package, advisory) = (hit.package, hit.advisory);
             let severity = severity_of(&advisory.severity);
-            let confidence = if advisory.fixed.is_some() && severity == Severity::High {
-                Confidence::High
-            } else {
-                Confidence::Medium
-            };
+            // An advisory whose ranges this engine does not order is not a
+            // weaker match: the batch endpoint matched this exact version
+            // server side, and all that is missing is the sentence naming the
+            // upgrade. Only a rating this engine had to guess at, or a
+            // document that does not cover the version at all, lowers it.
+            let complete = matches!(advisory.fix, osv::Fix::Named(_) | osv::Fix::UnreadableRanges);
+            let confidence = if complete && severity == Severity::High { Confidence::High } else { Confidence::Medium };
             // Columns are zero: the finding is about the whole entry, and a
             // lockfile entry's name and version sit on different lines in two of
             // the three formats.
             let span = Span { start_line: package.line, start_col: 0, end_line: package.line, end_col: 0 };
             // The advisory id joins the package name in the anchor so that a
-            // package with two advisories is two findings, and so that a finding
-            // keeps its id when the lockfile is regenerated and the entry moves.
+            // package with two advisories is two findings (two ids that alias
+            // each other are one advisory, and `osv::check` reports the family
+            // once under its GHSA id), and so that a finding keeps its id when
+            // the lockfile is regenerated and the entry moves.
             // The version is there for the same reason: an install tree holding
             // three copies of one package at three versions is three findings
             // with three upgrades to make, and without the version they shared
@@ -144,21 +176,28 @@ impl Rule for VulnerableDependency {
                 advisory.severity,
                 short(&advisory.summary)
             );
-            // Three sentences, because the reader has to act on three different
+            // Four sentences, because the reader has to act on four different
             // situations. There is a version to move to; or the advisory covers
             // this version and has published no fix for the branch it is on; or
             // the advisory's own ranges do not cover this version at all, which
             // is the batch endpoint and the detail document disagreeing and is
-            // not the same claim as "no fix exists".
-            let fix = match &advisory.fixed {
-                Some(fixed) => format!("Upgrade {} to {fixed}", package.name),
-                None if advisory.outside_every_range => {
-                    format!(
-                        "No fixed version applies to this version; review {} and pin or replace the package",
-                        advisory.id
-                    )
+            // not the same claim as "no fix exists"; or the advisory's ranges
+            // are in a form the engine does not order, so it never read a fix
+            // and must not say that none applies.
+            let fix = match &advisory.fix {
+                osv::Fix::Named(fixed) => format!("Upgrade {} to {fixed}", package.name),
+                osv::Fix::UnreadableRanges => format!(
+                    "Fixed version not read from this advisory (its ranges are not in a form this engine orders); \
+                     review {} for the version to move to",
+                    advisory.id
+                ),
+                osv::Fix::OutsideAllSemver => format!(
+                    "No fixed version applies to this version; review {} and pin or replace the package",
+                    advisory.id
+                ),
+                osv::Fix::NonePublished => {
+                    format!("No fixed version published; review {} and pin or replace the package", advisory.id)
                 }
-                None => format!("No fixed version published; review {} and pin or replace the package", advisory.id),
             };
             // An advisory whose detail document was unavailable has no summary,
             // which would otherwise leave the evidence ending in a space.

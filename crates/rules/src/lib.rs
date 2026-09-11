@@ -28,6 +28,9 @@ use locrin_core::parse::ParsedFile;
 use locrin_core::previous::Previous;
 use rayon::prelude::*;
 
+/// Re-exported so a rule declaring [`Rule::languages`] names its set from the
+/// crate it already imports the trait from.
+pub use locrin_core::lang::{Language, ALL, JS_FAMILY};
 pub use locrin_core::ALLOW_MARK;
 
 /// What a rule reads. A `File` rule looks only at the files parsed this run and
@@ -72,6 +75,16 @@ pub struct RuleContext<'a> {
     /// What the previous version of the repository said, for the rules whose
     /// answer is a change rather than a state.
     pub previous: &'a Previous,
+    /// The languages of the rule that is running, which is what
+    /// [`clean_files`] filters the file list down to. Not to be confused with
+    /// `config.languages`, which is what the repository asked the walker to
+    /// read: this is what the one rule holding the context was written for.
+    ///
+    /// [`run_rules`] sets it from [`Rule::languages`] before each rule's `run`,
+    /// so a rule never sees a file in a language it was not taught. A context
+    /// built by hand carries [`ALL`], because a caller that hands a rule a file
+    /// list directly has already chosen the files.
+    pub rule_languages: &'static [Language],
 }
 
 impl<'a> RuleContext<'a> {
@@ -96,10 +109,59 @@ pub trait Rule: Sync {
     fn category(&self) -> Category;
     fn default_severity(&self) -> Severity;
     fn confidence(&self) -> Confidence;
+    /// The languages this rule was written against. The runner hands it only
+    /// the files in those languages, so a rule whose patterns are node kinds of
+    /// the TypeScript grammar cannot report on a PHP or Python file by
+    /// accident, and a rule taught a language says so once here rather than
+    /// checking `file.language` in its own loop.
+    ///
+    /// It is a guarantee about findings and not only about the file list:
+    /// [`run_rules`] drops a finding whose path names a language the rule did
+    /// not declare, so a graph rule reading the index (which holds every
+    /// indexed file) is held to its declaration too.
+    ///
+    /// The default is the JavaScript family, because that is what every rule
+    /// the engine shipped before PHP and Python was written against. A rule
+    /// that reads something every language has (a comment, a string literal, a
+    /// lockfile) declares [`ALL`] instead.
+    fn languages(&self) -> &'static [Language] {
+        JS_FAMILY
+    }
     /// Whether the rule runs when the config says nothing about it. Almost every
     /// rule ships on; one that cannot yet meet the spec 10.2 precision gate on a
     /// repository it knows nothing about ships off and says so in its own doc.
     fn enabled_by_default(&self) -> bool {
+        true
+    }
+    /// Whether the rule reports on files of one language. The per-language half
+    /// of `enabled_by_default`: a rule is measured against the spec 10.2
+    /// precision gate once per language it declares, and a pair that fails
+    /// ships off for that language alone while the rule stays on for every
+    /// language it passed. [`run_rules`] drops a finding whose file is in a
+    /// language the rule answers `false` for, so the answer holds for a graph
+    /// rule reading the index as much as for a file rule, and a file whose
+    /// extension names no language (a lockfile, a `.sql` migration) is never
+    /// asked, because no language was measured for it.
+    ///
+    /// A config `[rules.<id>] enabled = true` does not override a per-language
+    /// off: that key says whether the rule runs at all, and the languages a rule
+    /// failed on are the engine's own measurement rather than the repository's
+    /// choice. The intended knob is a `[rules.<id>] languages = [...]` override,
+    /// which does not exist yet. The answer must be a constant of the binary,
+    /// because it reaches the findings cache's key through
+    /// [`rules_fingerprint`], which is computed once per run: an answer that
+    /// varied with the repository would be a key changing under the run using
+    /// it.
+    ///
+    /// The default is `true` for every language a rule declares. A rule that
+    /// fails the PHP and Python precision gate
+    /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`) for
+    /// one language overrides this with a doc comment citing the report.
+    /// `leftover-agent-marker` on PHP went off after round two and came back
+    /// on in round three; `leftover-commented-code` on Python is recorded in
+    /// its own override.
+    fn enabled_for(&self, lang: Language) -> bool {
+        let _ = lang;
         true
     }
     /// A locked rule ignores config overrides: it cannot be disabled and its
@@ -119,19 +181,57 @@ pub trait Rule: Sync {
 /// This is the only place the question is answered. The CLI's findings cache
 /// keys on the set of rules a run produces findings for, so it has to ask
 /// exactly what [`run_rules`] asks or a cached file would be served without a
-/// locked rule's findings.
+/// locked rule's findings. What the config cannot say is covered by
+/// [`rules_fingerprint`], which is the other half of that key: the rule set's
+/// own declarations, which no config mentions.
 pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
     rule.locked() || config.rule_enabled_or(rule.id(), rule.enabled_by_default())
 }
 
-/// The files a file rule is allowed to look at: every parsed file whose tree came
-/// back without a syntax error the engine cannot see past (see
-/// `parse::has_blocking_error`). Rules iterate this instead of `ctx.files`, so a
-/// file that failed to parse is exempt from every rule rather than from whichever
-/// rules happened to check `has_error`.
+/// Whether a rule that declared `languages` may report on this file.
+///
+/// The path is the only thing every finding carries, so it is what the
+/// guarantee is enforced on: a graph rule reports on files the run never parsed,
+/// and [`clean_files`] cannot reach those. A path whose extension names no
+/// language the engine parses (a `.sql` migration, a lockfile, a `.d.ts` stub)
+/// is kept whatever the rule declared, because the declaration says nothing
+/// about it and the rules reading those files off disk are precisely the ones
+/// that would be silenced.
+fn language_allowed(rel: &str, languages: &[Language]) -> bool {
+    match Language::from_path(Path::new(rel)) {
+        Some(language) => languages.contains(&language),
+        None => true,
+    }
+}
+
+/// Whether a rule reports on this file under its own per-language default
+/// ([`Rule::enabled_for`]). A path naming no language is kept, for the reason
+/// [`language_allowed`] keeps it.
+fn enabled_for_file(rule: &dyn Rule, rel: &str) -> bool {
+    match Language::from_path(Path::new(rel)) {
+        Some(language) => rule.enabled_for(language),
+        None => true,
+    }
+}
+
+/// The files a file rule is allowed to look at: every parsed file written in one
+/// of the rule's own languages whose tree came back without a syntax error the
+/// engine cannot see past (see `parse::has_blocking_error`). Rules iterate this
+/// instead of `ctx.files`, so a file that failed to parse is exempt from every
+/// rule rather than from whichever rules happened to check `has_error`, and a
+/// file in a language a rule was not taught is never handed to it at all.
+///
+/// The language half of the filter is the whole of [`Rule::languages`]'s
+/// enforcement, and it is why the languages live on the context rather than on
+/// a filtered file list: `ctx.files` is a slice of owned `ParsedFile`s, so
+/// narrowing it would mean either cloning trees or changing the field to a
+/// slice of references and reallocating it once per rule per file in the
+/// parallel pass. A `&'static [Language]` on a `Copy` context costs nothing and
+/// leaves every rule's `clean_files(ctx)` loop exactly as it was.
 pub fn clean_files<'a>(ctx: &'a RuleContext) -> impl Iterator<Item = &'a ParsedFile> {
     let files: &'a [ParsedFile] = ctx.files;
-    files.iter().filter(|f| !f.has_error)
+    let languages: &'static [Language] = ctx.rule_languages;
+    files.iter().filter(move |f| !f.has_error && languages.contains(&f.language))
 }
 
 /// The trimmed text of a 1-based line, or `""` when the line is out of range.
@@ -164,10 +264,10 @@ pub fn anchor_for(file: &ParsedFile, line: u32) -> String {
     // quadratically, and extracting here made a file with many findings pay for
     // one walk each. `symbols_of` extracts on the first call and hands back the
     // same table after it, so a file costs one walk however many findings it
-    // has. Resolving against that table picks exactly what `enclosing_symbol`
-    // picks: the first symbol in extraction order whose span covers the line.
+    // has. Resolving goes through the same `enclosing` the report uses, so an
+    // anchor and the symbol a finding names can never be two different answers.
     let symbols = locrin_core::symbols::symbols_of(file);
-    let enclosing = |at: u32| symbols.iter().find(|s| s.start_line <= at && at <= s.end_line).map(|s| s.name.as_str());
+    let enclosing = |at: u32| locrin_core::symbols::enclosing(symbols, at).map(|s| s.name.as_str());
     let symbol = enclosing(line);
     let text = line_text(file, line);
     // Only a line that reads the same can be an earlier occurrence, and reading
@@ -242,7 +342,32 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
         // is its own by definition, and the config may not lower it.
         let severity =
             if rule.locked() { Some(rule.default_severity()) } else { ctx.config.severity_override(rule.id()) };
+        // The per-rule language filter, applied once here rather than in each
+        // rule: the rule's own context says which languages it was taught, and
+        // `clean_files` hands it those files and no others. Both entry points
+        // come through this loop, so the parallel file pass gets the same
+        // filter without knowing there is one.
+        let languages = rule.languages();
+        let ctx = &RuleContext { rule_languages: languages, ..*ctx };
         for mut f in rule.run(ctx)? {
+            // The other half of the guarantee, and the half that holds for the
+            // rules `clean_files` cannot reach: a graph rule queries the index,
+            // which remembers every file the walk indexed whatever language it
+            // was written in, so the declaration is enforced on what comes back
+            // rather than on what went in. Asked before the spec 9 gate, which
+            // is the half that may have to go to the index for an answer.
+            if !language_allowed(&f.file, languages) {
+                continue;
+            }
+            // The per-language default, applied to findings for the same reason
+            // the declaration is: it is the one place both kinds of rule pass
+            // through. A file rule is still handed the files of a language it
+            // ships off for and its findings there are dropped here, which
+            // costs the rule's work on those files and nothing else; no rule
+            // ships off for a language today, so nothing pays it.
+            if !enabled_for_file(rule.as_ref(), &f.file) {
+                continue;
+            }
             if dropped(&f)? {
                 continue;
             }
@@ -292,11 +417,72 @@ pub fn run_file_rules(
                 root,
                 offline,
                 previous,
+                // `run_rules` narrows this to each rule's own languages, so the
+                // per-file context starts from the widest set rather than
+                // deciding anything the shared runner has not decided.
+                rule_languages: ALL,
             };
             run_rules(rules, &ctx)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(per_file.into_iter().flatten().collect())
+}
+
+/// The revision of the rule set's *logic*, which [`rules_fingerprint`] cannot
+/// read for itself.
+///
+/// The fingerprint hashes what every rule declares about itself. It cannot hash
+/// the body of `run`, so a precision fix inside one rule (a pattern narrowed, a
+/// false positive removed) leaves every declaration exactly where it was and a
+/// warm findings cache would keep serving the rows the old rule wrote. Bump this
+/// when a rule's logic changes without a version bump; a release bumps the crate
+/// version, which the cache key already carries.
+pub const RULES_REVISION: u32 = 1;
+
+/// A hash of everything the rule set declares about itself, for the findings
+/// cache's key.
+///
+/// The key used to be the file's content hash plus the crate version and the
+/// config. Inside one version that left a whole class of change invisible: a
+/// rule turned off for a language, a severity or confidence moved, a rule added
+/// or removed, a precision fix in a rule's body. A repository nobody had edited
+/// would go on being answered from the rows the old rules wrote, and the only
+/// way out was a release or a deleted cache directory. This is the missing half
+/// of the key: every rule in [`all_rules`] order, its id, the languages it
+/// declares, its [`Rule::enabled_for`] answer for every language the engine
+/// parses, its severity, its confidence and whether it ships on, plus
+/// [`RULES_REVISION`] for what none of that can see.
+pub fn rules_fingerprint() -> String {
+    fingerprint_of(&all_rules())
+}
+
+/// [`rules_fingerprint`] over a rule set named by the caller, so a test can hash
+/// two sets it controls and see that a difference between them reaches the hash.
+fn fingerprint_of(rules: &[Box<dyn Rule>]) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(&RULES_REVISION.to_le_bytes());
+    for rule in rules {
+        // A record separator between rules and a unit separator between the
+        // fields of one, so no two different rule sets can flatten to the same
+        // byte string by running their fields together.
+        h.update(b"\x1e");
+        h.update(rule.id().as_bytes());
+        for lang in rule.languages() {
+            h.update(b"\x1f");
+            h.update(lang.as_str().as_bytes());
+        }
+        for lang in ALL {
+            h.update(b"\x1f");
+            h.update(&[u8::from(rule.enabled_for(*lang))]);
+        }
+        h.update(b"\x1f");
+        h.update(format!("{:?}", rule.default_severity()).as_bytes());
+        h.update(b"\x1f");
+        h.update(format!("{:?}", rule.confidence()).as_bytes());
+        h.update(b"\x1f");
+        h.update(&[u8::from(rule.enabled_by_default())]);
+    }
+    h.finalize().to_hex()[..16].to_string()
 }
 
 /// The registry: every rule the engine ships, in the order they are declared.
@@ -367,7 +553,16 @@ mod tests {
         index: Option<&'a Index>,
         entries: &'a EntryPoints,
     ) -> RuleContext<'a> {
-        RuleContext { files, config, index, entries, root: Path::new("."), offline: true, previous: no_previous() }
+        RuleContext {
+            files,
+            config,
+            index,
+            entries,
+            root: Path::new("."),
+            offline: true,
+            previous: no_previous(),
+            rule_languages: ALL,
+        }
     }
 
     struct Always;
@@ -423,6 +618,37 @@ mod tests {
         }
     }
 
+    /// A rule taught every language the engine parses, the way
+    /// `leftover-agent-marker` is: it reads a comment, and every language has
+    /// one.
+    struct EveryLanguage;
+    impl Rule for EveryLanguage {
+        fn id(&self) -> &'static str {
+            "every-language"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::File
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            ALL
+        }
+        fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            Ok(clean_files(ctx).map(|f| finding(self, f, 1, "hit", "remove it")).collect())
+        }
+    }
+
     /// A graph rule reports on files the run did not parse. The gate still holds
     /// for them, from what the index remembers.
     struct Ghost;
@@ -453,6 +679,185 @@ mod tests {
                 finding_at(self, "src/plain.ts", span, "a", "hit", "fix"),
             ])
         }
+    }
+
+    /// A rule is handed the files of the languages it declared and no others.
+    /// The default is the JavaScript family, so the rules written against the
+    /// TypeScript grammar's node kinds never see a Python file however the
+    /// repository set `[languages]`; a rule that declared every language sees
+    /// both files.
+    #[test]
+    fn a_rule_is_handed_only_the_languages_it_declares() {
+        let ts = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
+        let py = parse_source(Path::new("src/b.py"), "src/b.py", "b = 1\n".into()).unwrap();
+        let files = vec![ts, py];
+        let config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+
+        let js_only = run_rules(&[Box::new(Always)], &ctx).unwrap();
+        assert_eq!(js_only.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(), vec!["src/a.ts"]);
+
+        let every = run_rules(&[Box::new(EveryLanguage)], &ctx).unwrap();
+        assert_eq!(every.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(), vec!["src/a.ts", "src/b.py"]);
+    }
+
+    /// The filter lives in the shared runner, so the parallel file pass applies
+    /// it too: a Python file is its own unit of work there, and a JavaScript
+    /// rule handed that unit must still report nothing.
+    #[test]
+    fn the_language_filter_holds_in_the_parallel_file_pass() {
+        let ts = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
+        let py = parse_source(Path::new("src/b.py"), "src/b.py", "b = 1\n".into()).unwrap();
+        let files = vec![ts, py];
+        let config = Config::default();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let base = RuleContext {
+            files: &files,
+            config: &config,
+            index: None,
+            entries: &entries,
+            root: Path::new("."),
+            offline: true,
+            previous: no_previous(),
+            rule_languages: ALL,
+        };
+        let out = run_file_rules(&[Box::new(Always), Box::new(EveryLanguage)], &files, &base).unwrap();
+        let hits: Vec<(&str, &str)> = out.iter().map(|f| (f.rule.as_str(), f.file.as_str())).collect();
+        assert_eq!(hits, vec![("always", "src/a.ts"), ("every-language", "src/a.ts"), ("every-language", "src/b.py")]);
+    }
+
+    /// A rule that reports on files the run did not parse, in the languages it
+    /// is constructed with. A graph rule reaches the index rather than
+    /// `clean_files`, so nothing on its own path narrows what it reports: the
+    /// runner has to hold the declaration for it.
+    struct Reporting(&'static [Language]);
+    impl Rule for Reporting {
+        fn id(&self) -> &'static str {
+            "reporting"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::Graph
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            self.0
+        }
+        fn run(&self, _ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            let span = Span { start_line: 1, start_col: 0, end_line: 1, end_col: 0 };
+            Ok(["src/a.ts", "src/x.php", "db/schema.sql"]
+                .iter()
+                .map(|rel| finding_at(self, rel, span.clone(), "a", "hit", "fix"))
+                .collect())
+        }
+    }
+
+    /// [`Rule::languages`] is a guarantee about findings, not only about the
+    /// files a rule is handed: a graph rule that never calls `clean_files` may
+    /// not report on a language it did not declare. A file whose extension names
+    /// no language the engine parses (a `.sql` migration, a lockfile) is kept,
+    /// because the declaration says nothing about it and the rules that report
+    /// on those files are exactly the ones reading them off disk.
+    /// A rule on for every language it declares except PHP, which is what a
+    /// rule that failed the precision gate on one language looks like.
+    struct OffForPhp;
+    impl Rule for OffForPhp {
+        fn id(&self) -> &'static str {
+            "off-for-php"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::Graph
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            ALL
+        }
+        fn enabled_for(&self, lang: Language) -> bool {
+            lang != Language::Php
+        }
+        fn run(&self, _ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            let span = Span { start_line: 1, start_col: 0, end_line: 1, end_col: 0 };
+            Ok(["src/a.ts", "src/x.php", "src/y.py", "db/schema.sql"]
+                .iter()
+                .map(|rel| finding_at(self, rel, span.clone(), "a", "hit", "fix"))
+                .collect())
+        }
+    }
+
+    /// [`Rule::enabled_for`] drops the findings of the language it is off for
+    /// and nothing else: the other declared languages and the files naming no
+    /// language stay. A config `enabled = true` turns the rule on, which it
+    /// already is, and does not reach the per-language default.
+    #[test]
+    fn a_rule_off_for_one_language_keeps_its_findings_elsewhere() {
+        let files: Vec<ParsedFile> = vec![];
+        let mut config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+
+        let out = run_rules(&[Box::new(OffForPhp)], &ctx).unwrap();
+        assert_eq!(
+            out.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "src/y.py", "db/schema.sql"],
+            "the PHP finding is dropped and the rest are kept"
+        );
+
+        config
+            .rules
+            .insert("off-for-php".into(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+        let out = run_rules(&[Box::new(OffForPhp)], &ctx).unwrap();
+        assert_eq!(
+            out.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "src/y.py", "db/schema.sql"],
+            "enabled = true does not override a per-language off"
+        );
+    }
+
+    #[test]
+    fn a_finding_in_a_language_the_rule_did_not_declare_is_dropped() {
+        let files: Vec<ParsedFile> = vec![];
+        let config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+
+        let js = run_rules(&[Box::new(Reporting(JS_FAMILY))], &ctx).unwrap();
+        assert_eq!(
+            js.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "db/schema.sql"],
+            "the PHP finding is not the JavaScript rule's to report"
+        );
+
+        let every = run_rules(&[Box::new(Reporting(ALL))], &ctx).unwrap();
+        assert_eq!(
+            every.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "src/x.php", "db/schema.sql"]
+        );
     }
 
     #[test]
@@ -684,6 +1089,65 @@ mod tests {
         assert!(err.to_string().contains("graph rule run without an index"), "unhelpful message: {err}");
     }
 
+    /// Two rules alike in everything [`fingerprint_of`] reads except the
+    /// per-language answer this one is constructed with, so a difference in
+    /// their hashes can only be that answer.
+    struct PerLanguage(bool);
+    impl Rule for PerLanguage {
+        fn id(&self) -> &'static str {
+            "per-language"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::File
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            ALL
+        }
+        fn enabled_for(&self, lang: Language) -> bool {
+            self.0 || lang != Language::Php
+        }
+        fn run(&self, _ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            Ok(vec![])
+        }
+    }
+
+    /// The findings cache keys on the fingerprint, so what it notices is the
+    /// contract: every declaration a rule makes, and the shape of the set. What
+    /// it cannot notice is a rule's body, which is what [`RULES_REVISION`] is
+    /// for.
+    #[test]
+    fn the_fingerprint_moves_with_every_declaration_it_carries() {
+        fn of(rules: Vec<Box<dyn Rule>>) -> String {
+            fingerprint_of(&rules)
+        }
+        let a = of(vec![Box::new(Always)]);
+        assert_eq!(a, of(vec![Box::new(Always)]), "nothing moved, so the hash may not");
+        assert_eq!(a.len(), 16);
+        assert_eq!(rules_fingerprint().len(), 16);
+
+        assert_ne!(a, of(vec![Box::new(EveryLanguage)]), "a different id and a different language set");
+        assert_ne!(a, of(vec![Box::new(OffByDefault)]), "a rule that ships off");
+        assert_ne!(a, of(vec![Box::new(Locked)]), "a different severity and confidence");
+        assert_ne!(a, of(vec![Box::new(Always), Box::new(EveryLanguage)]), "a rule added to the set");
+        assert_ne!(
+            of(vec![Box::new(PerLanguage(true))]),
+            of(vec![Box::new(PerLanguage(false))]),
+            "the per-language default is the one declaration no config can say"
+        );
+    }
+
     #[test]
     fn registry_lists_every_shipped_rule() {
         let files: Vec<ParsedFile> = vec![];
@@ -833,6 +1297,7 @@ mod tests {
             root: &root,
             offline: true,
             previous: &previous,
+            rule_languages: ALL,
         };
 
         let out = run_file_rules(&[Box::new(Reporter)], &files, &base).unwrap();

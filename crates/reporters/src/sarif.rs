@@ -13,6 +13,10 @@ pub struct RuleMeta {
     pub severity: Severity,
     pub category: Category,
     pub enabled_by_default: bool,
+    /// The languages the rule declared, as the engine names them. A consumer
+    /// reading the log can tell a rule that only ever reports on TypeScript
+    /// from one that reports on every language the run read.
+    pub languages: Vec<&'static str>,
 }
 
 fn level(s: Severity) -> &'static str {
@@ -68,7 +72,11 @@ pub fn render(v: &Verdict, rules: &[RuleMeta], version: &str) -> String {
                 // knows a rule ships off without knowing locrin's properties.
                 // The property stays beside it for consumers already reading it.
                 "defaultConfiguration": { "level": level(r.severity), "enabled": r.enabled_by_default },
-                "properties": { "category": r.category, "enabledByDefault": r.enabled_by_default }
+                "properties": {
+                    "category": r.category,
+                    "enabledByDefault": r.enabled_by_default,
+                    "languages": r.languages
+                }
             })
         })
         .collect();
@@ -119,6 +127,7 @@ mod tests {
                 severity: Severity::High,
                 category: Category::Erosion,
                 enabled_by_default: true,
+                languages: vec!["typescript", "tsx", "javascript", "php", "python"],
             },
             RuleMeta {
                 id: "dead-export".into(),
@@ -126,6 +135,7 @@ mod tests {
                 severity: Severity::Low,
                 category: Category::Erosion,
                 enabled_by_default: false,
+                languages: vec!["typescript", "tsx", "javascript"],
             },
         ]
     }
@@ -156,6 +166,10 @@ mod tests {
         assert_eq!(listed[1]["defaultConfiguration"]["level"], "note");
         assert_eq!(listed[0]["defaultConfiguration"]["enabled"], true);
         assert_eq!(listed[1]["defaultConfiguration"]["enabled"], false, "SARIF's own field says the rule ships off");
+        // The languages a rule declared, so a consumer can tell a rule that
+        // reads every language from one written against the TypeScript grammar.
+        assert_eq!(listed[0]["properties"]["languages"], json!(["typescript", "tsx", "javascript", "php", "python"]));
+        assert_eq!(listed[1]["properties"]["languages"], json!(["typescript", "tsx", "javascript"]));
     }
 
     #[test]

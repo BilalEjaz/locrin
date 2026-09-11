@@ -1,7 +1,7 @@
 mod common;
 
-use common::{fixture, hits, run_on};
-use locrin_core::config::Config;
+use common::{fixture, hits, run_on, run_on_langs};
+use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::unused_import::UnusedImport;
 
@@ -25,4 +25,15 @@ fn allow_marker_shadowing_jsx_pragma_and_export_from() {
     let out = run_on(Box::new(UnusedImport), &fixture("unused_import", "edge"), &Config::default());
     // Files come in walk order: d.ts, e.tsx, f.ts. e.tsx is clean (pragma factory).
     assert_eq!(hits(&out), vec![("d.ts".into(), 3), ("f.ts".into(), 1)], "{out:?}");
+}
+
+/// `unused-import` reads the TypeScript grammar's import nodes, so it declares
+/// the JavaScript family and the runner never hands it a PHP file. A PHP file
+/// whose `use` statements are unused is not this rule's business, even when the
+/// repository has asked for PHP.
+#[test]
+fn php_use_statements_are_not_this_rules_business() {
+    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let out = run_on_langs(Box::new(UnusedImport), &fixture("unused_import", "php/clean"), &config);
+    assert!(out.is_empty(), "got {out:?}");
 }

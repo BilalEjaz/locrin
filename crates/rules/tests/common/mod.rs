@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use locrin_core::config::Config;
+use locrin_core::config::{Config, Languages};
 use locrin_core::entry::EntryPoints;
 use locrin_core::finding::Finding;
 use locrin_core::index::{content_hash, Index};
@@ -28,8 +28,16 @@ pub fn fixture(rule: &str, bucket: &str) -> PathBuf {
 }
 
 pub fn parse_dir(root: &Path) -> Vec<ParsedFile> {
+    parse_dir_langs(root, Languages::default())
+}
+
+/// The same walk, for a fixture written in PHP or Python: `source_files` drops
+/// a file whose language the options have not enabled, so a fixture in one of
+/// those languages is walked away silently unless the languages come from the
+/// config the test is running under.
+pub fn parse_dir_langs(root: &Path, languages: Languages) -> Vec<ParsedFile> {
     let root = canonical_root(root);
-    source_files(&root, &WalkOptions::default())
+    source_files(&root, &WalkOptions { languages, ..WalkOptions::default() })
         .unwrap()
         .into_iter()
         .filter_map(|p| parse_file(&root, &p).unwrap())
@@ -68,13 +76,34 @@ pub fn ctx_for<'a>(
     entries: &'a EntryPoints,
     root: &'a Path,
 ) -> RuleContext<'a> {
-    RuleContext { files, config, index: Some(index), entries, root, offline: true, previous: no_previous() }
+    RuleContext {
+        files,
+        config,
+        index: Some(index),
+        entries,
+        root,
+        offline: true,
+        previous: no_previous(),
+        // A test calling a rule directly has chosen the fixture's files itself;
+        // the per-rule narrowing belongs to `run_rules`, which `run_on` uses.
+        rule_languages: locrin_core::lang::ALL,
+    }
 }
 
 /// Runs one rule over a fixture directory with nothing known about the previous
 /// version of it, which is what almost every rule's tests want.
 pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
     run_on_with(rule, root, config, &Previous::default())
+}
+
+/// `run_on` under a second name, for the call site whose fixture is PHP or
+/// Python. Every entry point here takes the walk's languages from
+/// `config.languages`, so there is nothing for a language-aware variant to do
+/// differently; the name is the point, because it makes a test reading a
+/// language-gated fixture say out loud that its config must enable the
+/// language.
+pub fn run_on_langs(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
+    run_on(rule, root, config)
 }
 
 /// The same, for the rules whose answer is a change: the caller says what the
@@ -99,8 +128,29 @@ pub fn run_on_seeded(
     previous: &Previous,
     seed: impl FnOnce(&Index, &Path),
 ) -> Vec<Finding> {
+    with_context(root, config, previous, seed, |ctx| run_rules(&[rule], ctx).unwrap())
+}
+
+/// Runs one rule's `run` directly, without `run_rules` and so without the
+/// per-language default (`Rule::enabled_for`). A rule that ships off for a
+/// language after the precision gate still has its vocabulary for that
+/// language, and this is how a test pins that vocabulary: the fixture's
+/// findings come back here and are dropped by `run_on_langs`.
+pub fn run_unfiltered(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
+    with_context(root, config, &Previous::default(), |_ix, _root| {}, |ctx| rule.run(ctx).unwrap())
+}
+
+/// Parses and indexes the fixture, seeds the index, and hands the context to
+/// `run`: the one place every entry point above builds a `RuleContext`.
+fn with_context(
+    root: &Path,
+    config: &Config,
+    previous: &Previous,
+    seed: impl FnOnce(&Index, &Path),
+    run: impl FnOnce(&RuleContext) -> Vec<Finding>,
+) -> Vec<Finding> {
     let root = canonical_root(root);
-    let files = parse_dir(&root);
+    let files = parse_dir_langs(&root, config.languages);
     let (ix, entries) = index_dir(&root, &files, config);
     seed(&ix, &root);
     let ctx = RuleContext {
@@ -111,8 +161,9 @@ pub fn run_on_seeded(
         root: &root,
         offline: true,
         previous,
+        rule_languages: locrin_core::lang::ALL,
     };
-    run_rules(&[rule], &ctx).unwrap()
+    run(&ctx)
 }
 
 /// (file, start line) pairs in the order the rule produced them.

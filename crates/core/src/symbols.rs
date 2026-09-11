@@ -2,6 +2,7 @@ use rusqlite::params;
 use tree_sitter::Node;
 
 use crate::index::Index;
+use crate::lang::Language;
 use crate::parse::ParsedFile;
 use crate::tree::{has_keyword, text};
 
@@ -51,6 +52,10 @@ fn span_of(node: Node) -> (u32, u32, u32, u32) {
 fn params_of(node: Node) -> Option<u32> {
     let callable = match node.kind() {
         "function_declaration" | "generator_function_declaration" => node,
+        // PHP and Python spell the same thing `function_definition`, and a PHP
+        // method carries the list on its own node; each puts it on a
+        // `parameters` field, so the read below is the same read.
+        "function_definition" | "method_declaration" => node,
         "variable_declarator" => match node.child_by_field_name("value") {
             Some(v) if matches!(v.kind(), "arrow_function" | "function_expression") => v,
             _ => return None,
@@ -168,12 +173,125 @@ fn collect_export(node: Node, src: &str, rel: &str, out: &mut Vec<Symbol>) {
     }
 }
 
+/// Whether a PHP member is reachable from outside the type that holds it.
+///
+/// `has_keyword` cannot answer this: the modifier is a named `visibility_modifier`
+/// node with the keyword inside it, not a bare keyword child. A member with no
+/// modifier at all is public, which is PHP's own default.
+fn php_member_is_public(node: Node, src: &str) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            return !matches!(text(child, src), "private" | "protected");
+        }
+    }
+    true
+}
+
+/// The methods a PHP class, interface, trait or enum declares, named
+/// `Owner::method` so two classes with a `find` do not collapse into one symbol.
+fn collect_php_members(owner: Node, src: &str, rel: &str, owner_name: &str, out: &mut Vec<Symbol>) {
+    let Some(body) = owner.child_by_field_name("body") else { return };
+    let mut cursor = body.walk();
+    for member in body.children(&mut cursor) {
+        if member.kind() != "method_declaration" {
+            continue;
+        }
+        let Some(name) = member.child_by_field_name("name") else { continue };
+        let name = format!("{owner_name}::{}", text(name, src));
+        let export = php_member_is_public(member, src).then(|| name.clone());
+        push(out, rel, "method", &name, export, member);
+    }
+}
+
+/// PHP's declarations, which sit directly under `program`: the grammar's `php_tag`
+/// and the `text` of any HTML around it are siblings of them, not parents.
+///
+/// `namespace App;` does not nest, so its declarations are the program's own
+/// children; `namespace App { ... }` puts them in a body one level down, which is
+/// the only place this descends into.
+///
+/// Everything a PHP file declares at the top level is reachable from another file:
+/// there is no `export` keyword to read, so the export name is the name.
+fn collect_php(node: Node, src: &str, rel: &str, out: &mut Vec<Symbol>) {
+    let kind = match node.kind() {
+        "function_definition" => "function",
+        "class_declaration" => "class",
+        "interface_declaration" => "interface",
+        "trait_declaration" => "trait",
+        "enum_declaration" => "enum",
+        "namespace_definition" => {
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut cursor = body.walk();
+                for child in body.children(&mut cursor) {
+                    collect_php(child, src, rel, out);
+                }
+            }
+            return;
+        }
+        _ => return,
+    };
+    let Some(name) = node.child_by_field_name("name") else { return };
+    let name = text(name, src);
+    push(out, rel, kind, name, Some(name.to_string()), node);
+    if kind != "function" {
+        collect_php_members(node, src, rel, name, out);
+    }
+}
+
+/// Python's module-level declarations.
+///
+/// A module-level `NAME = value` is the nearest thing Python has to an exported
+/// const, and a leading underscore is the convention every Python tool reads as
+/// "not part of this module's API", so it is what `exported` answers to. Methods
+/// inside a class are left to the class: a Python class body is the class.
+fn collect_python(node: Node, src: &str, rel: &str, out: &mut Vec<Symbol>) {
+    let (kind, named) = match node.kind() {
+        "function_definition" => ("function", node.child_by_field_name("name")),
+        "class_definition" => ("class", node.child_by_field_name("name")),
+        // `@app.route(...)` and `@dataclass` wrap what they decorate, so the
+        // `def` and the `class` stop being children of the module. A decorated
+        // function is still a function, and Python's frameworks decorate
+        // routes, fixtures and dataclasses everywhere; missing them would leave
+        // a typical web or test module with no symbols at all. The span is the
+        // definition's own, not the decorators', so a finding inside the body
+        // still resolves to it.
+        "decorated_definition" => {
+            if let Some(def) = node.child_by_field_name("definition") {
+                collect_python(def, src, rel, out);
+            }
+            return;
+        }
+        "expression_statement" => {
+            let Some(assign) = node.named_child(0).filter(|n| n.kind() == "assignment") else { return };
+            // Only a plain name is a symbol: `a, b = f()` and `obj.x = 1` declare
+            // nothing this file can be searched or imported by.
+            let Some(target) = assign.child_by_field_name("left").filter(|n| n.kind() == "identifier") else {
+                return;
+            };
+            let name = text(target, src);
+            push(out, rel, "const", name, (!name.starts_with('_')).then(|| name.to_string()), assign);
+            return;
+        }
+        _ => return,
+    };
+    let Some(name) = named else { return };
+    let name = text(name, src);
+    push(out, rel, kind, name, (!name.starts_with('_')).then(|| name.to_string()), node);
+}
+
 pub fn extract(file: &ParsedFile) -> Vec<Symbol> {
     let mut out = Vec::new();
     let root = file.tree.root_node();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        collect(child, &file.source, &file.rel, Export::No, &mut out);
+        match file.language {
+            Language::Php => collect_php(child, &file.source, &file.rel, &mut out),
+            Language::Python => collect_python(child, &file.source, &file.rel, &mut out),
+            Language::TypeScript | Language::Tsx | Language::JavaScript => {
+                collect(child, &file.source, &file.rel, Export::No, &mut out)
+            }
+        }
     }
     out
 }
@@ -189,8 +307,50 @@ pub fn symbols_of(file: &ParsedFile) -> &[Symbol] {
     file.symbols.get_or_init(|| extract(file))
 }
 
+/// The start and the end of a span as one comparable pair each, so containment
+/// is two tuple comparisons rather than four field comparisons with the
+/// same-line case written out by hand.
+fn bounds(s: &Symbol) -> ((u32, u32), (u32, u32)) {
+    ((s.start_line, s.start_col), (s.end_line, s.end_col))
+}
+
+/// Whether `inner`'s span lies strictly inside `outer`'s: contained, and not the
+/// same span. Two symbols that merely share a line are not nested.
+fn inside(inner: &Symbol, outer: &Symbol) -> bool {
+    let ((os, oe), (is, ie)) = (bounds(outer), bounds(inner));
+    os <= is && ie <= oe && (os < is || ie < oe)
+}
+
+/// The symbol a line sits in: the first one whose span covers it, and then the
+/// narrowest symbol nested strictly inside that one which covers it too.
+///
+/// First rather than narrowest, because two top-level symbols can share a
+/// boundary line: `};` closes one and the next starts after it on the same line,
+/// and the line has always belonged to the one that opened first. Every anchor
+/// id in every existing baseline is keyed on that answer, so a narrowest-span
+/// rule would silently re-key them.
+///
+/// The descent is what PHP needs: a method's span sits strictly inside its
+/// class's, and a finding on the method's line belongs to the method. Only
+/// symbols after the first match are considered, because extraction emits an
+/// owner before what it owns, and ties keep the earlier one.
+///
+/// Shared so that [`enclosing_symbol`] and the rules' anchor cannot drift apart:
+/// an anchor keyed on one symbol while the report names another would be two
+/// answers to one question.
+pub fn enclosing(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
+    let covers = |s: &Symbol| s.start_line <= line && line <= s.end_line;
+    let at = symbols.iter().position(&covers)?;
+    let first = &symbols[at];
+    let nested = symbols[at + 1..]
+        .iter()
+        .filter(|s| covers(s) && inside(s, first))
+        .min_by_key(|s| s.end_line.saturating_sub(s.start_line));
+    Some(nested.unwrap_or(first))
+}
+
 pub fn enclosing_symbol(file: &ParsedFile, line: u32) -> Option<String> {
-    symbols_of(file).iter().find(|s| s.start_line <= line && line <= s.end_line).map(|s| s.name.clone())
+    enclosing(symbols_of(file), line).map(|s| s.name.clone())
 }
 
 /// Replaces the stored symbols for `file.rel` atomically. The delete and every
@@ -443,6 +603,109 @@ export enum Color { Red }
         let p = parsed();
         assert_eq!(enclosing_symbol(&p, 3).as_deref(), Some("main"));
         assert_eq!(enclosing_symbol(&p, 1), None);
+    }
+
+    /// Two top-level symbols can share a line: `};` closes the first and the
+    /// second starts after it on the same line. Nothing in TypeScript nests, so
+    /// the line belongs to the first symbol that covers it, which is what every
+    /// anchor id in every existing baseline was keyed on.
+    #[test]
+    fn a_boundary_line_belongs_to_the_first_symbol_that_covers_it() {
+        let src = "export const a = () => {\n}; export const b = 2;\n";
+        let p = parse_source(Path::new("src/c.ts"), "src/c.ts", src.to_string()).unwrap();
+        let syms = extract(&p);
+        assert_eq!(syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!((syms[0].start_line, syms[0].end_line), (1, 2));
+        assert_eq!((syms[1].start_line, syms[1].end_line), (2, 2), "the narrower symbol is the later one");
+        assert_eq!(enclosing_symbol(&p, 2).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn extracts_php_symbols() {
+        let src = "<?php\nnamespace App;\nfunction helper() {}\nclass Repo {\n    public function find(int $id) {}\n}\ninterface Shape {}\n";
+        let p = parse_source(Path::new("src/a.php"), "src/a.php", src.to_string()).unwrap();
+        let view: Vec<(String, String, bool)> =
+            extract(&p).iter().map(|s| (s.kind.clone(), s.name.clone(), s.exported)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("function".into(), "helper".into(), true),
+                ("class".into(), "Repo".into(), true),
+                ("method".into(), "Repo::find".into(), true),
+                ("interface".into(), "Shape".into(), true),
+            ]
+        );
+        assert_eq!(enclosing_symbol(&p, 5).as_deref(), Some("Repo::find"));
+        assert_eq!(enclosing_symbol(&p, 4).as_deref(), Some("Repo"));
+
+        let repo = &extract(&p)[1];
+        assert_eq!((repo.start_line, repo.end_line), (4, 6));
+        assert_eq!(extract(&p)[2].params, Some(1), "a method knows how many parameters it takes");
+    }
+
+    /// `namespace App { ... }` puts the file's declarations one level down, and a
+    /// declaration the class keeps to itself is not part of the file's surface.
+    #[test]
+    fn php_namespace_bodies_are_descended_and_private_members_are_not_exported() {
+        let src = "<?php\nnamespace App {\n  trait T {}\n  enum E { case A; }\n  class C {\n    private function hidden() {}\n    public function shown() {}\n  }\n}\n";
+        let p = parse_source(Path::new("src/b.php"), "src/b.php", src.to_string()).unwrap();
+        let view: Vec<(String, String, bool)> =
+            extract(&p).iter().map(|s| (s.kind.clone(), s.name.clone(), s.exported)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("trait".into(), "T".into(), true),
+                ("enum".into(), "E".into(), true),
+                ("class".into(), "C".into(), true),
+                ("method".into(), "C::hidden".into(), false),
+                ("method".into(), "C::shown".into(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_python_symbols() {
+        let src = "import os\nLIMIT = 3\n_private = 1\ndef run():\n    return LIMIT\nclass Bot:\n    def tick(self):\n        pass\n";
+        let p = parse_source(Path::new("bot/a.py"), "bot/a.py", src.to_string()).unwrap();
+        let view: Vec<(String, String, bool)> =
+            extract(&p).iter().map(|s| (s.kind.clone(), s.name.clone(), s.exported)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("const".into(), "LIMIT".into(), true),
+                ("const".into(), "_private".into(), false),
+                ("function".into(), "run".into(), true),
+                ("class".into(), "Bot".into(), true),
+            ]
+        );
+        assert_eq!(enclosing_symbol(&p, 7).as_deref(), Some("Bot"));
+
+        let syms = extract(&p);
+        assert_eq!((syms[2].start_line, syms[2].end_line), (4, 5), "a function spans its body");
+        assert_eq!(syms[2].params, Some(0));
+        assert_eq!(syms[0].params, None, "a module constant is not callable");
+    }
+
+    /// A decorator wraps the definition in a `decorated_definition`, so the
+    /// `def` and the `class` are no longer children of the module. A decorated
+    /// function is still a function.
+    #[test]
+    fn decorated_python_definitions_are_symbols() {
+        let src = r#"import functools
+
+@app.route("/x")
+def handler():
+    return 1
+
+@dataclass
+class Row:
+    id: int
+"#;
+        let p = parse_source(Path::new("bot/d.py"), "bot/d.py", src.to_string()).unwrap();
+        let view: Vec<(String, String, bool)> =
+            extract(&p).iter().map(|s| (s.kind.clone(), s.name.clone(), s.exported)).collect();
+        assert_eq!(view, vec![("function".into(), "handler".into(), true), ("class".into(), "Row".into(), true)]);
+        assert_eq!(enclosing_symbol(&p, 5).as_deref(), Some("handler"));
     }
 
     /// The table is extracted once per file and then shared. `extract` walks the

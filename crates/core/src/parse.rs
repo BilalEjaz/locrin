@@ -211,7 +211,20 @@ mod tests {
 
     #[test]
     fn unsupported_language_is_none() {
-        assert!(parse_source(Path::new("x/a.py"), "x/a.py", "print(1)".to_string()).is_none());
+        assert!(parse_source(Path::new("x/a.rb"), "x/a.rb", "puts 1".to_string()).is_none());
+    }
+
+    #[test]
+    fn parses_php_with_html_prefix_and_python() {
+        let php = "<html><?php\nfunction add(int $a, int $b): int { return $a + $b; }\n?></html>\n".to_string();
+        let p = parse_source(Path::new("x/add.php"), "x/add.php", php).unwrap();
+        assert_eq!(p.language, Language::Php);
+        assert!(!p.has_error);
+        let py = "def add(a: int, b: int) -> int:\n    return a + b\n".to_string();
+        let p = parse_source(Path::new("x/add.py"), "x/add.py", py).unwrap();
+        assert_eq!(p.language, Language::Python);
+        assert!(!p.has_error);
+        assert_eq!(p.tree.root_node().kind(), "module");
     }
 
     #[test]
@@ -235,8 +248,8 @@ mod tests {
 
         // A path that was never written: unsupported extensions return Ok(None)
         // before the file is read, so a missing file is not an error here.
-        let py = dir.join("sub").join("script.py");
-        assert!(parse_file(&dir, &py).unwrap().is_none());
+        let rb = dir.join("sub").join("script.rb");
+        assert!(parse_file(&dir, &rb).unwrap().is_none());
     }
 
     /// The JSX-text scanner refuses a bare `&` (tree-sitter-javascript #366),

@@ -3,14 +3,21 @@ use std::process::Command;
 
 use assert_cmd::prelude::*;
 
-fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/repo")
+fn named_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
 
 fn copy_fixture() -> tempfile::TempDir {
+    copy_named_fixture("repo")
+}
+
+/// A writable copy of one fixture tree. Tests edit the copy (a config file, a
+/// source file) and must not edit the fixture the next test reads.
+fn copy_named_fixture(name: &str) -> tempfile::TempDir {
+    let src = named_fixture(name);
     let dir = tempfile::tempdir().unwrap();
-    for entry in walkdir(&fixture()) {
-        let rel = entry.strip_prefix(fixture()).unwrap();
+    for entry in walkdir(&src) {
+        let rel = entry.strip_prefix(&src).unwrap();
         let dest = dir.path().join(rel);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         std::fs::copy(&entry, &dest).unwrap();
@@ -1213,6 +1220,26 @@ fn a_scoped_run_reads_the_lockfile_only_when_the_scope_names_it() {
     assert!(!err.contains(SKIPPED), "the lockfile is not under src: {err}");
 }
 
+/// A polyglot repository installs from more than one registry, and each
+/// lockfile is its own package list, its own ecosystem and its own snapshot. All
+/// of them are read, each says which file it is about, and an offline run with
+/// no snapshot skips the rule for each rather than failing over any of them.
+#[test]
+fn every_lockfile_in_a_polyglot_repository_is_checked_under_its_own_name() {
+    let dir = copy_named_fixture("multilang");
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let err = String::from_utf8(out.stderr).unwrap();
+    for rel in ["composer.lock", "poetry.lock", "requirements.txt"] {
+        let expected = format!("warning: {rel}: no cached advisory snapshot; vulnerable-dependency skipped");
+        assert!(err.contains(&expected), "{rel} was not checked: {err}");
+    }
+    // The run finished and reported: a lockfile in a language the engine does
+    // not parse is an input, never an error (spec 9).
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert!(files.iter().all(|f| !f.ends_with(".lock") && !f.ends_with(".txt")), "no advisories offline: {files:?}");
+}
+
 /// A migration creating a table nothing locks down, written into a scratch copy
 /// rather than committed beside the fixture: every other test in this file
 /// shares that fixture and none of them should start paying for the rule that
@@ -1381,4 +1408,83 @@ fn markdown_details_line_comes_from_locrin_run_url() {
         .output()
         .unwrap();
     assert!(String::from_utf8(out.stdout).unwrap().ends_with("Details: https://example/run/9\n"));
+}
+
+/// PHP and Python are read only once `locrin.toml` asks for them. A repository
+/// that has not opted in sees nothing from either, and naming such a file on the
+/// command line says why rather than reporting it clean.
+#[test]
+fn php_and_python_are_skipped_until_enabled() {
+    let dir = copy_named_fixture("multilang");
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert!(files.iter().all(|f| f.ends_with(".ts")), "{files:?}");
+
+    let out = locrin(dir.path()).args(["check", "--offline", "src/b.php"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("[languages] php = true"));
+}
+
+/// The note is one line per language, not one per file: `pre-commit` names every
+/// staged file, so a repository with a directory of Python in the stage would
+/// have read the same sentence once per file.
+#[test]
+fn a_skipped_language_is_reported_once_per_run() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("src/d.php"), "<?php\nfunction d() {}\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--offline", "src/b.php", "src/d.php", "src/c.py"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let err = String::from_utf8(out.stderr).unwrap();
+    let php: Vec<&str> = err.lines().filter(|l| l.contains("[languages] php = true")).collect();
+    let python: Vec<&str> = err.lines().filter(|l| l.contains("[languages] python = true")).collect();
+    assert_eq!(php.len(), 1, "{err}");
+    assert!(php[0].contains("src/b.php and 1 more php file skipped"), "{err}");
+    assert_eq!(python.len(), 1, "{err}");
+    assert!(python[0].contains("src/c.py skipped"), "{err}");
+}
+
+/// The other half of the test above: with both languages asked for, the findings
+/// carry PHP and Python files. `leftover-debug` is what fires on them, from the
+/// `var_dump` and `breakpoint` calls these two fixture files hold.
+#[test]
+fn enabled_languages_are_reported_on() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("locrin.toml"), "[languages]\nphp = true\npython = true\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert!(files.iter().any(|f| f.ends_with("b.php")), "{files:?}");
+    assert!(files.iter().any(|f| f.ends_with("c.py")), "{files:?}");
+}
+
+/// `dead-file` is a graph rule: it reads the index, which holds every file the
+/// walk indexed, and its resolver knows JavaScript resolution and nothing else.
+/// It declares the JavaScript family, so on a repository with PHP and Python
+/// turned on it must stay silent about both however unreachable they look. The
+/// two files added here are the shape it would otherwise report: a function and
+/// a def that nothing in the repository calls.
+#[test]
+fn dead_file_never_reports_a_language_it_did_not_declare() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(
+        dir.path().join("locrin.toml"),
+        "[languages]\nphp = true\npython = true\n\n[rules.dead-file]\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/lib.php"), "<?php\nfunction unused_helper(): int\n{\n    return 1;\n}\n")
+        .unwrap();
+    std::fs::write(dir.path().join("src/util.py"), "def unused_helper():\n    return 1\n").unwrap();
+
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-file")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert!(!dead.is_empty(), "the rule has to be running for the assertion below to mean anything: {v}");
+    assert!(dead.iter().all(|f| !f.ends_with(".php") && !f.ends_with(".py")), "{dead:?}");
 }
