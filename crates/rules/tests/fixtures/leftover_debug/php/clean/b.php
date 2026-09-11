@@ -5,5 +5,6 @@ function total(array $rows): int
     echo count($rows);
     printf("%d\n", count($rows));
     $logger->debug("counted");
+    Acme\dump($rows);
     return count($rows);
 }

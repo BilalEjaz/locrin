@@ -115,6 +115,11 @@ pub trait Rule: Sync {
     /// accident, and a rule taught a language says so once here rather than
     /// checking `file.language` in its own loop.
     ///
+    /// It is a guarantee about findings and not only about the file list:
+    /// [`run_rules`] drops a finding whose path names a language the rule did
+    /// not declare, so a graph rule reading the index (which holds every
+    /// indexed file) is held to its declaration too.
+    ///
     /// The default is the JavaScript family, because that is what every rule
     /// the engine shipped before PHP and Python was written against. A rule
     /// that reads something every language has (a comment, a string literal, a
@@ -148,6 +153,22 @@ pub trait Rule: Sync {
 /// locked rule's findings.
 pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
     rule.locked() || config.rule_enabled_or(rule.id(), rule.enabled_by_default())
+}
+
+/// Whether a rule that declared `languages` may report on this file.
+///
+/// The path is the only thing every finding carries, so it is what the
+/// guarantee is enforced on: a graph rule reports on files the run never parsed,
+/// and [`clean_files`] cannot reach those. A path whose extension names no
+/// language the engine parses (a `.sql` migration, a lockfile, a `.d.ts` stub)
+/// is kept whatever the rule declared, because the declaration says nothing
+/// about it and the rules reading those files off disk are precisely the ones
+/// that would be silenced.
+fn language_allowed(rel: &str, languages: &[Language]) -> bool {
+    match Language::from_path(Path::new(rel)) {
+        Some(language) => languages.contains(&language),
+        None => true,
+    }
 }
 
 /// The files a file rule is allowed to look at: every parsed file written in one
@@ -283,8 +304,18 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
         // `clean_files` hands it those files and no others. Both entry points
         // come through this loop, so the parallel file pass gets the same
         // filter without knowing there is one.
-        let ctx = &RuleContext { rule_languages: rule.languages(), ..*ctx };
+        let languages = rule.languages();
+        let ctx = &RuleContext { rule_languages: languages, ..*ctx };
         for mut f in rule.run(ctx)? {
+            // The other half of the guarantee, and the half that holds for the
+            // rules `clean_files` cannot reach: a graph rule queries the index,
+            // which remembers every file the walk indexed whatever language it
+            // was written in, so the declaration is enforced on what comes back
+            // rather than on what went in. Asked before the spec 9 gate, which
+            // is the half that may have to go to the index for an answer.
+            if !language_allowed(&f.file, languages) {
+                continue;
+            }
             if dropped(&f)? {
                 continue;
             }
@@ -586,6 +617,70 @@ mod tests {
         let out = run_file_rules(&[Box::new(Always), Box::new(EveryLanguage)], &files, &base).unwrap();
         let hits: Vec<(&str, &str)> = out.iter().map(|f| (f.rule.as_str(), f.file.as_str())).collect();
         assert_eq!(hits, vec![("always", "src/a.ts"), ("every-language", "src/a.ts"), ("every-language", "src/b.py")]);
+    }
+
+    /// A rule that reports on files the run did not parse, in the languages it
+    /// is constructed with. A graph rule reaches the index rather than
+    /// `clean_files`, so nothing on its own path narrows what it reports: the
+    /// runner has to hold the declaration for it.
+    struct Reporting(&'static [Language]);
+    impl Rule for Reporting {
+        fn id(&self) -> &'static str {
+            "reporting"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::Graph
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            self.0
+        }
+        fn run(&self, _ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            let span = Span { start_line: 1, start_col: 0, end_line: 1, end_col: 0 };
+            Ok(["src/a.ts", "src/x.php", "db/schema.sql"]
+                .iter()
+                .map(|rel| finding_at(self, rel, span.clone(), "a", "hit", "fix"))
+                .collect())
+        }
+    }
+
+    /// [`Rule::languages`] is a guarantee about findings, not only about the
+    /// files a rule is handed: a graph rule that never calls `clean_files` may
+    /// not report on a language it did not declare. A file whose extension names
+    /// no language the engine parses (a `.sql` migration, a lockfile) is kept,
+    /// because the declaration says nothing about it and the rules that report
+    /// on those files are exactly the ones reading them off disk.
+    #[test]
+    fn a_finding_in_a_language_the_rule_did_not_declare_is_dropped() {
+        let files: Vec<ParsedFile> = vec![];
+        let config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+
+        let js = run_rules(&[Box::new(Reporting(JS_FAMILY))], &ctx).unwrap();
+        assert_eq!(
+            js.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "db/schema.sql"],
+            "the PHP finding is not the JavaScript rule's to report"
+        );
+
+        let every = run_rules(&[Box::new(Reporting(ALL))], &ctx).unwrap();
+        assert_eq!(
+            every.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "src/x.php", "db/schema.sql"]
+        );
     }
 
     #[test]

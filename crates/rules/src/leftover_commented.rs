@@ -11,9 +11,16 @@
 //! The run detection is the same in every language; only the vocabulary the run
 //! is tested against changes, because what a statement looks like is what the
 //! language says it looks like. A Python statement ends in a colon or in
-//! nothing at all, so a semicolon is no use there and `def `, `class ` and
-//! `return ` do the work instead. A PHP statement ends in a semicolon like a
-//! JavaScript one, and opens with a sigil, a visibility keyword or `foreach (`.
+//! nothing at all, so a semicolon is no use there and `return `, `import ` and
+//! the block headers do the work instead. A PHP statement ends in a semicolon
+//! like a JavaScript one, and opens with a sigil, a visibility keyword or
+//! `foreach (`.
+//!
+//! Python's keywords are also ordinary English words, which JavaScript's
+//! punctuation-carrying `if (` and `for (` are not, so a block header counts
+//! only with the colon that closes it and `from ` only with the ` import ` that
+//! follows it. Without that, three sentences of prose opening "for now..." and
+//! "if the input..." read as a commented-out loop.
 
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
@@ -34,12 +41,41 @@ struct Vocabulary {
     endings: &'static [char],
     /// Openings that can only begin a statement. Each is strong on its own.
     starts: &'static [&'static str],
+    /// Openings that begin a statement only when the rest of the line agrees.
+    /// Python's keywords are ordinary English words, so the prefix alone says
+    /// nothing: see [`Needs`].
+    qualified_starts: &'static [(&'static str, Needs)],
+}
+
+/// What the rest of a line has to carry before a qualified opening counts as a
+/// statement.
+#[derive(Clone, Copy)]
+enum Needs {
+    /// The colon that opens the block. `for row in rows:` is code and `for now
+    /// this is fine.` is a sentence, and the colon is the whole difference; the
+    /// same holds for every Python keyword that opens a suite.
+    BlockColon,
+    /// An ` import ` later in the line. `from ` opens an import and opens about
+    /// as many sentences of prose.
+    Import,
+}
+
+impl Needs {
+    fn met(self, trimmed: &str) -> bool {
+        match self {
+            Needs::BlockColon => trimmed.ends_with(':'),
+            Needs::Import => trimmed.contains(" import "),
+        }
+    }
 }
 
 const JS: Vocabulary = Vocabulary {
     strong_endings: &[';', '{', '}'],
     endings: &[';', '{', '}', ')', ','],
     starts: &["const ", "let ", "var ", "return ", "if (", "for (", "import ", "export "],
+    // A JavaScript keyword carries its own punctuation: `if (` and `for (` are
+    // already the shapes prose does not write.
+    qualified_starts: &[],
 };
 
 const PHP: Vocabulary = Vocabulary {
@@ -48,6 +84,7 @@ const PHP: Vocabulary = Vocabulary {
     // `$` on its own: every PHP variable carries the sigil, so a commented-out
     // assignment opens with it where a sentence of prose does not.
     starts: &["$", "function ", "return ", "if (", "foreach (", "echo ", "use ", "namespace ", "public ", "private "],
+    qualified_starts: &[],
 };
 
 const PY: Vocabulary = Vocabulary {
@@ -56,9 +93,26 @@ const PY: Vocabulary = Vocabulary {
     // only ending worth anything and the openings carry the rest.
     strong_endings: &[':'],
     endings: &[':', ')', ','],
-    starts: &[
-        "def ", "class ", "import ", "from ", "return ", "if ", "for ", "while ", "with ", "try:", "except", "self.",
-        "print(",
+    // The bare ones are the openings that are not English: `return ` and
+    // `import ` head a sentence far more rarely than `if` or `for` do, `self.`
+    // is a name, and `print(` carries its own parenthesis.
+    starts: &["return ", "import ", "self.", "print("],
+    // Everything that opens a Python suite is a word a comment is written with,
+    // so each is read only with the colon that closes its header. `#  for now
+    // this handles the simple case.` is prose, and nothing about its first two
+    // characters says otherwise.
+    qualified_starts: &[
+        ("if ", Needs::BlockColon),
+        ("elif ", Needs::BlockColon),
+        ("else", Needs::BlockColon),
+        ("for ", Needs::BlockColon),
+        ("while ", Needs::BlockColon),
+        ("with ", Needs::BlockColon),
+        ("try", Needs::BlockColon),
+        ("except", Needs::BlockColon),
+        ("class ", Needs::BlockColon),
+        ("def ", Needs::BlockColon),
+        ("from ", Needs::Import),
     ],
 };
 
@@ -70,6 +124,15 @@ fn vocabulary(language: Language) -> &'static Vocabulary {
     }
 }
 
+/// Whether a trimmed line opens with something that can only open a statement.
+/// One test for both predicates: an opening that is too weak to qualify a run
+/// is too weak to support one either, or a page of prose about a `for` loop
+/// would be two supporting signals away from a finding.
+fn starts_a_statement(trimmed: &str, v: &Vocabulary) -> bool {
+    v.starts.iter().any(|s| trimmed.starts_with(s))
+        || v.qualified_starts.iter().any(|(prefix, needs)| trimmed.starts_with(prefix) && needs.met(trimmed))
+}
+
 /// A line carrying at least a supporting signal of being code.
 fn looks_like_code(line: &str, language: Language) -> bool {
     let v = vocabulary(language);
@@ -77,7 +140,7 @@ fn looks_like_code(line: &str, language: Language) -> bool {
     if t.is_empty() {
         return false;
     }
-    t.ends_with(v.endings) || v.starts.iter().any(|s| t.starts_with(s))
+    t.ends_with(v.endings) || starts_a_statement(t, v)
 }
 
 /// A signal prose rarely produces: a statement terminator, a brace, a colon
@@ -88,7 +151,7 @@ fn is_strong_code(line: &str, language: Language) -> bool {
     if t.is_empty() {
         return false;
     }
-    t.ends_with(v.strong_endings) || v.starts.iter().any(|s| t.starts_with(s))
+    t.ends_with(v.strong_endings) || starts_a_statement(t, v)
 }
 
 /// The qualifying test for a run: one strong signal at minimum, and two lines

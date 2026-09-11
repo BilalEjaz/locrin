@@ -1437,3 +1437,34 @@ fn enabled_languages_are_reported_on() {
     assert!(files.iter().any(|f| f.ends_with("b.php")), "{files:?}");
     assert!(files.iter().any(|f| f.ends_with("c.py")), "{files:?}");
 }
+
+/// `dead-file` is a graph rule: it reads the index, which holds every file the
+/// walk indexed, and its resolver knows JavaScript resolution and nothing else.
+/// It declares the JavaScript family, so on a repository with PHP and Python
+/// turned on it must stay silent about both however unreachable they look. The
+/// two files added here are the shape it would otherwise report: a function and
+/// a def that nothing in the repository calls.
+#[test]
+fn dead_file_never_reports_a_language_it_did_not_declare() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(
+        dir.path().join("locrin.toml"),
+        "[languages]\nphp = true\npython = true\n\n[rules.dead-file]\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/lib.php"), "<?php\nfunction unused_helper(): int\n{\n    return 1;\n}\n")
+        .unwrap();
+    std::fs::write(dir.path().join("src/util.py"), "def unused_helper():\n    return 1\n").unwrap();
+
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-file")
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert!(!dead.is_empty(), "the rule has to be running for the assertion below to mean anything: {v}");
+    assert!(dead.iter().all(|f| !f.ends_with(".php") && !f.ends_with(".py")), "{dead:?}");
+}

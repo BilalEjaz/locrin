@@ -79,17 +79,28 @@ fn is_debug_call(node: Node, src: &str) -> bool {
 }
 
 /// The name a PHP `function_call_expression` calls, when it calls one plainly.
-/// A call through a variable or a method call on an object has no `name` child
-/// under `function`, and neither is a leftover this rule claims to find.
+/// A call through a variable or a method call on an object has neither a `name`
+/// nor a `qualified_name` under `function`, and neither is a leftover this rule
+/// claims to find.
+///
+/// A file inside a namespace routinely roots a call to a global function with a
+/// leading backslash, and `\var_dump($x)` is the same leftover as `var_dump($x)`.
+/// One backslash and no other is what says so: `Acme\dump($x)` calls somebody
+/// else's function that happens to share the name.
 fn php_called_name<'a>(node: Node, src: &'a str) -> Option<&'a str> {
     if node.kind() != "function_call_expression" {
         return None;
     }
     let func = node.child_by_field_name("function")?;
-    if func.kind() != "name" {
-        return None;
+    let text = func.utf8_text(src.as_bytes()).ok()?;
+    match func.kind() {
+        "name" => Some(text),
+        "qualified_name" => {
+            let rooted = text.strip_prefix('\\')?;
+            (!rooted.contains('\\')).then_some(rooted)
+        }
+        _ => None,
     }
-    func.utf8_text(src.as_bytes()).ok()
 }
 
 /// PHP function names are case-insensitive, so `VAR_DUMP($x)` is the same call
@@ -119,19 +130,34 @@ fn is_py_sink(node: Node, src: &str) -> bool {
     }
 }
 
-/// A Python import of a debugger module, in either spelling: `import pdb` and
-/// `from pdb import set_trace` are both the line a reader has to delete.
+/// A Python import of a debugger module, in any spelling: `import pdb`,
+/// `import pdb as p` and `from pdb import set_trace` are all the line a reader
+/// has to delete.
 ///
-/// The whole statement is read as text rather than walked: an import statement
-/// is one short line, the module names are identifiers, and the alternative is
-/// three node kinds (`dotted_name`, `aliased_import`, `wildcard_import`) for a
-/// question a word match answers exactly.
+/// The module is read off the nodes that hold it rather than out of the
+/// statement's text, because the module name is a path and a word match cannot
+/// see where the path ends: `from myapp.pdb import models` carries the word
+/// `pdb` and imports nobody's debugger. `import_statement` names its modules in
+/// `name` children, one per comma, each either a `dotted_name` or an
+/// `aliased_import` wrapping one; `import_from_statement` names its module in
+/// `module_name`. Each is compared whole.
 fn is_py_debug_import(node: Node, src: &str) -> bool {
-    if !matches!(node.kind(), "import_statement" | "import_from_statement") {
-        return false;
+    let is_debugger = |n: Node| n.utf8_text(src.as_bytes()).is_ok_and(|t| PY_DEBUGGERS.contains(&t));
+    match node.kind() {
+        "import_statement" => {
+            let mut cursor = node.walk();
+            // Bound rather than returned: the iterator borrows the cursor, and
+            // a tail expression's temporaries outlive the block the cursor
+            // lives in.
+            let hit = node.children_by_field_name("name", &mut cursor).any(|n| match n.kind() {
+                "aliased_import" => n.child_by_field_name("name").is_some_and(is_debugger),
+                _ => is_debugger(n),
+            });
+            hit
+        }
+        "import_from_statement" => node.child_by_field_name("module_name").is_some_and(is_debugger),
+        _ => false,
     }
-    let text = node.utf8_text(src.as_bytes()).unwrap_or("");
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').any(|w| PY_DEBUGGERS.contains(&w))
 }
 
 fn walk(node: Node, src: &str, language: Language, hits: &mut Vec<u32>) {

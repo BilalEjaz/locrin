@@ -1,4 +1,5 @@
 import logging
+from myapp.pdb import models
 
 logger = logging.getLogger(__name__)
 

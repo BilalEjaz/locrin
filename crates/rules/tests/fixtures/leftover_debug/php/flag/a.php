@@ -8,5 +8,6 @@ function total(array $rows): int
     dump($rows);
     debug_zval_dump($rows);
     xdebug_break();
+    \var_dump($rows);
     return count($rows);
 }
