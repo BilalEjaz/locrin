@@ -5,10 +5,11 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::finding::Severity;
+use crate::lang::{Language, ALL};
 
 pub const CONFIG_FILE: &str = "locrin.toml";
 
-/// A per-rule override read from `[rules.<id>]`. Both fields are optional so an
+/// A per-rule override read from `[rules.<id>]`. Every field is optional so an
 /// absent key keeps the rule's own default rather than resetting it.
 ///
 /// Unknown keys are rejected: a misspelled `severity` that serde ignored would
@@ -18,6 +19,11 @@ pub const CONFIG_FILE: &str = "locrin.toml";
 pub struct RuleOverride {
     pub enabled: Option<bool>,
     pub severity: Option<Severity>,
+    /// The languages this rule reports on, replacing the per-language default.
+    /// Held as written rather than as [`Language`] values so an unknown name
+    /// can be reported against the file that wrote it; [`Config::load`]
+    /// rejects one, and [`Config::rule_languages`] is the parsed answer.
+    pub languages: Option<Vec<String>>,
 }
 
 /// One import direction the operator has ruled on (spec 7.5). `forbid` names
@@ -124,7 +130,35 @@ impl Config {
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let config: Config = toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))?;
         config.validate_globs().with_context(|| format!("invalid {}", path.display()))?;
+        config.validate_rule_languages().with_context(|| format!("invalid {}", path.display()))?;
         Ok(config)
+    }
+
+    /// Checks that every name in a `[rules.<id>] languages` list is a language
+    /// the engine reads, naming the key and the value that is not, and that the
+    /// list names at least one.
+    ///
+    /// Whether the rule itself can read that language is a question only the
+    /// rule set can answer, and this crate is the one the rule set depends on,
+    /// so the CLI asks it separately once both are in hand.
+    fn validate_rule_languages(&self) -> anyhow::Result<()> {
+        for (id, over) in &self.rules {
+            // An empty list says the rule reports on no language at all, which
+            // is a rule turned off by the key for where it reports rather than
+            // by the key for whether it runs. Silently honoured it would read
+            // as a rule that had simply stopped finding anything.
+            if over.languages.as_ref().is_some_and(Vec::is_empty) {
+                anyhow::bail!("rules.{id}.languages names no language; use enabled = false to turn the rule off");
+            }
+            for name in over.languages.iter().flatten() {
+                anyhow::ensure!(
+                    Language::from_name(name).is_some(),
+                    "rules.{id}.languages contains an unknown language: {name} (known: {})",
+                    ALL.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Checks that every configured glob compiles, naming the one that does not,
@@ -180,6 +214,19 @@ impl Config {
     /// alone rather than flatten every advisory to one level.
     pub fn severity_override(&self, id: &str) -> Option<Severity> {
         self.rules.get(id).and_then(|r| r.severity)
+    }
+
+    /// The languages this config puts a rule on, when it names any.
+    ///
+    /// `None` means the config said nothing and the rule keeps its own
+    /// declaration and its own per-language defaults. A list replaces both: the
+    /// rule reports on exactly these languages, which is how a pair the engine
+    /// ships off is turned on by the repository that has measured it for
+    /// itself. Every name has been checked by [`Config::load`], so an unknown
+    /// one cannot reach here and is dropped rather than guessed at.
+    pub fn rule_languages(&self, id: &str) -> Option<Vec<Language>> {
+        let names = self.rules.get(id)?.languages.as_ref()?;
+        Some(names.iter().filter_map(|n| Language::from_name(n)).collect())
     }
 }
 
@@ -257,6 +304,51 @@ mod tests {
         let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
         assert!(err.contains(CONFIG_FILE), "{err}");
         assert!(err.contains("exclude"), "{err}");
+    }
+
+    /// The per-language knob: a rule's languages can be named, and the names
+    /// are the ones the engine prints for a language everywhere else.
+    #[test]
+    fn parses_a_rule_language_override() {
+        let dir = fresh("config-languages");
+        std::fs::write(
+            path(&dir).join(CONFIG_FILE),
+            "[rules.leftover-commented-code]\nlanguages = [\"typescript\", \"tsx\", \"javascript\", \"python\"]\n",
+        )
+        .unwrap();
+        let c = Config::load(path(&dir)).unwrap();
+        assert_eq!(
+            c.rule_languages("leftover-commented-code"),
+            Some(vec![Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Python])
+        );
+        assert_eq!(c.rule_languages("leftover-debug"), None, "a rule the config says nothing about keeps its own");
+    }
+
+    /// A language the engine does not know is a config that does not do what
+    /// its author meant, so it fails naming the key and the value.
+    #[test]
+    fn an_unknown_language_in_a_rule_override_is_an_error() {
+        let dir = fresh("config-languages-unknown");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[rules.leftover-commented-code]\nlanguages = [\"pyhton\"]\n")
+            .unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains(CONFIG_FILE), "{err}");
+        assert!(err.contains("rules.leftover-commented-code.languages"), "{err}");
+        assert!(err.contains("pyhton"), "{err}");
+        assert!(err.contains("python"), "the known names are listed: {err}");
+    }
+
+    /// An empty list reads as "this rule reports nowhere", which is a rule
+    /// turned off by a key that does not say so. The key that says so is
+    /// `enabled`, and the config is told to use it.
+    #[test]
+    fn an_empty_rule_language_list_is_an_error() {
+        let dir = fresh("config-languages-empty");
+        std::fs::write(path(&dir).join(CONFIG_FILE), "[rules.leftover-commented-code]\nlanguages = []\n").unwrap();
+        let err = format!("{:#}", Config::load(path(&dir)).unwrap_err());
+        assert!(err.contains(CONFIG_FILE), "{err}");
+        assert!(err.contains("rules.leftover-commented-code.languages"), "{err}");
+        assert!(err.contains("enabled = false"), "the key that turns a rule off is named: {err}");
     }
 
     #[test]

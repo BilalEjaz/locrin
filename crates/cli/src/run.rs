@@ -640,6 +640,11 @@ fn write_cache(ix: &mut Index, indexed: &Indexed, fresh: &[Finding], key: &Cache
 /// `lock_in_scope` and `rls_in_scope`.
 fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
+    // The half of the config only the rule set can check: a `[rules.<id>]
+    // languages` list naming a language that rule cannot read. `Config::load`
+    // has already checked that every name is a language at all.
+    locrin_rules::validate_config(&config)
+        .with_context(|| format!("invalid {}", root.join(locrin_core::config::CONFIG_FILE).display()))?;
     let walk_opts = WalkOptions { excludes: config.excludes.clone(), languages: config.languages };
     let walked = source_files(root, &walk_opts)?;
     // Which files the advisory rule would answer for, found without reading
@@ -708,7 +713,7 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     // because the CLI is the one crate that has both: `locrin-core` owns the
     // cache and `locrin-rules` depends on `locrin-core`, so the hash cannot ask
     // the rules for their fingerprint itself.
-    let config_hash = cache::config_hash(&config, &locrin_rules::rules_fingerprint());
+    let config_hash = cache::config_hash(&config, &locrin_rules::rules_fingerprint(&config));
     let key = CacheKey { config_hash: &config_hash, enabled: &enabled };
 
     // A whole-repository check has to answer for every file, so each candidate is
@@ -1171,7 +1176,7 @@ mod tests {
     #[test]
     fn a_change_to_the_rule_set_misses_the_findings_cache() {
         let config = Config::default();
-        let fingerprint = locrin_rules::rules_fingerprint();
+        let fingerprint = locrin_rules::rules_fingerprint(&config);
         let before = cache::config_hash(&config, &fingerprint);
         let rule = "leftover-agent-marker";
         let enabled = [rule];

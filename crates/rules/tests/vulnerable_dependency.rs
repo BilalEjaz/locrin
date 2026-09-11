@@ -337,7 +337,7 @@ fn a_configured_severity_overrides_every_advisorys_rating() {
     let mut config = locrin_core::config::Config::default();
     config.rules.insert(
         "vulnerable-dependency".into(),
-        locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) },
+        locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low), languages: None },
     );
     let findings = run_on_seeded(
         Box::new(VulnerableDependency),
@@ -391,8 +391,10 @@ fn an_advisory_that_does_not_cover_the_installed_version_says_so() {
     assert_eq!(f.confidence, Confidence::Medium, "an advisory with no upgrade to name is not a full instruction");
 }
 
-/// Most PyPI and Packagist advisories publish `ECOSYSTEM` ranges, which the
-/// engine does not order. It therefore never compared the installed version
+/// An advisory can carry ranges in a form the engine does not order: a `GIT`
+/// range, or an `ECOSYSTEM` range for a registry whose version ordering the
+/// engine does not implement, which npm is (its advisories publish `SEMVER`).
+/// It therefore never compared the installed version
 /// against them, and the fix sentence says exactly that: the reader is sent to
 /// the advisory for the version to move to, rather than told that no fix
 /// applies to a version nothing was compared against. The finding itself is not

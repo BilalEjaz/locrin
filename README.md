@@ -330,10 +330,29 @@ override is in force when it is not.
 | `languages.python` | `false` | Reads `.py` files too (`.pyi` stubs are never read). |
 | `rules.<id>.enabled` | the rule's own default | Turns one rule on or off. |
 | `rules.<id>.severity` | the rule's own default | Overrides one rule's severity. |
+| `rules.<id>.languages` | the rule's own per-language defaults | The languages that rule reports on, replacing its defaults. |
 
-`secret-exposed` is locked: it ignores both `rules` keys. A repository that
-wants a locked finding to stop failing the build accepts it into the baseline,
-where the acceptance is written down with a reason.
+`languages` takes the names the engine prints: `typescript`, `tsx`,
+`javascript`, `php`, `python`. The list replaces the rule's per-language
+defaults rather than adding to them, so it both turns a pair on and narrows a
+rule to the languages you name. It is the escape from a per-language off that
+`enabled = true` deliberately is not:
+
+```toml
+[rules.leftover-commented-code]
+# on for Python too, which it ships off for; see "Per-language defaults"
+languages = ["typescript", "tsx", "javascript", "python"]
+```
+
+A name that is not a language, a language the rule was not written against, or
+an empty list fails the run and says what to write instead. `enabled = false`
+still wins: this key says where a rule reports, not whether it runs.
+
+`secret-exposed` is locked: it ignores `enabled` and `severity` and refuses
+`languages`, because narrowing where a locked rule reports is how it would be
+silenced. A repository that wants a locked finding to stop failing the build
+accepts it into the baseline, where the acceptance is written down with a
+reason.
 
 ## Baseline and suppression
 
@@ -460,8 +479,10 @@ pairs of the ten were decided that way:
 The other eight pairs ship on. A per-language off is not something
 `rules.<id>.enabled = true` overrides: that key says whether the rule runs at
 all, and the languages a rule failed on are the engine's measurement rather
-than the repository's choice. A `rules.<id>.languages` override is the intended
-knob and does not exist yet, so the escape today is the baseline.
+than the repository's choice. The knob for that is `rules.<id>.languages`: name
+the languages the rule reports on and the list replaces the defaults, which is
+how a repository that has measured a pair for itself turns it on. See "Config"
+for the key.
 
 ### Corpora and numbers
 
@@ -487,9 +508,10 @@ The PyPI drop from 25 to 13 is not a precision fix but a de-duplication: PyPI
 and Packagist advisories arrive under several ids (a GHSA record and the PYSEC
 or CVE record that aliases it), and `vulnerable-dependency` now reports one
 finding per family, under the GHSA id. Every GHSA in the round-two list is
-still reported. Neither registry's findings name a fixed version yet: both
-publish `ECOSYSTEM` ranges the engine does not order, so the finding points at
-the advisory instead.
+still reported. Both registries publish `ECOSYSTEM` ranges, which 0.4.0 did not
+order, so its findings pointed at the advisory and named no version; the next
+version orders them by PEP 440 and by Composer's normaliser, and names the fix
+for the range the installed version falls in.
 
 Two limits worth knowing. Five of the ten pairs have never produced five
 findings on a real repository, which is the smallest sample the gate scores, so

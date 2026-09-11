@@ -80,11 +80,12 @@ pub struct RuleContext<'a> {
     /// `config.languages`, which is what the repository asked the walker to
     /// read: this is what the one rule holding the context was written for.
     ///
-    /// [`run_rules`] sets it from [`Rule::languages`] before each rule's `run`,
-    /// so a rule never sees a file in a language it was not taught. A context
-    /// built by hand carries [`ALL`], because a caller that hands a rule a file
-    /// list directly has already chosen the files.
-    pub rule_languages: &'static [Language],
+    /// [`run_rules`] sets it from [`languages_of`] before each rule's `run`, so
+    /// a rule never sees a file in a language it was not taught or in one the
+    /// repository has taken it off. A context built by hand carries [`ALL`],
+    /// because a caller that hands a rule a file list directly has already
+    /// chosen the files.
+    pub rule_languages: &'a [Language],
 }
 
 impl<'a> RuleContext<'a> {
@@ -146,12 +147,14 @@ pub trait Rule: Sync {
     /// A config `[rules.<id>] enabled = true` does not override a per-language
     /// off: that key says whether the rule runs at all, and the languages a rule
     /// failed on are the engine's own measurement rather than the repository's
-    /// choice. The intended knob is a `[rules.<id>] languages = [...]` override,
-    /// which does not exist yet. The answer must be a constant of the binary,
+    /// choice. The knob for that is `[rules.<id>] languages = [...]`, which
+    /// replaces this answer outright for the languages it names (see
+    /// [`languages_of`]). The answer itself must be a constant of the binary,
     /// because it reaches the findings cache's key through
     /// [`rules_fingerprint`], which is computed once per run: an answer that
     /// varied with the repository would be a key changing under the run using
-    /// it.
+    /// it, and the override reaches that key as a config the fingerprint reads
+    /// rather than as a rule that answers differently.
     ///
     /// The default is `true` for every language a rule declares. A rule that
     /// fails the PHP and Python precision gate
@@ -207,11 +210,94 @@ fn language_allowed(rel: &str, languages: &[Language]) -> bool {
 /// Whether a rule reports on this file under its own per-language default
 /// ([`Rule::enabled_for`]). A path naming no language is kept, for the reason
 /// [`language_allowed`] keeps it.
+///
+/// Asked only when the config has named no languages for the rule. A config
+/// that has is the repository overruling exactly this answer, and
+/// [`languages_of`] has already reduced the rule to what it named.
 fn enabled_for_file(rule: &dyn Rule, rel: &str) -> bool {
     match Language::from_path(Path::new(rel)) {
         Some(language) => rule.enabled_for(language),
         None => true,
     }
+}
+
+/// The languages a rule reports on under this config.
+///
+/// Without a `[rules.<id>] languages` key it is what the rule declares, and
+/// each of those is kept or dropped by the rule's own per-language default
+/// separately, in [`enabled_for_file`]. With one it is exactly the languages
+/// the config named: the key replaces the default rather than adding to it, so
+/// a pair the engine ships off is turned on by the repository that has measured
+/// it for itself, and a rule can equally be narrowed to one language it was
+/// measured on. Whether the rule can read each named language is checked once,
+/// by [`validate_config`], so a name that reaches here is one the rule declared.
+///
+/// A locked rule has no answer but its own declaration, for the reason
+/// [`language_override`] gives.
+pub fn languages_of(rule: &dyn Rule, config: &Config) -> Vec<Language> {
+    match language_override(rule, config) {
+        Some(listed) => listed,
+        None => rule.languages().to_vec(),
+    }
+}
+
+/// The languages a config puts a rule on, or `None` when it names none and when
+/// the rule is locked.
+///
+/// A locked rule ignores the `rules` table (spec 4.3, `secret-exposed`), and
+/// `languages` is part of that table: a config that could narrow where a locked
+/// rule reports could silence it on a language, which is the disabling the lock
+/// exists to prevent. So the key is ignored here, exactly as `enabled` and
+/// `severity` are, and [`validate_config`] additionally refuses it out loud,
+/// because unlike those two it can only have been written to narrow the lock.
+/// Every reading of the override goes through this, so the runner, the
+/// fingerprint and the SARIF report cannot disagree about what a rule runs on.
+fn language_override(rule: &dyn Rule, config: &Config) -> Option<Vec<Language>> {
+    if rule.locked() {
+        return None;
+    }
+    config.rule_languages(rule.id())
+}
+
+/// Checks every `[rules.<id>] languages` list against the rule it names.
+///
+/// The names themselves are checked by `Config::load`, which is in the crate
+/// that owns the config; whether a rule can read a language is a question only
+/// the rule set answers, and the rule set is here. A rule this engine does not
+/// ship is left alone, like every other key on an unknown rule.
+///
+/// A locked rule refuses the key outright, which is stricter than the silent
+/// ignore `enabled` and `severity` get: those two describe a run that still
+/// happens, while a `languages` list on a locked rule can only have been written
+/// to narrow a lock, so saying nothing would leave its author believing it took.
+pub fn validate_config(config: &Config) -> anyhow::Result<()> {
+    for rule in all_rules() {
+        // Asked of the config rather than through `language_override`, which is
+        // the reading that ignores a locked rule's list. The point here is to
+        // find the list that reading ignores and say so.
+        let Some(listed) = config.rule_languages(rule.id()) else {
+            continue;
+        };
+        anyhow::ensure!(
+            !rule.locked(),
+            "rules.{}.languages is set, but {} is locked: a locked rule reports on every language it reads, \
+             and a finding that should not fail the build is accepted into the baseline with a reason",
+            rule.id(),
+            rule.id()
+        );
+        let declared = rule.languages();
+        for language in listed {
+            anyhow::ensure!(
+                declared.contains(&language),
+                "rules.{}.languages names {}, which {} does not read (it reads {})",
+                rule.id(),
+                language.as_str(),
+                rule.id(),
+                declared.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The files a file rule is allowed to look at: every parsed file written in one
@@ -226,11 +312,12 @@ fn enabled_for_file(rule: &dyn Rule, rel: &str) -> bool {
 /// a filtered file list: `ctx.files` is a slice of owned `ParsedFile`s, so
 /// narrowing it would mean either cloning trees or changing the field to a
 /// slice of references and reallocating it once per rule per file in the
-/// parallel pass. A `&'static [Language]` on a `Copy` context costs nothing and
-/// leaves every rule's `clean_files(ctx)` loop exactly as it was.
+/// parallel pass. A borrowed `&'a [Language]` field on the context costs one
+/// slice the runner already built for the rule it is about to call, and leaves
+/// every rule's `clean_files(ctx)` loop exactly as it was.
 pub fn clean_files<'a>(ctx: &'a RuleContext) -> impl Iterator<Item = &'a ParsedFile> {
     let files: &'a [ParsedFile] = ctx.files;
-    let languages: &'static [Language] = ctx.rule_languages;
+    let languages: &'a [Language] = ctx.rule_languages;
     files.iter().filter(move |f| !f.has_error && languages.contains(&f.language))
 }
 
@@ -343,12 +430,16 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
         let severity =
             if rule.locked() { Some(rule.default_severity()) } else { ctx.config.severity_override(rule.id()) };
         // The per-rule language filter, applied once here rather than in each
-        // rule: the rule's own context says which languages it was taught, and
-        // `clean_files` hands it those files and no others. Both entry points
-        // come through this loop, so the parallel file pass gets the same
-        // filter without knowing there is one.
-        let languages = rule.languages();
-        let ctx = &RuleContext { rule_languages: languages, ..*ctx };
+        // rule: the rule's own context says which languages it was taught and
+        // which of them this repository has left it on, and `clean_files` hands
+        // it those files and no others. Both entry points come through this
+        // loop, so the parallel file pass gets the same filter without knowing
+        // there is one.
+        let languages = languages_of(rule.as_ref(), ctx.config);
+        // The per-language default is the engine's own measurement, so it
+        // applies only where the repository has not replaced it outright.
+        let overridden = language_override(rule.as_ref(), ctx.config).is_some();
+        let ctx = &RuleContext { rule_languages: &languages, ..*ctx };
         for mut f in rule.run(ctx)? {
             // The other half of the guarantee, and the half that holds for the
             // rules `clean_files` cannot reach: a graph rule queries the index,
@@ -356,7 +447,7 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
             // was written in, so the declaration is enforced on what comes back
             // rather than on what went in. Asked before the spec 9 gate, which
             // is the half that may have to go to the index for an answer.
-            if !language_allowed(&f.file, languages) {
+            if !language_allowed(&f.file, &languages) {
                 continue;
             }
             // The per-language default, applied to findings for the same reason
@@ -365,7 +456,7 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
             // ships off for and its findings there are dropped here, which
             // costs the rule's work on those files and nothing else; no rule
             // ships off for a language today, so nothing pays it.
-            if !enabled_for_file(rule.as_ref(), &f.file) {
+            if !overridden && !enabled_for_file(rule.as_ref(), &f.file) {
                 continue;
             }
             if dropped(&f)? {
@@ -452,13 +543,19 @@ pub const RULES_REVISION: u32 = 1;
 /// declares, its [`Rule::enabled_for`] answer for every language the engine
 /// parses, its severity, its confidence and whether it ships on, plus
 /// [`RULES_REVISION`] for what none of that can see.
-pub fn rules_fingerprint() -> String {
-    fingerprint_of(&all_rules())
+///
+/// The config is read for one thing only: a `[rules.<id>] languages` override
+/// replaces the per-language answers hashed here, so without it a repository
+/// that turned a pair on would go on being served the rows written while it was
+/// off. Everything else the config says already reaches the key through
+/// `cache::config_hash`, which hashes the config itself.
+pub fn rules_fingerprint(config: &Config) -> String {
+    fingerprint_of(&all_rules(), config)
 }
 
 /// [`rules_fingerprint`] over a rule set named by the caller, so a test can hash
 /// two sets it controls and see that a difference between them reaches the hash.
-fn fingerprint_of(rules: &[Box<dyn Rule>]) -> String {
+fn fingerprint_of(rules: &[Box<dyn Rule>], config: &Config) -> String {
     let mut h = blake3::Hasher::new();
     h.update(&RULES_REVISION.to_le_bytes());
     for rule in rules {
@@ -471,9 +568,13 @@ fn fingerprint_of(rules: &[Box<dyn Rule>]) -> String {
             h.update(b"\x1f");
             h.update(lang.as_str().as_bytes());
         }
+        // The languages this rule reports on under this config: its
+        // per-language defaults, or the override that replaced them.
+        let effective = languages_of(rule.as_ref(), config);
+        let overridden = language_override(rule.as_ref(), config).is_some();
         for lang in ALL {
             h.update(b"\x1f");
-            h.update(&[u8::from(rule.enabled_for(*lang))]);
+            h.update(&[u8::from(effective.contains(lang) && (overridden || rule.enabled_for(*lang)))]);
         }
         h.update(b"\x1f");
         h.update(format!("{:?}", rule.default_severity()).as_bytes());
@@ -826,9 +927,10 @@ mod tests {
             "the PHP finding is dropped and the rest are kept"
         );
 
-        config
-            .rules
-            .insert("off-for-php".into(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+        config.rules.insert(
+            "off-for-php".into(),
+            locrin_core::config::RuleOverride { enabled: Some(true), severity: None, languages: None },
+        );
         let ctx = test_ctx(&files, &config, Some(&ix), &entries);
         let out = run_rules(&[Box::new(OffForPhp)], &ctx).unwrap();
         assert_eq!(
@@ -836,6 +938,64 @@ mod tests {
             vec!["src/a.ts", "src/y.py", "db/schema.sql"],
             "enabled = true does not override a per-language off"
         );
+    }
+
+    /// The intended escape from a per-language default. The list replaces the
+    /// default outright: a language the rule ships off for runs when the
+    /// repository names it, and a language it ships on for stops when the
+    /// repository does not.
+    #[test]
+    fn a_languages_override_replaces_the_per_language_default() {
+        let files: Vec<ParsedFile> = vec![];
+        let mut config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let over = |enabled| locrin_core::config::RuleOverride {
+            enabled,
+            severity: None,
+            languages: Some(vec!["php".to_string()]),
+        };
+
+        config.rules.insert("off-for-php".into(), over(None));
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+        let out = run_rules(&[Box::new(OffForPhp)], &ctx).unwrap();
+        assert_eq!(
+            out.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/x.php", "db/schema.sql"],
+            "PHP is on because the config named it, and the languages it did not name are off"
+        );
+
+        // `enabled = false` still wins. The key says which languages a rule
+        // reports on, not whether the rule runs at all.
+        config.rules.insert("off-for-php".into(), over(Some(false)));
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+        assert!(run_rules(&[Box::new(OffForPhp)], &ctx).unwrap().is_empty());
+    }
+
+    /// A rule reports only on the languages it was written against, so naming
+    /// one it cannot read is a mistake in the config rather than a line that
+    /// does nothing, and the message says which languages it does read.
+    #[test]
+    fn a_language_a_rule_cannot_read_is_a_config_error() {
+        let listed = |names: &[&str]| locrin_core::config::RuleOverride {
+            enabled: None,
+            severity: None,
+            languages: Some(names.iter().map(|n| n.to_string()).collect()),
+        };
+        let mut config = Config::default();
+        config.rules.insert("dead-file".into(), listed(&["python"]));
+        let err = format!("{:#}", validate_config(&config).unwrap_err());
+        assert!(err.contains("rules.dead-file.languages"), "{err}");
+        assert!(err.contains("python"), "{err}");
+        assert!(err.contains("typescript"), "the languages the rule does read are named: {err}");
+
+        // The override the README documents is accepted, and so is a config
+        // naming a rule this engine does not ship, which is what every other
+        // key already does.
+        let mut ok = Config::default();
+        ok.rules.insert("leftover-commented-code".into(), listed(&["typescript", "tsx", "javascript", "python"]));
+        ok.rules.insert("no-such-rule".into(), listed(&["python"]));
+        validate_config(&ok).unwrap();
     }
 
     #[test]
@@ -875,14 +1035,15 @@ mod tests {
 
         config.rules.insert(
             "always".into(),
-            locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) },
+            locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low), languages: None },
         );
         let ctx = test_ctx(&files, &config, Some(&ix), &entries);
         assert_eq!(run_rules(&[Box::new(Always)], &ctx).unwrap()[0].severity, Severity::Low);
 
-        config
-            .rules
-            .insert("always".into(), locrin_core::config::RuleOverride { enabled: Some(false), severity: None });
+        config.rules.insert(
+            "always".into(),
+            locrin_core::config::RuleOverride { enabled: Some(false), severity: None, languages: None },
+        );
         let ctx = test_ctx(&files, &config, Some(&ix), &entries);
         assert!(run_rules(&[Box::new(Always)], &ctx).unwrap().is_empty());
     }
@@ -927,9 +1088,10 @@ mod tests {
         let ctx = test_ctx(&files, &config, Some(&ix), &entries);
         assert!(run_rules(&[Box::new(OffByDefault)], &ctx).unwrap().is_empty(), "no config, no findings");
 
-        config
-            .rules
-            .insert("off-by-default".into(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+        config.rules.insert(
+            "off-by-default".into(),
+            locrin_core::config::RuleOverride { enabled: Some(true), severity: None, languages: None },
+        );
         let ctx = test_ctx(&files, &config, Some(&ix), &entries);
         assert_eq!(run_rules(&[Box::new(OffByDefault)], &ctx).unwrap().len(), 1, "enabled = true turns it on");
     }
@@ -1130,12 +1292,27 @@ mod tests {
     #[test]
     fn the_fingerprint_moves_with_every_declaration_it_carries() {
         fn of(rules: Vec<Box<dyn Rule>>) -> String {
-            fingerprint_of(&rules)
+            fingerprint_of(&rules, &Config::default())
         }
         let a = of(vec![Box::new(Always)]);
         assert_eq!(a, of(vec![Box::new(Always)]), "nothing moved, so the hash may not");
         assert_eq!(a.len(), 16);
-        assert_eq!(rules_fingerprint().len(), 16);
+        assert_eq!(rules_fingerprint(&Config::default()).len(), 16);
+
+        // A config that moves which languages a rule reports on moves the hash
+        // too: the cache keys on it, so without that a warm cache would go on
+        // serving the rows written before the override.
+        let mut config = Config::default();
+        config.rules.insert(
+            "off-for-php".into(),
+            locrin_core::config::RuleOverride {
+                enabled: None,
+                severity: None,
+                languages: Some(vec!["php".to_string()]),
+            },
+        );
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(OffForPhp)];
+        assert_ne!(fingerprint_of(&rules, &config), fingerprint_of(&rules, &Config::default()));
 
         assert_ne!(a, of(vec![Box::new(EveryLanguage)]), "a different id and a different language set");
         assert_ne!(a, of(vec![Box::new(OffByDefault)]), "a rule that ships off");
@@ -1232,20 +1409,54 @@ mod tests {
         let file = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
         let files = vec![file];
         let mut config = Config::default();
-        let off = locrin_core::config::RuleOverride { enabled: Some(false), severity: Some(Severity::Low) };
+        let off = locrin_core::config::RuleOverride {
+            enabled: Some(false),
+            severity: Some(Severity::Low),
+            // The third `rules` key, and the one a locked rule refuses outright:
+            // PHP is not a language `Locked` declares, and TypeScript is, so a
+            // config carrying either must fail for being locked rather than for
+            // naming a language the rule cannot read.
+            languages: Some(vec!["php".into()]),
+        };
         config.rules.insert("locked".into(), off.clone());
         config.rules.insert("always".into(), off);
         let ix = Index::open_in_memory().unwrap();
         let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
         let ctx = test_ctx(&files, &config, Some(&ix), &entries);
 
+        // Built by hand rather than loaded, so the runner is measured on a
+        // config that never went through the check below.
         let out = run_rules(&[Box::new(Locked)], &ctx).unwrap();
-        assert_eq!(out.len(), 1, "a locked rule cannot be turned off: {out:?}");
+        assert_eq!(out.len(), 1, "a locked rule cannot be turned off or narrowed: {out:?}");
         assert_eq!(out[0].severity, Severity::High, "a locked rule keeps its own severity");
+        assert_eq!(
+            languages_of(&Locked, &config),
+            Locked.languages().to_vec(),
+            "a locked rule reports on every language it reads, whatever the config names"
+        );
         assert!(rule_runs(&Locked, &config), "the cache asks the same question the runner does");
 
         assert!(run_rules(&[Box::new(Always)], &ctx).unwrap().is_empty(), "the same config turns an unlocked rule off");
         assert!(!rule_runs(&Always, &config));
+    }
+
+    /// `enabled` and `severity` on a locked rule are ignored silently, because a
+    /// config that sets them still describes the run that happens. `languages`
+    /// cannot be: it says where a rule reports, and a locked rule reports
+    /// everywhere it reads, so a config naming a list is asking for a run the
+    /// engine will not give it and is told so.
+    #[test]
+    fn a_languages_key_on_a_locked_rule_is_a_config_error() {
+        for named in [vec!["php".to_string()], vec!["typescript".to_string()]] {
+            let mut config = Config::default();
+            config.rules.insert(
+                "secret-exposed".into(),
+                locrin_core::config::RuleOverride { enabled: None, severity: None, languages: Some(named.clone()) },
+            );
+            let err = validate_config(&config).unwrap_err().to_string();
+            assert!(err.contains("rules.secret-exposed.languages"), "{err}");
+            assert!(err.contains("locked"), "the reason is the lock, not the language: {err}");
+        }
     }
 
     /// A rule that reports what its context carries, so a per-file context can be

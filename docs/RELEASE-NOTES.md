@@ -1,5 +1,30 @@
 # Locrin release notes
 
+## Unreleased
+
+PyPI and Packagist findings name a version to move to. Those registries publish
+their advisory ranges as `ECOSYSTEM`, which 0.4.0 counted rather than read, so
+every such finding pointed at the advisory and no further. The engine now orders
+`ECOSYSTEM` ranges with the registry's own rules, PEP 440 for PyPI and
+Composer's normaliser for Packagist, and names the fix for the range the
+installed version falls in. A range with a boundary the comparator cannot read
+is still reported as a range that was never compared, rather than guessed at,
+and `GIT` ranges and npm `ECOSYSTEM` ranges are unchanged. `SEMVER` ranges are
+read exactly as they were.
+
+`[rules.<id>] languages` says which languages a rule reports on. The list
+replaces the rule's per-language defaults rather than adding to them, so it is
+the escape from a per-language off that `enabled = true` deliberately is not:
+`[rules.leftover-commented-code] languages = ["typescript", "tsx",
+"javascript", "python"]` turns the Python pair on, and a shorter list narrows a
+rule to the languages you name. `enabled = false` still wins. A name that is
+not a language, a language the rule was not written against, or an empty list
+fails the run and names what to write instead. The locked `secret-exposed`
+refuses the key outright: it reports on every language it reads, and narrowing
+that is how a locked rule would be silenced. The key reaches the findings
+cache's key, so adding or changing one rebuilds the rows it affects, and a
+rule's SARIF `properties.languages` reports what it runs on in this repository.
+
 ## 0.4.0
 
 PHP and Python are read when the repository asks for them. `[languages]` in

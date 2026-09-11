@@ -1458,6 +1458,84 @@ fn enabled_languages_are_reported_on() {
     assert!(files.iter().any(|f| f.ends_with("c.py")), "{files:?}");
 }
 
+/// The findings of one rule, by file.
+fn files_of_rule(v: &serde_json::Value, rule: &str) -> Vec<String> {
+    v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == rule)
+        .map(|f| f["file"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A per-language default is the engine's own measurement over a corpus, and
+/// `[rules.<id>] languages` is how a repository that has measured it for itself
+/// overrules it. `leftover-commented-code` ships off on Python; naming Python
+/// among the rule's languages turns that one pair on, and the Python fixture
+/// holds a commented-out block for it to find.
+#[test]
+fn a_rule_language_override_turns_a_per_language_default_on() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("locrin.toml"), "[languages]\npython = true\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let commented = files_of_rule(&v, "leftover-commented-code");
+    assert!(!commented.iter().any(|f| f.ends_with("c.py")), "the pair ships off: {commented:?}");
+
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(
+        dir.path().join("locrin.toml"),
+        "[languages]\npython = true\n\n[rules.leftover-commented-code]\n\
+         languages = [\"typescript\", \"tsx\", \"javascript\", \"python\"]\n",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let commented = files_of_rule(&v, "leftover-commented-code");
+    assert!(commented.iter().any(|f| f.ends_with("c.py")), "the override turns it on: {commented:?}");
+
+    // The rule is one rule: the languages it was already on for are still on,
+    // because the list named them too.
+    let out = locrin(dir.path()).args(["check", "--json", "--offline", "src/b.php"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "PHP is not on this list, so nothing reports on it");
+}
+
+/// A language a rule cannot read is a mistake in the config rather than a line
+/// that quietly does nothing, and the run names the rule and what it does read.
+#[test]
+fn a_rule_language_override_a_rule_cannot_read_fails_the_run() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.dead-file]\nlanguages = [\"python\"]\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--offline"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("rules.dead-file.languages"), "{err}");
+    assert!(err.contains("typescript"), "the languages the rule does read are named: {err}");
+
+    // And a language the engine does not know at all fails at the config.
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.dead-file]\nlanguages = [\"pyhton\"]\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--offline"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("pyhton"), "{err}");
+}
+
+/// `secret-exposed` is locked, so the `rules` table cannot turn it off or lower
+/// its severity. `languages` is the key it refuses out loud: narrowing where a
+/// locked rule reports is narrowing the lock, and a config that asks for it is
+/// told rather than quietly ignored.
+#[test]
+fn a_languages_override_on_the_locked_rule_fails_the_run() {
+    let dir = copy_named_fixture("multilang");
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.secret-exposed]\nlanguages = [\"php\"]\n").unwrap();
+    let out = locrin(dir.path()).args(["check", "--offline"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("rules.secret-exposed.languages"), "{err}");
+    assert!(err.contains("locked"), "the rule is named and so is the reason: {err}");
+}
+
 /// `dead-file` is a graph rule: it reads the index, which holds every file the
 /// walk indexed, and its resolver knows JavaScript resolution and nothing else.
 /// It declares the JavaScript family, so on a repository with PHP and Python
