@@ -116,6 +116,18 @@ follow-up, with the note that two of the three PHP findings this rule produced
 on 1773 files are this shape, so at scale it is the class most likely to decide
 the pair.
 
+**Made in round two** (commit "rules: return-mode print_r and var_export are
+not debug sinks"): `is_php_sink` now asks `php_return_mode`, which reads the
+call's `arguments` node and answers true when the second positional argument,
+or an argument named `return`, is the literal `true`. `print_r($x, true)`,
+`var_export($x, true)` and `print_r($x, return: true)` are no longer findings;
+`print_r($x)`, `print_r($x, false)` and `print_r($x, $flag)` still are, because
+the last may print. The two TestCase.php findings above would not fire today.
+Fixture lines for both forms sit in `tests/fixtures/leftover_debug/php`. No
+migrations exemption for `leftover-commented-code` was made: the heuristic
+already requires code shape, and the round-one migration block is scored as
+the heuristic finds it.
+
 The one true finding is worth a line on its own: a `dd()` call in the current
 release of a widely deployed application, guarded by a condition that cannot
 match its own arguments. That is the rule's reason to exist, found on the first

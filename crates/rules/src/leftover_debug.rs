@@ -10,7 +10,11 @@
 //!
 //! PHP: the dump family (`var_dump`, `print_r`, `var_export`, `dd`, `dump`,
 //! `debug_zval_dump`) and `xdebug_break()`. `error_log`, `echo` and `printf`
-//! are how PHP writes output on purpose and are never flagged.
+//! are how PHP writes output on purpose and are never flagged. `print_r` and
+//! `var_export` called with a literal `true` as their second argument (or as
+//! the named `return` argument) print nothing: they return the rendering as a
+//! string, which is how a project builds a log line or a test message, so
+//! that form is not a sink either.
 //!
 //! Python: the debugger entry points (`breakpoint()`, `pdb.set_trace()` and the
 //! `ipdb` and `pudb` spellings of it) and the imports that reach them. `print(`
@@ -103,10 +107,42 @@ fn php_called_name<'a>(node: Node, src: &'a str) -> Option<&'a str> {
     }
 }
 
+/// The PHP sinks that grow a `return` flag: with it set to `true` they print
+/// nothing and hand the rendering back as a string.
+const PHP_RETURN_MODE: &[&str] = &["print_r", "var_export"];
+
+/// Whether a PHP call passes a literal `true` as its `return` flag, either as
+/// the second positional argument (`print_r($x, true)`) or by name
+/// (`print_r($x, return: true)`). Only the literal counts: `print_r($x, $flag)`
+/// may print and stays a sink.
+fn php_return_mode(node: Node, src: &str) -> bool {
+    let Some(args) = node.child_by_field_name("arguments") else { return false };
+    let mut cursor = args.walk();
+    let is_true =
+        |n: Node| n.kind() == "boolean" && n.utf8_text(src.as_bytes()).is_ok_and(|t| t.eq_ignore_ascii_case("true"));
+    let hit = args.named_children(&mut cursor).filter(|n| n.kind() == "argument").enumerate().any(|(i, arg)| {
+        let name = arg.child_by_field_name("name").and_then(|n| n.utf8_text(src.as_bytes()).ok());
+        let positional_return = name.is_none() && i == 1;
+        let named_return = name == Some("return");
+        if !(positional_return || named_return) {
+            return false;
+        }
+        let mut inner = arg.walk();
+        let literal_true = arg.named_children(&mut inner).any(is_true);
+        literal_true
+    });
+    hit
+}
+
 /// PHP function names are case-insensitive, so `VAR_DUMP($x)` is the same call
 /// as `var_dump($x)` and the same leftover.
 fn is_php_sink(node: Node, src: &str) -> bool {
-    php_called_name(node, src).is_some_and(|name| PHP_SINKS.iter().any(|s| name.eq_ignore_ascii_case(s)))
+    let Some(name) = php_called_name(node, src) else { return false };
+    if !PHP_SINKS.iter().any(|s| name.eq_ignore_ascii_case(s)) {
+        return false;
+    }
+    let returns = PHP_RETURN_MODE.iter().any(|s| name.eq_ignore_ascii_case(s));
+    !(returns && php_return_mode(node, src))
 }
 
 /// A Python call to a debugger: the `breakpoint()` built-in, or `set_trace()`

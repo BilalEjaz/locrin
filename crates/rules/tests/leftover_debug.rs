@@ -127,6 +127,8 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
 /// the called name rather than by a `console` member expression. Every sink the
 /// rule knows sits on its own line in the fixture, and line 11 is the spelling a
 /// file inside a namespace uses to reach the global function: `\var_dump($x)`.
+/// Lines 12 and 13 are `print_r` and `var_export` whose second argument is not
+/// the literal `true`, so they still print and are still sinks.
 #[test]
 fn flags_php_debug_sinks() {
     let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
@@ -142,6 +144,8 @@ fn flags_php_debug_sinks() {
             ("a.php".to_string(), 9),
             ("a.php".to_string(), 10),
             ("a.php".to_string(), 11),
+            ("a.php".to_string(), 12),
+            ("a.php".to_string(), 13),
         ],
         "{out:?}"
     );
@@ -153,6 +157,9 @@ fn flags_php_debug_sinks() {
 /// `->debug()` call is a logger, not a leftover. `Acme\dump()` is a function in
 /// somebody's namespace that happens to share a name with the sink: one leading
 /// backslash and no other is what makes a qualified name the global function.
+/// `print_r($x, true)`, `var_export($x, true)` and the named
+/// `print_r($x, return: true)` return a string instead of printing and are the
+/// legitimate way to render a value into a message.
 #[test]
 fn ignores_php_logging_and_output() {
     let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
