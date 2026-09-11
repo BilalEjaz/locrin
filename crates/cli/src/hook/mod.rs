@@ -72,8 +72,43 @@ pub fn read_input() -> Option<Input> {
     }
 }
 
-/// How long a hook may take before it gives up and lets the edit through.
+/// How long a hook may take before it gives up and lets the edit through,
+/// unless [`HOOK_BUDGET_ENV`] says otherwise.
 pub const HOOK_BUDGET_MS: u64 = 2000;
+
+/// The environment variable that overrides the budget for one run.
+pub const HOOK_BUDGET_ENV: &str = "LOCRIN_HOOK_BUDGET_MS";
+
+/// The budget this run works to.
+///
+/// The budget is a person's patience with their editor rather than a property
+/// of the engine, and that number is not the same on a laptop and on a CI box
+/// three times slower, so it is read from the environment on every hook.
+pub fn hook_budget_ms() -> u64 {
+    budget_from(std::env::var(HOOK_BUDGET_ENV).ok().as_deref())
+}
+
+/// The budget a variable's value asks for, or the default.
+///
+/// Only a positive number is an override. Unset is someone who never asked for
+/// one, empty and unparsable are a typo in a settings file, and zero is a budget
+/// no check can finish inside, which would turn every hook into a timeout and
+/// leave the repository unchecked without anyone meaning it. None of those is
+/// worth failing a hook over either, so each one quietly means the default.
+fn budget_from(value: Option<&str>) -> u64 {
+    value.and_then(|v| v.trim().parse::<u64>().ok()).filter(|&ms| ms > 0).unwrap_or(HOOK_BUDGET_MS)
+}
+
+/// The budget as a message says it to a person: whole seconds for the ordinary
+/// two-second one, milliseconds below that, because a sub-second budget rounded
+/// to seconds reads as no time at all.
+fn budget_text(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else {
+        format!("{} s", ms / 1000)
+    }
+}
 
 /// What became of a watchdog worker.
 ///
@@ -92,7 +127,7 @@ pub enum Outcome<T> {
     Crashed,
 }
 
-/// Runs `f` on a worker thread and waits at most `HOOK_BUDGET_MS`. A worker
+/// Runs `f` on a worker thread and waits at most [`hook_budget_ms`]. A worker
 /// that outlives the budget is abandoned by the process exit that follows.
 pub fn watchdog<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Outcome<T> {
     let (tx, rx) = sync_channel(1);
@@ -102,7 +137,7 @@ pub fn watchdog<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send 
         // is for.
         let _ = tx.send(f());
     });
-    match rx.recv_timeout(Duration::from_millis(HOOK_BUDGET_MS)) {
+    match rx.recv_timeout(Duration::from_millis(hook_budget_ms())) {
         Ok(r) => Outcome::Done(r),
         Err(RecvTimeoutError::Timeout) => Outcome::Timeout,
         // The sender is dropped without ever sending only when the worker
@@ -196,8 +231,8 @@ pub fn post_edit(root: &Path, input: Input) -> i32 {
     match watchdog(move || run::check(&opts)) {
         Outcome::Timeout => emit(Some(json!({
             "systemMessage": format!(
-                "locrin: check of {rel} did not finish in {} s; passed without checking it",
-                HOOK_BUDGET_MS / 1000
+                "locrin: check of {rel} did not finish in {}; passed without checking it",
+                budget_text(hook_budget_ms())
             )
         }))),
         // Named as the engine's own fault, not the machine's: the person
@@ -265,8 +300,8 @@ pub fn stop(root: &Path, input: Input) -> i32 {
     match watchdog(move || run::check(&opts)) {
         Outcome::Timeout => emit(Some(json!({
             "systemMessage": format!(
-                "locrin: working-tree check did not finish in {} s; not blocking the stop",
-                HOOK_BUDGET_MS / 1000
+                "locrin: working-tree check did not finish in {}; not blocking the stop",
+                budget_text(hook_budget_ms())
             )
         }))),
         Outcome::Crashed => emit(Some(json!({
@@ -442,6 +477,33 @@ mod tests {
         // binary installs a silent panic hook, the test harness does not.
         let crashed = watchdog(|| -> anyhow::Result<i32> { panic!("engine bug") });
         assert!(matches!(crashed, Outcome::Crashed));
+    }
+
+    /// Only a positive number is a budget. An unset or empty variable is
+    /// someone who never set one, and a zero is a budget no check can finish
+    /// inside, which would turn every hook into a timeout; both fall back to
+    /// the default rather than being obeyed.
+    #[test]
+    fn only_a_positive_number_overrides_the_budget() {
+        assert_eq!(budget_from(Some("500")), 500);
+        assert_eq!(budget_from(Some(" 10000 ")), 10_000);
+        assert_eq!(budget_from(None), HOOK_BUDGET_MS);
+        assert_eq!(budget_from(Some("")), HOOK_BUDGET_MS);
+        assert_eq!(budget_from(Some("soon")), HOOK_BUDGET_MS);
+        assert_eq!(budget_from(Some("-1")), HOOK_BUDGET_MS);
+        assert_eq!(budget_from(Some("2.5")), HOOK_BUDGET_MS);
+        assert_eq!(budget_from(Some("0")), HOOK_BUDGET_MS);
+    }
+
+    /// A sub-second budget rendered as whole seconds reads as no time at all,
+    /// and the message it lands in is the one telling a person why their edit
+    /// went unchecked.
+    #[test]
+    fn the_budget_reads_in_the_unit_that_shows_it() {
+        assert_eq!(budget_text(HOOK_BUDGET_MS), "2 s");
+        assert_eq!(budget_text(1), "1 ms");
+        assert_eq!(budget_text(999), "999 ms");
+        assert_eq!(budget_text(10_000), "10 s");
     }
 
     #[test]

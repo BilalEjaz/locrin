@@ -128,6 +128,13 @@ fn post_edit_hook_under_300ms() {
     // where Claude Code runs a hook from too.
     let t = Instant::now();
     let mut child = locrin(cache.path())
+        // The default budget is 2 s and the target is 300 ms, so on a loaded
+        // machine the watchdog can fire first and the run becomes a timeout
+        // that the assertion below rejects as no measurement at all. A generous
+        // budget takes machine load out of the outcome without weakening the
+        // target: a check slower than 300 ms still fails, it just fails as a
+        // slow measurement rather than as a missing one.
+        .env("LOCRIN_HOOK_BUDGET_MS", "10000")
         .args(["hook", "post-edit"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -89,6 +89,11 @@ enum Cmd {
         cmd: BaselineCmd,
     },
     /// Run as an agent hook, reading the event as JSON on stdin
+    ///
+    /// The two agent hooks give up after LOCRIN_HOOK_BUDGET_MS milliseconds
+    /// (2000 by default) and let the work through unchecked, so that an editor
+    /// never waits on the engine; raise it on a CI box slow enough that a real
+    /// check does not fit.
     Hook {
         #[command(subcommand)]
         cmd: HookCmd,
