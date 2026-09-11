@@ -370,7 +370,7 @@ may not.
 | Rule | Category | Severity | Confidence | On by default |
 | --- | --- | --- | --- | --- |
 | `leftover-debug` | erosion | high | high | yes |
-| `leftover-commented-code` | erosion | medium | medium | yes |
+| `leftover-commented-code` | erosion | medium | medium | yes; off on Python |
 | `leftover-agent-marker` | erosion | low | medium | yes |
 | `unused-import` | erosion | low | high | yes |
 | `unreachable` | erosion | medium | high | yes |
@@ -400,6 +400,10 @@ gate. Turn any of them on with `rules.<id>.enabled = true`.
 `boundary-violation` is on but silent until you write a `[[boundaries]]` entry,
 and `express-route-without-auth` is on but silent until you name an auth
 middleware.
+
+One rule is on everywhere but one language, which the table says in its column:
+`leftover-commented-code` is off on Python. See "Per-language defaults" below
+for that measurement and for what overrides it.
 
 ## Languages
 

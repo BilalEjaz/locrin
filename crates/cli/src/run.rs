@@ -52,10 +52,16 @@ struct Run {
     previous: Previous,
 }
 
-/// The two things that decide whether a cached row may be served: the hash of
-/// the config the rules run under, and which file rules are on. A row written
-/// under a different config, or under a rule set that did not include one of the
-/// rules this run wants, is not this run's answer.
+/// The two things that decide whether a cached row may be served: the hash the
+/// rules ran under, and which file rules are on.
+///
+/// `config_hash` is the whole of the first: the crate version, the rule set's
+/// fingerprint ([`locrin_rules::rules_fingerprint`], which carries every rule's
+/// id, languages, per-language defaults, severity, confidence, whether it ships
+/// on, and `RULES_REVISION` for a change in a rule's body) and the config. So a
+/// row written under a different config, under a different build of the rules,
+/// or under a rule set that did not include one of the rules this run wants, is
+/// not this run's answer.
 struct CacheKey<'a> {
     config_hash: &'a str,
     enabled: &'a [&'static str],
@@ -698,7 +704,11 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
 
     let rules = file_rules();
     let enabled: Vec<&'static str> = rules.iter().filter(|r| rule_runs(r.as_ref(), &config)).map(|r| r.id()).collect();
-    let config_hash = cache::config_hash(&config);
+    // The rule set is the other half of the key, and it is threaded from here
+    // because the CLI is the one crate that has both: `locrin-core` owns the
+    // cache and `locrin-rules` depends on `locrin-core`, so the hash cannot ask
+    // the rules for their fingerprint itself.
+    let config_hash = cache::config_hash(&config, &locrin_rules::rules_fingerprint());
     let key = CacheKey { config_hash: &config_hash, enabled: &enabled };
 
     // A whole-repository check has to answer for every file, so each candidate is
@@ -1145,6 +1155,44 @@ mod tests {
 
         assert_eq!(changed_after_accept(true), 0, "the agent's accept had already indexed the edit");
         assert_eq!(changed_after_accept(false), 1, "the command line's accept must leave the edit for the check");
+    }
+
+    /// The cache key has to carry the rule set, not only the crate version and
+    /// the config. Turning a rule off for a language, moving a severity, or
+    /// correcting a rule's body touches no source byte and no config line, so a
+    /// key blind to the rules would answer an unedited repository from the rows
+    /// the old rules wrote until somebody released or deleted the cache
+    /// directory. A locrin that is wrong about its own fix is the one bug this
+    /// engine cannot afford.
+    ///
+    /// The fingerprint is simulated rather than bumped: `RULES_REVISION` is a
+    /// constant of the binary, so the seam a test can move is the value that
+    /// reaches `config_hash`, which is exactly what a new build would hand it.
+    #[test]
+    fn a_change_to_the_rule_set_misses_the_findings_cache() {
+        let config = Config::default();
+        let fingerprint = locrin_rules::rules_fingerprint();
+        let before = cache::config_hash(&config, &fingerprint);
+        let rule = "leftover-agent-marker";
+        let enabled = [rule];
+
+        let mut ix = Index::open_in_memory().unwrap();
+        cache::put(&mut ix, "src/a.ts", "h1", &before, rule, &[]).unwrap();
+        let cached = cache::load_all(&ix).unwrap();
+
+        let same = CacheKey { config_hash: &before, enabled: &enabled };
+        assert!(
+            serve(&cached, "src/a.ts", "h1", &same).is_some(),
+            "the row this rule set wrote is this rule set's answer"
+        );
+
+        let after = cache::config_hash(&config, &format!("{fingerprint}-after-a-rule-changed"));
+        assert_ne!(before, after, "the fingerprint has to reach the key or nothing below measures anything");
+        let moved = CacheKey { config_hash: &after, enabled: &enabled };
+        assert!(
+            serve(&cached, "src/a.ts", "h1", &moved).is_none(),
+            "a run under a changed rule set may not be answered from the old rows"
+        );
     }
 
     /// `status` answers from the index, so the verdict a check produced has to

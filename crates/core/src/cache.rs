@@ -1,6 +1,7 @@
-//! The per-file findings cache (spec 3.2). Keyed by file content and by the
-//! config, because a severity override or an exclude changes what a rule
-//! produces without changing a single source byte.
+//! The per-file findings cache (spec 3.2). Keyed by file content, by the config
+//! and by the rule set, because a severity override or an exclude changes what a
+//! rule produces without changing a single source byte, and so does a change to
+//! the rules themselves.
 
 use std::collections::HashMap;
 
@@ -10,9 +11,24 @@ use crate::config::Config;
 use crate::finding::Finding;
 use crate::index::Index;
 
-pub fn config_hash(config: &Config) -> String {
+/// The half of a cached row's key that is not the file's content: the crate
+/// version, the rule set's fingerprint, and the config.
+///
+/// The version alone was not enough. Within one version a rule can be turned
+/// off for a language, have its severity moved, or have its body corrected, and
+/// none of that touches a source byte or a config line: a warm cache would go
+/// on serving the rows the old rules wrote until somebody released or deleted
+/// the cache directory.
+///
+/// `rules_fingerprint` is passed in rather than computed here because the rules
+/// crate depends on this one, so asking it a question from here would be a
+/// cycle. The CLI has both and threads `locrin_rules::rules_fingerprint()`
+/// through; a caller with no rule set of its own passes `""`.
+pub fn config_hash(config: &Config, rules_fingerprint: &str) -> String {
     let mut h = blake3::Hasher::new();
     h.update(env!("CARGO_PKG_VERSION").as_bytes());
+    h.update(b"\x1f");
+    h.update(rules_fingerprint.as_bytes());
     h.update(b"\x1f");
     h.update(toml::to_string(config).unwrap_or_default().as_bytes());
     h.finalize().to_hex()[..16].to_string()
@@ -102,12 +118,23 @@ mod tests {
 
     #[test]
     fn config_hash_moves_with_the_config() {
-        let a = config_hash(&Config::default());
+        let a = config_hash(&Config::default(), "rules-v1");
         let mut c = Config::default();
         c.excludes.push("gen/**".into());
-        assert_ne!(a, config_hash(&c));
-        assert_eq!(a, config_hash(&Config::default()));
+        assert_ne!(a, config_hash(&c, "rules-v1"));
+        assert_eq!(a, config_hash(&Config::default(), "rules-v1"));
         assert_eq!(a.len(), 16);
+    }
+
+    /// The half the config cannot say. A rule turned off for a language, a
+    /// severity moved, a body corrected: none of it touches a source byte or a
+    /// config line, so without the fingerprint in the key a warm cache would go
+    /// on serving what the old rules found.
+    #[test]
+    fn config_hash_moves_with_the_rules_fingerprint() {
+        let a = config_hash(&Config::default(), "rules-v1");
+        assert_ne!(a, config_hash(&Config::default(), "rules-v2"));
+        assert_ne!(a, config_hash(&Config::default(), ""));
     }
 
     /// The override that costs the most to get wrong: a severity the operator
@@ -117,13 +144,13 @@ mod tests {
     /// pins that the hash is built from a serialisation that survives it.
     #[test]
     fn config_hash_moves_with_a_rule_override() {
-        let a = config_hash(&Config::default());
+        let a = config_hash(&Config::default(), "rules-v1");
         let mut c = Config::default();
         c.rules.insert("leftover-debug".into(), RuleOverride { enabled: None, severity: Some(Severity::Low) });
-        assert_ne!(a, config_hash(&c));
+        assert_ne!(a, config_hash(&c, "rules-v1"));
         let mut off = Config::default();
         off.rules.insert("leftover-debug".into(), RuleOverride { enabled: Some(false), severity: None });
-        assert_ne!(config_hash(&c), config_hash(&off));
+        assert_ne!(config_hash(&c, "rules-v1"), config_hash(&off, "rules-v1"));
     }
 
     #[test]

@@ -148,7 +148,10 @@ pub trait Rule: Sync {
     /// failed on are the engine's own measurement rather than the repository's
     /// choice. The intended knob is a `[rules.<id>] languages = [...]` override,
     /// which does not exist yet. The answer must be a constant of the binary,
-    /// because the findings cache keys on which rules run and not on this.
+    /// because it reaches the findings cache's key through
+    /// [`rules_fingerprint`], which is computed once per run: an answer that
+    /// varied with the repository would be a key changing under the run using
+    /// it.
     ///
     /// The default is `true` for every language a rule declares. A rule that
     /// fails the PHP and Python precision gate
@@ -178,7 +181,9 @@ pub trait Rule: Sync {
 /// This is the only place the question is answered. The CLI's findings cache
 /// keys on the set of rules a run produces findings for, so it has to ask
 /// exactly what [`run_rules`] asks or a cached file would be served without a
-/// locked rule's findings.
+/// locked rule's findings. What the config cannot say is covered by
+/// [`rules_fingerprint`], which is the other half of that key: the rule set's
+/// own declarations, which no config mentions.
 pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
     rule.locked() || config.rule_enabled_or(rule.id(), rule.enabled_by_default())
 }
@@ -421,6 +426,63 @@ pub fn run_file_rules(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(per_file.into_iter().flatten().collect())
+}
+
+/// The revision of the rule set's *logic*, which [`rules_fingerprint`] cannot
+/// read for itself.
+///
+/// The fingerprint hashes what every rule declares about itself. It cannot hash
+/// the body of `run`, so a precision fix inside one rule (a pattern narrowed, a
+/// false positive removed) leaves every declaration exactly where it was and a
+/// warm findings cache would keep serving the rows the old rule wrote. Bump this
+/// when a rule's logic changes without a version bump; a release bumps the crate
+/// version, which the cache key already carries.
+pub const RULES_REVISION: u32 = 1;
+
+/// A hash of everything the rule set declares about itself, for the findings
+/// cache's key.
+///
+/// The key used to be the file's content hash plus the crate version and the
+/// config. Inside one version that left a whole class of change invisible: a
+/// rule turned off for a language, a severity or confidence moved, a rule added
+/// or removed, a precision fix in a rule's body. A repository nobody had edited
+/// would go on being answered from the rows the old rules wrote, and the only
+/// way out was a release or a deleted cache directory. This is the missing half
+/// of the key: every rule in [`all_rules`] order, its id, the languages it
+/// declares, its [`Rule::enabled_for`] answer for every language the engine
+/// parses, its severity, its confidence and whether it ships on, plus
+/// [`RULES_REVISION`] for what none of that can see.
+pub fn rules_fingerprint() -> String {
+    fingerprint_of(&all_rules())
+}
+
+/// [`rules_fingerprint`] over a rule set named by the caller, so a test can hash
+/// two sets it controls and see that a difference between them reaches the hash.
+fn fingerprint_of(rules: &[Box<dyn Rule>]) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(&RULES_REVISION.to_le_bytes());
+    for rule in rules {
+        // A record separator between rules and a unit separator between the
+        // fields of one, so no two different rule sets can flatten to the same
+        // byte string by running their fields together.
+        h.update(b"\x1e");
+        h.update(rule.id().as_bytes());
+        for lang in rule.languages() {
+            h.update(b"\x1f");
+            h.update(lang.as_str().as_bytes());
+        }
+        for lang in ALL {
+            h.update(b"\x1f");
+            h.update(&[u8::from(rule.enabled_for(*lang))]);
+        }
+        h.update(b"\x1f");
+        h.update(format!("{:?}", rule.default_severity()).as_bytes());
+        h.update(b"\x1f");
+        h.update(format!("{:?}", rule.confidence()).as_bytes());
+        h.update(b"\x1f");
+        h.update(&[u8::from(rule.enabled_by_default())]);
+    }
+    h.finalize().to_hex()[..16].to_string()
 }
 
 /// The registry: every rule the engine ships, in the order they are declared.
@@ -1025,6 +1087,65 @@ mod tests {
         assert!(ctx.index().is_err(), "no index means no answer");
         let err = run_rules(&graph_rules(), &ctx).unwrap_err();
         assert!(err.to_string().contains("graph rule run without an index"), "unhelpful message: {err}");
+    }
+
+    /// Two rules alike in everything [`fingerprint_of`] reads except the
+    /// per-language answer this one is constructed with, so a difference in
+    /// their hashes can only be that answer.
+    struct PerLanguage(bool);
+    impl Rule for PerLanguage {
+        fn id(&self) -> &'static str {
+            "per-language"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::File
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            ALL
+        }
+        fn enabled_for(&self, lang: Language) -> bool {
+            self.0 || lang != Language::Php
+        }
+        fn run(&self, _ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            Ok(vec![])
+        }
+    }
+
+    /// The findings cache keys on the fingerprint, so what it notices is the
+    /// contract: every declaration a rule makes, and the shape of the set. What
+    /// it cannot notice is a rule's body, which is what [`RULES_REVISION`] is
+    /// for.
+    #[test]
+    fn the_fingerprint_moves_with_every_declaration_it_carries() {
+        fn of(rules: Vec<Box<dyn Rule>>) -> String {
+            fingerprint_of(&rules)
+        }
+        let a = of(vec![Box::new(Always)]);
+        assert_eq!(a, of(vec![Box::new(Always)]), "nothing moved, so the hash may not");
+        assert_eq!(a.len(), 16);
+        assert_eq!(rules_fingerprint().len(), 16);
+
+        assert_ne!(a, of(vec![Box::new(EveryLanguage)]), "a different id and a different language set");
+        assert_ne!(a, of(vec![Box::new(OffByDefault)]), "a rule that ships off");
+        assert_ne!(a, of(vec![Box::new(Locked)]), "a different severity and confidence");
+        assert_ne!(a, of(vec![Box::new(Always), Box::new(EveryLanguage)]), "a rule added to the set");
+        assert_ne!(
+            of(vec![Box::new(PerLanguage(true))]),
+            of(vec![Box::new(PerLanguage(false))]),
+            "the per-language default is the one declaration no config can say"
+        );
     }
 
     #[test]

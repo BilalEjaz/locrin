@@ -774,8 +774,11 @@ is 0 as before. The one left is a second class, narrower than the first: a
 suite keyword that is also an English preposition, opening a prose line that
 ends in a colon. `with` is the only one of the ten suite keywords that does
 this naturally (`for instance:` was the other candidate and is case-sensitive
-prose here). A false positive of one finding is still a fail, and the brief
-for this round was to keep the pair off if any remained, so it stays off:
+prose here). A false positive of one finding is still a fail, so it stays
+off. That last step is a round-three controller ruling and not the letter of
+the brief: the brief set the gate and asked for the re-measure, it did not
+say what to do with a pair that came back with one false positive left, and
+the ruling here is that one is still one.
 `LeftoverCommented::enabled_for(Python)` is `false` with a doc comment
 citing this section, `python_is_off_by_default_after_the_precision_gate`
 still pins it, and the vocabulary tests run the rule directly. The fix is
