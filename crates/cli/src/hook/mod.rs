@@ -203,8 +203,12 @@ fn target(root: &Path, file_path: &str) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(file_path);
-    let languages = Config::load(root).unwrap_or_default().languages;
-    if !Language::from_path(&path)?.enabled(&languages) {
+    // The language comes first so that an edit to a file this engine does not
+    // parse at all, which is most of what an agent writes, costs nothing but a
+    // look at the extension: the config is only read once there is a language
+    // whose flag could turn it away.
+    let language = Language::from_path(&path)?;
+    if !language.enabled(&Config::load(root).unwrap_or_default().languages) {
         return None;
     }
     // Canonicalising is both the existence check and the way the containment

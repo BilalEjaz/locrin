@@ -93,17 +93,17 @@ pub fn ctx_for<'a>(
 /// Runs one rule over a fixture directory with nothing known about the previous
 /// version of it, which is what almost every rule's tests want.
 pub fn run_on(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
-    run_on_langs(rule, root, config)
+    run_on_with(rule, root, config, &Previous::default())
 }
 
-/// The same, named for the call site whose fixture is PHP or Python, where the
-/// `[languages]` line in the config is the thing that makes the walk see the
-/// fixture at all. Every entry point below takes the walk's languages from
-/// `config.languages`, so `run_on` is this function; the name is here so a test
-/// reading a language-gated fixture says out loud that its config must enable
-/// the language.
+/// `run_on` under a second name, for the call site whose fixture is PHP or
+/// Python. Every entry point here takes the walk's languages from
+/// `config.languages`, so there is nothing for a language-aware variant to do
+/// differently; the name is the point, because it makes a test reading a
+/// language-gated fixture say out loud that its config must enable the
+/// language.
 pub fn run_on_langs(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
-    run_on_with(rule, root, config, &Previous::default())
+    run_on(rule, root, config)
 }
 
 /// The same, for the rules whose answer is a change: the caller says what the

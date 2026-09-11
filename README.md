@@ -491,7 +491,7 @@ still reported. Neither registry's findings name a fixed version yet: both
 publish `ECOSYSTEM` ranges the engine does not order, so the finding points at
 the advisory instead.
 
-Two limits worth knowing. Four of the ten pairs have never produced five
+Two limits worth knowing. Five of the ten pairs have never produced five
 findings on a real repository, which is the smallest sample the gate scores, so
 they ship on fixture evidence and a probe that the path works rather than on a
 measured rate. And the locked `secret-exposed` reported a private key in a

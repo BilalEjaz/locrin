@@ -5,7 +5,17 @@
 PHP and Python are read when the repository asks for them. `[languages]` in
 `locrin.toml` turns each one on (`php = true`, `python = true`); the JavaScript
 family is always on and has no flag. A language that is off is not walked, not
-parsed and not indexed, so nothing changes until a repository opts in.
+parsed and not indexed until the repository opts in.
+
+What changes without opting in: Composer, Poetry and pinned `requirements.txt`
+lockfiles are read and queried whenever present, whatever `[languages]` says,
+since a `requirements.txt` in a TypeScript repository is still an install, and
+an offline run warns once per lockfile with no snapshot. `leftover-agent-marker`
+no longer counts marker words inside paths and file names in any language, so a
+few advisory findings disappear. Advisories that alias each other collapse to
+one finding under the GHSA id, so a baseline entry for the PYSEC copy may stop
+matching. And `leftover-commented-code` ships off on Python with no config
+override yet; a `[rules.<id>].languages` override is planned.
 
 Five rules run on those files: leftover-agent-marker, leftover-debug,
 leftover-commented-code, secret-exposed and vulnerable-dependency. Every other
