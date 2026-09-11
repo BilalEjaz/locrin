@@ -1,0 +1,17 @@
+# Copy to fasting-app/.github/workflows/locrin.yml. Requires the locrin wiring
+# (locrin.toml, locrin-baseline.json) committed. Needs fetch-depth 0 for --base.
+name: locrin
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+jobs:
+  locrin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: BilalEjaz/locrin/action@v0.3.0
