@@ -288,6 +288,13 @@ fn parse_composer(text: &str) -> Vec<Package> {
             if name.is_empty() || version.is_empty() {
                 continue;
             }
+            // `dev-main` and `1.x-dev` are branch aliases: whatever the branch
+            // pointed at on the day the install ran, which is not a release and
+            // not a version osv.dev has an answer about. Asking costs a slot in
+            // the batch and returns nothing, so the entry is left out.
+            if version.starts_with("dev-") || version.ends_with("-dev") {
+                continue;
+            }
             out.push(Package {
                 name: name.to_string(),
                 version: version.to_string(),
@@ -583,6 +590,26 @@ mod tests {
             packages,
             vec![php("monolog/monolog", "2.0.0", 8), php("phpunit/phpunit", "9.5.0", 37), php("psr/log", "1.1.3", 27),],
             "packages-dev is installed too, and `v1.1.3` is the release `1.1.3`"
+        );
+    }
+
+    /// A branch alias is a moving target rather than a release, and osv.dev has
+    /// no answer about one. Querying it costs a slot in the batch and returns
+    /// nothing, so the entry is left out of the list entirely.
+    #[test]
+    fn composer_skips_a_branch_alias_rather_than_asking_about_it() {
+        let packages = parse_composer(
+            r#"{"packages": [
+                 {"name": "a/one", "version": "dev-main"},
+                 {"name": "b/two", "version": "1.x-dev"},
+                 {"name": "c/three", "version": "v2.9.0-dev"},
+                 {"name": "d/four", "version": "v1.2.3"}
+               ]}"#,
+        );
+        assert_eq!(
+            packages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["d/four"],
+            "only the tagged release is a version the advisory database can answer about"
         );
     }
 

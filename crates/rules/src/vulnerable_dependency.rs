@@ -39,8 +39,11 @@
 //!
 //! Confidence says how much of the advisory the run actually has. A High-rated
 //! advisory that names the version to upgrade to is a complete instruction and
-//! reads High; anything else, including a rating this engine had to guess at
-//! because the detail document was unavailable, reads Medium.
+//! reads High, and so does one whose ranges the engine does not order: the
+//! batch endpoint matched the installed version server side, so the finding is
+//! not in doubt and only the upgrade sentence is thinner. Anything else,
+//! including a rating this engine had to guess at because the detail document
+//! was unavailable, reads Medium.
 
 use locrin_core::finding::{Category, Confidence, Finding, Severity, Span};
 use locrin_core::{lockfile, osv};
@@ -144,11 +147,13 @@ impl VulnerableDependency {
         for hit in outcome.hits {
             let (package, advisory) = (hit.package, hit.advisory);
             let severity = severity_of(&advisory.severity);
-            let confidence = if advisory.fixed.is_some() && severity == Severity::High {
-                Confidence::High
-            } else {
-                Confidence::Medium
-            };
+            // An advisory whose ranges this engine does not order is not a
+            // weaker match: the batch endpoint matched this exact version
+            // server side, and all that is missing is the sentence naming the
+            // upgrade. Only a rating this engine had to guess at, or a
+            // document that does not cover the version at all, lowers it.
+            let complete = matches!(advisory.fix, osv::Fix::Named(_) | osv::Fix::UnreadableRanges);
+            let confidence = if complete && severity == Severity::High { Confidence::High } else { Confidence::Medium };
             // Columns are zero: the finding is about the whole entry, and a
             // lockfile entry's name and version sit on different lines in two of
             // the three formats.
@@ -169,21 +174,28 @@ impl VulnerableDependency {
                 advisory.severity,
                 short(&advisory.summary)
             );
-            // Three sentences, because the reader has to act on three different
+            // Four sentences, because the reader has to act on four different
             // situations. There is a version to move to; or the advisory covers
             // this version and has published no fix for the branch it is on; or
             // the advisory's own ranges do not cover this version at all, which
             // is the batch endpoint and the detail document disagreeing and is
-            // not the same claim as "no fix exists".
-            let fix = match &advisory.fixed {
-                Some(fixed) => format!("Upgrade {} to {fixed}", package.name),
-                None if advisory.outside_every_range => {
-                    format!(
-                        "No fixed version applies to this version; review {} and pin or replace the package",
-                        advisory.id
-                    )
+            // not the same claim as "no fix exists"; or the advisory's ranges
+            // are in a form the engine does not order, so it never read a fix
+            // and must not say that none applies.
+            let fix = match &advisory.fix {
+                osv::Fix::Named(fixed) => format!("Upgrade {} to {fixed}", package.name),
+                osv::Fix::UnreadableRanges => format!(
+                    "Fixed version not read from this advisory (its ranges are not in a form this engine orders); \
+                     review {} for the version to move to",
+                    advisory.id
+                ),
+                osv::Fix::OutsideAllSemver => format!(
+                    "No fixed version applies to this version; review {} and pin or replace the package",
+                    advisory.id
+                ),
+                osv::Fix::NonePublished => {
+                    format!("No fixed version published; review {} and pin or replace the package", advisory.id)
                 }
-                None => format!("No fixed version published; review {} and pin or replace the package", advisory.id),
             };
             // An advisory whose detail document was unavailable has no summary,
             // which would otherwise leave the evidence ending in a space.

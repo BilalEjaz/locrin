@@ -390,3 +390,51 @@ fn an_advisory_that_does_not_cover_the_installed_version_says_so() {
     );
     assert_eq!(f.confidence, Confidence::Medium, "an advisory with no upgrade to name is not a full instruction");
 }
+
+/// Most PyPI and Packagist advisories publish `ECOSYSTEM` ranges, which the
+/// engine does not order. It therefore never compared the installed version
+/// against them, and the fix sentence says exactly that: the reader is sent to
+/// the advisory for the version to move to, rather than told that no fix
+/// applies to a version nothing was compared against. The finding itself is not
+/// in doubt, because the batch endpoint matched this exact version server side,
+/// so the confidence stays High.
+#[test]
+fn an_advisory_whose_ranges_are_not_ordered_says_the_fix_was_not_read() {
+    let root = fixture("vulnerable_dependency", "npm");
+    let config = locrin_core::config::Config::default();
+    let document = format!(
+        r#"{{
+          "id": "{VULN_ID}",
+          "summary": "Prototype Pollution in lodash",
+          "database_specific": {{"severity": "high"}},
+          "affected": [{{
+            "package": {{"name": "lodash", "ecosystem": "npm"}},
+            "ranges": [{{"type": "ECOSYSTEM", "events": [{{"introduced": "0"}}, {{"fixed": "4.17.21"}}]}}]
+          }}]
+        }}"#
+    );
+    let seed = move |ix: &Index, root: &Path| {
+        let canned = |url: &str, _body: Option<&str>| -> anyhow::Result<String> {
+            if url == osv::BATCH_URL {
+                return Ok(BATCH.to_string());
+            }
+            Ok(document.clone())
+        };
+        let lock = lockfile::read(root).unwrap().into_iter().next().expect("the fixture directory has a lockfile");
+        assert_eq!(osv::check(ix, &lock, false, &canned).unwrap().hits.len(), 1, "one advisory to report");
+    };
+
+    let findings = run_on_seeded(Box::new(VulnerableDependency), &root, &config, &Previous::default(), seed);
+
+    let f = only(&findings);
+    assert_eq!(
+        f.fix,
+        format!(
+            "Fixed version not read from this advisory (its ranges are not in a form this engine orders); \
+             review {VULN_ID} for the version to move to"
+        ),
+        "the ECOSYSTEM fixed event is not taken and not claimed to be absent"
+    );
+    assert_eq!(f.severity, Severity::High);
+    assert_eq!(f.confidence, Confidence::High, "the batch endpoint matched this version server side");
+}
