@@ -20,7 +20,7 @@ shallow checkout has none and the check exits 2.
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | Release tag (`v0.3.0`), `latest`, or `local` for a `locrin` already on PATH. `latest` follows the newest release, so pin it to the action ref as the examples do |
+| `version` | `latest` | Release tag (`v0.4.0`), `latest`, or `local` for a `locrin` already on PATH. `latest` follows the newest release, so pin it to the action ref as the examples do |
 | `path` | `.` | Repository-relative directory to check |
 | `base` | `${{ github.event.pull_request.base.sha }}` | Base ref for the pull-request view (files that differ from the merge base). Set it to `""` to check every file under `path` |
 | `since` | `""` | Ref for the deployment gate (files changed by `REF..HEAD`); overrides `base` |
