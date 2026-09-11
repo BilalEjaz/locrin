@@ -20,7 +20,9 @@
 //! punctuation-carrying `if (` and `for (` are not, so a block header counts
 //! only with the colon that closes it and `from ` only with the ` import ` that
 //! follows it. Without that, three sentences of prose opening "for now..." and
-//! "if the input..." read as a commented-out loop.
+//! "if the input..." read as a commented-out loop. The colon cuts the other
+//! way too: a trailing colon alone is a prose header (`# Note:`, `# Returns:`)
+//! as often as it is a block, so it is strong only behind a suite keyword.
 
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
@@ -88,10 +90,12 @@ const PHP: Vocabulary = Vocabulary {
 };
 
 const PY: Vocabulary = Vocabulary {
-    // A colon: what opens every Python block, and what a sentence of prose
-    // almost never ends on. Python has no statement terminator, so this is the
-    // only ending worth anything and the openings carry the rest.
-    strong_endings: &[':'],
+    // No ending is strong on its own. Python has no statement terminator, and
+    // the colon that opens every block is also what a prose header ends on:
+    // `# Note:`, `# Args:`, `# Options Used:`. A colon is therefore strong only
+    // behind a suite keyword, which is what the `BlockColon` starts below say,
+    // and on its own it is a supporting signal like a comma.
+    strong_endings: &[],
     endings: &[':', ')', ','],
     // The bare ones are the openings that are not English: `return ` and
     // `import ` head a sentence far more rarely than `if` or `for` do, `self.`
@@ -305,11 +309,16 @@ impl Rule for LeftoverCommented {
     /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, round
     /// two, Poetry 2.4.3) scored 0 true of 14. Every finding was a prose
     /// comment whose header line ends in a colon (`# Options Used:`,
-    /// `# For instance:`), which is the one ending the Python vocabulary
-    /// treats as strong, because it is what opens a block. The vocabulary
-    /// stays, its tests still run it directly, and the pair comes back on
-    /// once a colon counts only behind a suite keyword and the pair is
-    /// re-measured.
+    /// `# For instance:`), which was the one ending the Python vocabulary
+    /// treated as strong. Round three made a colon strong only behind a suite
+    /// keyword, and the re-run (round three of the same document) left 1 of
+    /// the 14 on Poetry and 0 on FastSpot: `# with the following overrides:`
+    /// opens with `with ` and ends in a colon, so it reads as a `with` block
+    /// header, and it is prose. One false positive of one finding is still
+    /// a fail, so the pair stays off; the vocabulary and its fixture tests
+    /// still run it directly, and it comes back on once a `with` header
+    /// needs the shape of one (a `(`, an ` as `, or a dotted name) and the
+    /// pair is re-measured.
     fn enabled_for(&self, lang: Language) -> bool {
         lang != Language::Python
     }

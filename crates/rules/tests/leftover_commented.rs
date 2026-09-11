@@ -69,6 +69,18 @@ fn python_is_off_by_default_after_the_precision_gate() {
     assert!(out.is_empty(), "got {out:?}");
 }
 
+/// A prose comment whose header line ends in a colon (`# Note:`, `# Returns:`,
+/// `# Options Used:` over a table) is the round-two false positive on Poetry:
+/// a colon is a block only behind a suite keyword, and on its own it is a
+/// label. Run directly, so the vocabulary is what is being tested whatever the
+/// pair's default is.
+#[test]
+fn python_prose_headers_ending_in_a_colon_are_not_code() {
+    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let out = run_unfiltered(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/clean"), &config);
+    assert!(out.is_empty(), "got {out:?}");
+}
+
 /// A docstring is a string inside an expression statement, never a comment
 /// node, so it is not scanned at all. The fixture's docstring holds the exact
 /// lines the flag fixture is reported for, and none of them is a finding here.
