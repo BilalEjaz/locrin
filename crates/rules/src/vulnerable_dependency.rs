@@ -38,7 +38,7 @@
 use locrin_core::finding::{Category, Confidence, Finding, Severity, Span};
 use locrin_core::{lockfile, osv};
 
-use crate::{finding_at, Rule, RuleContext, Scope};
+use crate::{finding_at, Language, Rule, RuleContext, Scope, ALL};
 
 /// How much of an advisory summary the evidence carries. Summaries are usually
 /// one line; a few are a paragraph, and a finding is a pointer to the advisory,
@@ -100,6 +100,11 @@ impl Rule for VulnerableDependency {
     }
     fn confidence(&self) -> Confidence {
         Confidence::Medium
+    }
+    /// Every language: this rule reads a lockfile off disk rather than a parsed
+    /// file, so the languages of the run say nothing about whether it applies.
+    fn languages(&self) -> &'static [Language] {
+        ALL
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

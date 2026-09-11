@@ -3,7 +3,7 @@
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, Rule, RuleContext, Scope};
+use crate::{clean_files, finding, Language, Rule, RuleContext, Scope, ALL};
 
 pub struct LeftoverMarker;
 
@@ -79,6 +79,12 @@ impl Rule for LeftoverMarker {
     }
     fn confidence(&self) -> Confidence {
         Confidence::Medium
+    }
+    /// Every language: what this rule reads is a comment node and the word
+    /// inside it, and every grammar the engine loads calls a comment a
+    /// `comment`. PHP's covers `//`, `#` and `/* */`; Python's covers `#`.
+    fn languages(&self) -> &'static [Language] {
+        ALL
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

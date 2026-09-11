@@ -185,6 +185,7 @@ fn real_main() -> anyhow::Result<i32> {
                         severity: r.default_severity(),
                         category: r.category(),
                         enabled_by_default: r.enabled_by_default(),
+                        languages: r.languages().iter().map(|l| l.as_str()).collect(),
                     })
                     .collect()
             };

@@ -746,6 +746,10 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
         root,
         offline: opts.offline,
         previous: &previous,
+        // The widest set: `run_rules` narrows it to each rule's own languages,
+        // so the per-rule filter is decided in the one place that decides
+        // enablement and severity too.
+        rule_languages: locrin_core::lang::ALL,
     };
     let fresh = run_file_rules(&rules, &indexed.files, &base)?;
     let graph = {

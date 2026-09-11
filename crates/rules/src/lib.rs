@@ -28,6 +28,9 @@ use locrin_core::parse::ParsedFile;
 use locrin_core::previous::Previous;
 use rayon::prelude::*;
 
+/// Re-exported so a rule declaring [`Rule::languages`] names its set from the
+/// crate it already imports the trait from.
+pub use locrin_core::lang::{Language, ALL, JS_FAMILY};
 pub use locrin_core::ALLOW_MARK;
 
 /// What a rule reads. A `File` rule looks only at the files parsed this run and
@@ -72,6 +75,16 @@ pub struct RuleContext<'a> {
     /// What the previous version of the repository said, for the rules whose
     /// answer is a change rather than a state.
     pub previous: &'a Previous,
+    /// The languages of the rule that is running, which is what
+    /// [`clean_files`] filters the file list down to. Not to be confused with
+    /// `config.languages`, which is what the repository asked the walker to
+    /// read: this is what the one rule holding the context was written for.
+    ///
+    /// [`run_rules`] sets it from [`Rule::languages`] before each rule's `run`,
+    /// so a rule never sees a file in a language it was not taught. A context
+    /// built by hand carries [`ALL`], because a caller that hands a rule a file
+    /// list directly has already chosen the files.
+    pub rule_languages: &'static [Language],
 }
 
 impl<'a> RuleContext<'a> {
@@ -96,6 +109,19 @@ pub trait Rule: Sync {
     fn category(&self) -> Category;
     fn default_severity(&self) -> Severity;
     fn confidence(&self) -> Confidence;
+    /// The languages this rule was written against. The runner hands it only
+    /// the files in those languages, so a rule whose patterns are node kinds of
+    /// the TypeScript grammar cannot report on a PHP or Python file by
+    /// accident, and a rule taught a language says so once here rather than
+    /// checking `file.language` in its own loop.
+    ///
+    /// The default is the JavaScript family, because that is what every rule
+    /// the engine shipped before PHP and Python was written against. A rule
+    /// that reads something every language has (a comment, a string literal, a
+    /// lockfile) declares [`ALL`] instead.
+    fn languages(&self) -> &'static [Language] {
+        JS_FAMILY
+    }
     /// Whether the rule runs when the config says nothing about it. Almost every
     /// rule ships on; one that cannot yet meet the spec 10.2 precision gate on a
     /// repository it knows nothing about ships off and says so in its own doc.
@@ -124,14 +150,24 @@ pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
     rule.locked() || config.rule_enabled_or(rule.id(), rule.enabled_by_default())
 }
 
-/// The files a file rule is allowed to look at: every parsed file whose tree came
-/// back without a syntax error the engine cannot see past (see
-/// `parse::has_blocking_error`). Rules iterate this instead of `ctx.files`, so a
-/// file that failed to parse is exempt from every rule rather than from whichever
-/// rules happened to check `has_error`.
+/// The files a file rule is allowed to look at: every parsed file written in one
+/// of the rule's own languages whose tree came back without a syntax error the
+/// engine cannot see past (see `parse::has_blocking_error`). Rules iterate this
+/// instead of `ctx.files`, so a file that failed to parse is exempt from every
+/// rule rather than from whichever rules happened to check `has_error`, and a
+/// file in a language a rule was not taught is never handed to it at all.
+///
+/// The language half of the filter is the whole of [`Rule::languages`]'s
+/// enforcement, and it is why the languages live on the context rather than on
+/// a filtered file list: `ctx.files` is a slice of owned `ParsedFile`s, so
+/// narrowing it would mean either cloning trees or changing the field to a
+/// slice of references and reallocating it once per rule per file in the
+/// parallel pass. A `&'static [Language]` on a `Copy` context costs nothing and
+/// leaves every rule's `clean_files(ctx)` loop exactly as it was.
 pub fn clean_files<'a>(ctx: &'a RuleContext) -> impl Iterator<Item = &'a ParsedFile> {
     let files: &'a [ParsedFile] = ctx.files;
-    files.iter().filter(|f| !f.has_error)
+    let languages: &'static [Language] = ctx.rule_languages;
+    files.iter().filter(move |f| !f.has_error && languages.contains(&f.language))
 }
 
 /// The trimmed text of a 1-based line, or `""` when the line is out of range.
@@ -242,6 +278,12 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
         // is its own by definition, and the config may not lower it.
         let severity =
             if rule.locked() { Some(rule.default_severity()) } else { ctx.config.severity_override(rule.id()) };
+        // The per-rule language filter, applied once here rather than in each
+        // rule: the rule's own context says which languages it was taught, and
+        // `clean_files` hands it those files and no others. Both entry points
+        // come through this loop, so the parallel file pass gets the same
+        // filter without knowing there is one.
+        let ctx = &RuleContext { rule_languages: rule.languages(), ..*ctx };
         for mut f in rule.run(ctx)? {
             if dropped(&f)? {
                 continue;
@@ -292,6 +334,10 @@ pub fn run_file_rules(
                 root,
                 offline,
                 previous,
+                // `run_rules` narrows this to each rule's own languages, so the
+                // per-file context starts from the widest set rather than
+                // deciding anything the shared runner has not decided.
+                rule_languages: ALL,
             };
             run_rules(rules, &ctx)
         })
@@ -367,7 +413,16 @@ mod tests {
         index: Option<&'a Index>,
         entries: &'a EntryPoints,
     ) -> RuleContext<'a> {
-        RuleContext { files, config, index, entries, root: Path::new("."), offline: true, previous: no_previous() }
+        RuleContext {
+            files,
+            config,
+            index,
+            entries,
+            root: Path::new("."),
+            offline: true,
+            previous: no_previous(),
+            rule_languages: ALL,
+        }
     }
 
     struct Always;
@@ -423,6 +478,37 @@ mod tests {
         }
     }
 
+    /// A rule taught every language the engine parses, the way
+    /// `leftover-agent-marker` is: it reads a comment, and every language has
+    /// one.
+    struct EveryLanguage;
+    impl Rule for EveryLanguage {
+        fn id(&self) -> &'static str {
+            "every-language"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::File
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            ALL
+        }
+        fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            Ok(clean_files(ctx).map(|f| finding(self, f, 1, "hit", "remove it")).collect())
+        }
+    }
+
     /// A graph rule reports on files the run did not parse. The gate still holds
     /// for them, from what the index remembers.
     struct Ghost;
@@ -453,6 +539,53 @@ mod tests {
                 finding_at(self, "src/plain.ts", span, "a", "hit", "fix"),
             ])
         }
+    }
+
+    /// A rule is handed the files of the languages it declared and no others.
+    /// The default is the JavaScript family, so the rules written against the
+    /// TypeScript grammar's node kinds never see a Python file however the
+    /// repository set `[languages]`; a rule that declared every language sees
+    /// both files.
+    #[test]
+    fn a_rule_is_handed_only_the_languages_it_declares() {
+        let ts = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
+        let py = parse_source(Path::new("src/b.py"), "src/b.py", "b = 1\n".into()).unwrap();
+        let files = vec![ts, py];
+        let config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+
+        let js_only = run_rules(&[Box::new(Always)], &ctx).unwrap();
+        assert_eq!(js_only.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(), vec!["src/a.ts"]);
+
+        let every = run_rules(&[Box::new(EveryLanguage)], &ctx).unwrap();
+        assert_eq!(every.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(), vec!["src/a.ts", "src/b.py"]);
+    }
+
+    /// The filter lives in the shared runner, so the parallel file pass applies
+    /// it too: a Python file is its own unit of work there, and a JavaScript
+    /// rule handed that unit must still report nothing.
+    #[test]
+    fn the_language_filter_holds_in_the_parallel_file_pass() {
+        let ts = parse_source(Path::new("src/a.ts"), "src/a.ts", "export const a = 1;\n".into()).unwrap();
+        let py = parse_source(Path::new("src/b.py"), "src/b.py", "b = 1\n".into()).unwrap();
+        let files = vec![ts, py];
+        let config = Config::default();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let base = RuleContext {
+            files: &files,
+            config: &config,
+            index: None,
+            entries: &entries,
+            root: Path::new("."),
+            offline: true,
+            previous: no_previous(),
+            rule_languages: ALL,
+        };
+        let out = run_file_rules(&[Box::new(Always), Box::new(EveryLanguage)], &files, &base).unwrap();
+        let hits: Vec<(&str, &str)> = out.iter().map(|f| (f.rule.as_str(), f.file.as_str())).collect();
+        assert_eq!(hits, vec![("always", "src/a.ts"), ("every-language", "src/a.ts"), ("every-language", "src/b.py")]);
     }
 
     #[test]
@@ -833,6 +966,7 @@ mod tests {
             root: &root,
             offline: true,
             previous: &previous,
+            rule_languages: ALL,
         };
 
         let out = run_file_rules(&[Box::new(Reporter)], &files, &base).unwrap();

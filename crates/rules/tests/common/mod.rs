@@ -76,7 +76,18 @@ pub fn ctx_for<'a>(
     entries: &'a EntryPoints,
     root: &'a Path,
 ) -> RuleContext<'a> {
-    RuleContext { files, config, index: Some(index), entries, root, offline: true, previous: no_previous() }
+    RuleContext {
+        files,
+        config,
+        index: Some(index),
+        entries,
+        root,
+        offline: true,
+        previous: no_previous(),
+        // A test calling a rule directly has chosen the fixture's files itself;
+        // the per-rule narrowing belongs to `run_rules`, which `run_on` uses.
+        rule_languages: locrin_core::lang::ALL,
+    }
 }
 
 /// Runs one rule over a fixture directory with nothing known about the previous
@@ -129,6 +140,7 @@ pub fn run_on_seeded(
         root: &root,
         offline: true,
         previous,
+        rule_languages: locrin_core::lang::ALL,
     };
     run_rules(&[rule], &ctx).unwrap()
 }

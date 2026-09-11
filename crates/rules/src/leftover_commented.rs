@@ -12,7 +12,7 @@ use locrin_core::finding::{Category, Confidence, Finding, Severity};
 use locrin_core::parse::ParsedFile;
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, Rule, RuleContext, Scope};
+use crate::{clean_files, finding, Language, Rule, RuleContext, Scope, ALL};
 
 pub struct LeftoverCommented;
 
@@ -154,6 +154,13 @@ impl Rule for LeftoverCommented {
     }
     fn confidence(&self) -> Confidence {
         Confidence::Medium
+    }
+    /// Every language: a run of commented-out statements is a comment shape,
+    /// not a grammar shape. What changes per language is the vocabulary the run
+    /// is tested against, which [`looks_like_code`] and [`is_strong_code`] take
+    /// from the file's own language.
+    fn languages(&self) -> &'static [Language] {
+        ALL
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

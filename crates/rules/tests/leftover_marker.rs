@@ -1,7 +1,7 @@
 mod common;
 
-use common::{fixture, run_on};
-use locrin_core::config::Config;
+use common::{fixture, run_on, run_on_langs};
+use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_marker::LeftoverMarker;
 
@@ -17,4 +17,15 @@ fn flags_markers_without_issue_references() {
 fn ignores_markers_with_references_urls_and_lowercase_prose() {
     let out = run_on(Box::new(LeftoverMarker), &fixture("leftover_marker", "clean"), &Config::default());
     assert!(out.is_empty(), "got {:?}", out);
+}
+
+/// A marker is a comment, and every language has comments, so this rule
+/// declares every language rather than the JavaScript family. With `php = true`
+/// the PHP fixture's `//` and `#` markers are findings.
+#[test]
+fn flags_markers_in_php_when_the_language_is_enabled() {
+    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverMarker), &fixture("leftover_marker", "php/flag"), &config);
+    let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
+    assert_eq!(lines, vec![2, 5], "got {out:?}");
 }
