@@ -301,6 +301,18 @@ impl Rule for LeftoverCommented {
     fn languages(&self) -> &'static [Language] {
         ALL
     }
+    /// Off for Python: the precision gate's second round
+    /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, round
+    /// two, Poetry 2.4.3) scored 0 true of 14. Every finding was a prose
+    /// comment whose header line ends in a colon (`# Options Used:`,
+    /// `# For instance:`), which is the one ending the Python vocabulary
+    /// treats as strong, because it is what opens a block. The vocabulary
+    /// stays, its tests still run it directly, and the pair comes back on
+    /// once a colon counts only behind a suite keyword and the pair is
+    /// re-measured.
+    fn enabled_for(&self, lang: Language) -> bool {
+        lang != Language::Python
+    }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let mut out = Vec::new();

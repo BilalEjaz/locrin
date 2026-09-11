@@ -10,8 +10,10 @@ so it has no pair to measure.
 Binary: `target/release/locrin.exe` 0.4.0, built from `engine/languages` at
 `b71846f` (Tasks 1 to 7). The `enabled_for` mechanism this document's gate
 feeds was added afterwards on the same branch and changes no finding: it
-defaults to `true` for every rule and every language, and nothing below turns
-it off.
+defaults to `true` for every rule and every language, and nothing in round
+one turns it off. Round two (the last section, on Monica and Poetry) turns
+two pairs off: `leftover-agent-marker` on PHP and `leftover-commented-code`
+on Python.
 
 ## Corpora
 
@@ -351,7 +353,321 @@ this task.
   glob list defaulting to migrations; ordering `ECOSYSTEM` ranges so Packagist
   and PyPI findings can name an upgrade.
 - One founder ruling owed: a private key in a test helper under the locked
-  rule.
+  rule. (Ruled in round two: true-by-policy, baseline is the escape.)
 - Two measurements still owed: a Python repository with a lockfile and enough
   leftovers to score, and, for the PHP pairs, a second PHP repository with
-  more than nine findings between four rules.
+  more than nine findings between four rules. (Both done in round two,
+  below.)
+
+## Round two: Monica and Poetry
+
+Round one's corpora were too quiet to score any pair, so round two ran the
+same protocol on two larger repositories, one per language, each with the
+lockfile round one lacked. Binary: `target/release/locrin.exe` 0.4.0 built
+from `engine/languages` at `96e7d6b` (the return-mode `print_r` commit above
+is in it; nothing else changed between rounds).
+
+### Corpora
+
+| Corpus | Language | Source | Commit | Indexed files | Lockfiles |
+| --- | --- | --- | --- | --- | --- |
+| Monica | PHP | `github.com/monicahq/monica`, tag `v4.1.2` (latest release, 2024-05-04), `git clone --depth 1` | `32028ce3` | 1800 (1773 `.php`, the rest JavaScript) | `composer.lock`, `yarn.lock` (no `package-lock.json`) |
+| Poetry | Python | `github.com/python-poetry/poetry`, tag `2.4.3` (latest release, 2026-09-05), `git clone --depth 1` | `4d69b9b1` | 438 (all `.py`) | `poetry.lock` |
+
+Both were cloned into the session scratchpad, read-only, with a two-line
+`locrin.toml` (`[languages]` with `php = true` or `python = true`) written
+inside the clone and `LOCRIN_CACHE_DIR` under the scratchpad. Nothing was
+written into either upstream repository or into any `.git`.
+
+### Runs
+
+| Run | Result | Engine | Wall |
+| --- | --- | --- | --- |
+| Monica, offline, fresh clone, first read (a release build finishing on the box) | ADVISORY 13 | not recorded | 37816 ms |
+| Monica, offline, warm cache | ADVISORY 13 | 143 ms | 504 ms |
+| Monica, online (advisory fetch for `composer.lock` and `yarn.lock`) | BLOCK 255 (103 high, 113 medium, 39 low) | 40796 ms | 41468 ms |
+| Monica, offline, fresh cache, idle box | ADVISORY 13 | 2995 ms | 3387 ms |
+| Poetry, offline, fresh clone, first read | ADVISORY 32 | 6643 ms | 7007 ms |
+| Poetry, online (advisory fetch for `poetry.lock`) | BLOCK 57 (9 high, 17 medium, 31 low) | 4876 ms | 5387 ms |
+| Poetry, offline, fresh cache, idle box | ADVISORY 32 | 836 ms | 1351 ms |
+| Poetry, offline, warm cache | ADVISORY 32 | | 641 ms |
+
+The pattern is round one's: the first read of a fresh checkout on a busy box
+is ten times the idle cold pass (Monica 1800 files in 3.0 s idle, 1.7 ms per
+file; Poetry 438 files in 0.8 s). The online passes are the advisory fetch:
+Monica's 40 s is two lockfiles, 242 findings between them, against OSV.
+
+Counts from the online SARIF, split by file: Monica 255 = `leftover-agent-marker`
+php 5 / js 1, `leftover-commented-code` php 3 / js 4, `vulnerable-dependency`
+242 (`composer.lock` 68, `yarn.lock` 174). Poetry 57 = `leftover-agent-marker`
+py 18, `leftover-commented-code` py 14, `vulnerable-dependency` `poetry.lock`
+25. No `leftover-debug` and no `secret-exposed` finding on either corpus.
+
+### Result at a glance
+
+| Pair | Findings | Sampled | True | Gate | Default after round two |
+| --- | --- | --- | --- | --- | --- |
+| leftover-debug on PHP | 0 | 0 | not measurable | unmeasured, zero checked | on |
+| leftover-commented-code on PHP | 3 | 3 | 3/3 | unmeasured, sample too small | on |
+| leftover-agent-marker on PHP | 5 | 5 | 4/5 (80 percent) | fails, under 85 of a sample of 5 | **off for PHP** |
+| secret-exposed on PHP | 0 | 0 | not measurable | unmeasured, zero checked | on (locked) |
+| vulnerable-dependency on Packagist | 68 | 20 | 20/20 | passes | on |
+| leftover-debug on Python | 0 | 0 | not measurable | unmeasured, zero checked | on |
+| leftover-commented-code on Python | 14 | 14 | 0/14 | fails | **off for Python** |
+| leftover-agent-marker on Python | 18 | 18 | 18/18 | passes | on |
+| secret-exposed on Python | 0 | 0 | not measurable | unmeasured, zero checked | on (locked) |
+| vulnerable-dependency on PyPI | 25 | 20 | 20/20 | passes | on |
+
+Sampling: every finding when a pair has 20 or fewer, otherwise
+`random.Random(11).sample` over the findings sorted by file then line
+(script `analyze3.py` in the scratchpad, output `round2-samples.txt`). The
+verdict standard is the one above: true when a maintainer reading the finding
+would change the code, false when the answer is "no, this is intentional".
+The verdict is taken per corpus, as the brief's sample rule reads; the pooled
+count across both rounds is given where it differs, because for one pair it
+does.
+
+### The zeros
+
+- `leftover-debug` on Monica: grep over `app`, `tests`, `database`, `config`
+  and `routes` for `var_dump(`, `print_r(`, `var_export(`, `dd(`, `dump(`,
+  `debug_zval_dump(` and `xdebug_break(` finds nothing outside comments. The
+  zero is the corpus.
+- `leftover-debug` on Poetry: grep for `breakpoint()`, `pdb.set_trace`,
+  `import pdb`, `ipdb` and `pudb` finds nothing. The zero is the corpus.
+- `secret-exposed` on both: grep for `BEGIN ... PRIVATE KEY`, `AKIA` keys and
+  `ghp_` tokens finds nothing. No test fixture key this time, so the founder
+  ruling from round one applies to nothing here; it stands as recorded below.
+
+### leftover-commented-code on PHP: 3 true of 3
+
+| File | Line | Verdict | Reason |
+| --- | --- | --- | --- |
+| tests/Feature/AccountSubscriptionTest.php | 215 | true | `// public function test_it_subscribe_with_2nd_auth()` opens a whole commented-out test method, six lines of PHP |
+| tests/Feature/AccountSubscriptionTest.php | 221 | true | The second half of the same method after a blank line; the same dead block, reported twice because the blank line splits the run |
+| tests/Helpers/DavTester.php | 73 | true | Seven commented-out `assertCount` and `assertEquals` calls in a test helper, the assertions the helper used to make |
+
+Three findings, under the five the gate needs, so unmeasured and on. Pooled
+with round one's 0 of 3 (the frozen-migration block) the pair is 3 of 6, which
+would fail if pooled; it is not pooled, and the migration class is the thing
+that decides it. One note for the rule: a blank line inside a commented-out
+block yields two findings for one block; a run should survive one blank line.
+
+### leftover-agent-marker on PHP: 4 true of 5, and the pair ships off
+
+| File | Line | Verdict | Reason |
+| --- | --- | --- | --- |
+| app/Http/Controllers/Api/ApiController.php | 68 | true | `// TODO: there is probably a much better way to do that`, no issue |
+| app/Http/Controllers/ContactsController.php | 386 | true | `// TODO: remove this part entirely when we redo this whole SpecialDate`, no issue |
+| app/Jobs/Avatars/MoveContactAvatarToPhotosDirectory.php | 96 | false | `// $avatarFileName has the format avatars/XXX.jpg. We need to remove`: `XXX` is a placeholder inside a file path in a prose comment, not a marker |
+| tests/Browser/Settings/MultiFAControllerTest.php | 188 | true | `// TODO: test if user has 2fa enabled actually`, no issue |
+| tests/Browser/Settings/MultiFAControllerTest.php | 189 | true | `// TODO: test if session token auth is right`, no issue |
+
+Four of five is 80 percent of a sample of exactly five, under the 85 the gate
+asks for, so `LeftoverMarker::enabled_for(Php)` answers `false` with a doc
+comment citing this section. Recorded beside it: pooled with round one's 2 of
+2 on BookStack the pair is 6 of 7 (85.7 percent), the one false finding is a
+single class, and the fix is one clause.
+
+**The false-positive pattern, and the fix.** `XXX` as a placeholder.
+`has_marker` matches any of the four words on word boundaries, and `XXX` is
+also what a comment writes for "some characters here": `avatars/XXX.jpg`,
+`XXX-XXX-XXXX`, `version XXX`. Fix: a marker must open the comment's text or
+be followed by a colon, a space and a capital, or be the whole word between
+punctuation; `XXX` glued to a `/`, a `.` or a `-` on either side is a
+placeholder. The other three markers do not double as placeholders and need
+none of this. When that lands, re-measure on Monica (one command, five
+findings) and the pair comes back on.
+
+### vulnerable-dependency on Packagist: 20 true of 20
+
+Every sampled finding was checked against OSV directly
+(`POST api.osv.dev/v1/query` with the package, ecosystem `Packagist` and the
+locked version) and the advisory id, or an alias of it, is in the answer.
+
+| Line | Package | Advisory | Verdict | Reason |
+| --- | --- | --- | --- | --- |
+| 1421 | dompdf/dompdf 2.0.8 | GHSA-7x2p-4jvh-6384 (LOW) | true | OSV lists 2.0.8 as affected |
+| 1421 | dompdf/dompdf 2.0.8 | GHSA-8hg6-c449-896m (MODERATE) | true | affected |
+| 2114 | guzzlehttp/guzzle 7.8.1 | GHSA-wpwq-4j6v-78m3 (MODERATE) | true | affected |
+| 2114 | guzzlehttp/guzzle 7.8.1 | GHSA-v5mv-p594-2x33 (HIGH) | true | affected |
+| 2323 | guzzlehttp/psr7 2.6.2 | GHSA-c2w2-prh8-qm98 (MODERATE) | true | affected |
+| 2880 | laravel/framework 9.52.16 | GHSA-crmm-hgp2-wgrp (MODERATE) | true | affected |
+| 2880 | laravel/framework 9.52.16 | GHSA-5vg9-5847-vvmq (HIGH) | true | affected |
+| 3572 | league/commonmark 2.4.2 | GHSA-8rr7-cvq3-gmfh (HIGH) | true | affected |
+| 3572 | league/commonmark 2.4.2 | GHSA-c2pc-g5qf-rfrf (HIGH) | true | affected |
+| 3572 | league/commonmark 2.4.2 | GHSA-mh25-x5hq-wrqp (HIGH) | true | affected |
+| 3572 | league/commonmark 2.4.2 | GHSA-3527-qv2q-pfvx (MODERATE) | true | affected |
+| 5085 | mtdowling/jmespath.php 2.7.0 | GHSA-pcw8-m77r-2528 (CRITICAL) | true | affected |
+| 5151 | nesbot/carbon 2.72.3 | GHSA-j3f9-p6hm-5w6q (MODERATE) | true | affected |
+| 6601 | phpseclib/phpseclib 3.0.37 | GHSA-m557-wrgg-6rp4 (MODERATE) | true | affected |
+| 9861 | symfony/mailer 6.4.7 | GHSA-xx3c-qf5g-hc39 (MODERATE) | true | affected |
+| 10010 | symfony/mime 6.4.7 | GHSA-qpmx-3rfj-7rhv (HIGH) | true | affected |
+| 11266 | symfony/routing 6.4.7 | GHSA-h5x3-xfc9-m39h (MODERATE) | true | affected |
+| 12865 | web-token/jwt-library 3.4.3 | GHSA-jc38-x7x8-2xc8 (HIGH) | true | affected |
+| 19170 | symfony/yaml 6.4.7 | GHSA-4qpc-3hr4-r2p4 (LOW) | true | affected |
+| 19170 | symfony/yaml 6.4.7 | GHSA-9frc-8383-795m (LOW) | true | affected |
+
+Passes and ships on. Every one of the 20 says "Fixed version not read from
+this advisory": Packagist advisories carry `ECOSYSTEM` ranges, the round-one
+follow-up, and a maintainer reading the finding still has to open the
+advisory to learn what to upgrade to. Not a precision fault, but the thing to
+fix next on this rule.
+
+### leftover-commented-code on Python: 0 true of 14, and the pair ships off
+
+| File | Line | Verdict | Reason |
+| --- | --- | --- | --- |
+| src/poetry/console/commands/update.py | 70 | false | Prose explaining a validation, with a colon-terminated line and indented bullets |
+| src/poetry/installation/wheel_installer.py | 48 | false | A `See https://...zipfile.Path:` citation with an indented quotation under it |
+| src/poetry/mixology/version_solver.py | 416 | false | Six lines of prose about the solver with backticked constraint examples |
+| src/poetry/plugins/plugin_manager.py | 166 | false | `Just remove the cache for two reasons:` then a numbered list |
+| src/poetry/puzzle/provider.py | 607 | false | `Searching for duplicate dependencies` then `For instance:` and bullets; `For instance:` is read as `for ...:` |
+| src/poetry/puzzle/provider.py | 696 | false | `For instance, if the foo (1.2.3) package...:` prose with bullets |
+| src/poetry/puzzle/provider.py | 1012 | false | `This is an edge case...` then `for instance:` and bullets |
+| src/poetry/puzzle/solver.py | 492 | false | `performance shortcut:` then two lines of prose |
+| src/poetry/utils/env/base_env.py | 417 | false | `Options Used:` then a table of interpreter flags |
+| src/poetry/utils/env/env_manager.py | 500 | false | `venv detection:` then four sentences |
+| src/poetry/utils/env/python/providers.py | 55 | false | `Attention:` then a dashed list |
+| tests/inspection/test_lazy_wheel.py | 253 | false | `negative offsets supported:` then a numbered list |
+| tests/repositories/test_pypi_repository.py | 98 | false | `requests fixture upload times:` then a version-to-date table |
+| tests/utils/test_helpers.py | 480 | false | Four sentences of prose ending `hardlinks:` |
+
+Zero of fourteen, so `LeftoverCommented::enabled_for(Python)` answers `false`
+with a doc comment citing this section. The vocabulary and its fixture tests
+stay (`flags_python_hash_runs` runs the rule directly), and a new test pins
+that the same fixture is silent through `run_rules`.
+
+**The false-positive pattern, and the fix.** One class, fourteen times: a
+prose comment whose header line ends in a colon. The Python vocabulary makes
+`:` its only strong ending, because it is what opens a block and Python has
+no other statement terminator, and a comment header (`Options Used:`,
+`Attention:`, `venv detection:`) ends in exactly that. The three most
+instructive:
+
+1. `provider.py:607`, `# Searching for duplicate dependencies` then `#` and
+   `# If the duplicate dependencies have the same constraint,` and
+   `#   For instance:`. The qualified starts are case-sensitive, so `For`
+   is not the `for` keyword; what fires is the colon ending on its own,
+   which is strong for Python, plus the comma ending two lines up as the
+   second code-looking line. Fix: a colon ending is strong only when the
+   line opens with a suite keyword or holds a `(` before the colon; a bare
+   `For instance:` is a label.
+2. `base_env.py:417`, `# Options Used:` followed by `#     -I        : Run
+   Python in isolated mode. (#6627)` and `#     -W ignore : Suppress
+   warnings.` The header colon is strong and the `(#6627)` line ends in a
+   closing parenthesis, a supporting ending, so the run has its one strong
+   line and its two code-looking lines. The same fix as 1, spelled out: the
+   suite keywords are `if`, `elif`, `else`, `for`, `while`, `with`, `try`,
+   `except`, `class`, `def`, and `lambda`; a `Words words:` label opens
+   with none of them.
+3. `test_pypi_repository.py:98`, `# requests fixture upload times:` then
+   `#   2.18.0: 2017-06-14, 2.18.1: 2017-06-14,`. Two colon lines and a
+   comma ending: the run is three lines that all look like code to the
+   heuristic and none is. The same fix as 2 covers it (neither colon line
+   opens with a keyword), and a second guard helps every language: a line
+   with three or more words of lowercase prose before its first punctuation
+   is a sentence.
+
+When the colon rule lands, re-measure on Poetry (14 findings today; the fix
+should leave zero) and on a Python corpus that does hold commented-out code,
+and the pair comes back on.
+
+### leftover-agent-marker on Python: 18 true of 18
+
+| File | Line | Verdict | Reason |
+| --- | --- | --- | --- |
+| src/poetry/console/commands/env/remove.py | 52 | true | `# TODO: refactor env.py to allow removal with one loop`, no issue |
+| src/poetry/console/commands/group_command.py | 48 | true | `# TODO: this should move into poetry-core`, no issue |
+| src/poetry/console/commands/init.py | 456 | true | `# TODO: find similar`, no issue |
+| src/poetry/factory.py | 369 | true | `# TODO: consider [project.dependencies] and ...`, no issue |
+| src/poetry/installation/chooser.py | 180 | true | `# FIXME: In the future, it would be better to suggest a more targeted`, no issue |
+| src/poetry/installation/chooser.py | 307 | true | `# TODO: Binary preference`, no issue |
+| src/poetry/installation/executor.py | 609 | true | `# TODO: Make an uninstaller and find a way to rollback in case`, no issue |
+| src/poetry/repositories/http_repository.py | 154 | true | `# TODO: remove check as soon as this is handled in poetry-core`, no issue |
+| src/poetry/repositories/installed_repository.py | 146 | true | `# TODO: handle multiple source directories?`, no issue |
+| src/poetry/utils/cache.py | 262 | true | `# TODO: remove check as soon as this is handled in poetry-core`, no issue |
+| src/poetry/utils/env/__init__.py | 41 | true | `# TODO: cache PEP 517 build environment ...`, no issue |
+| src/poetry/utils/env/base_env.py | 421 | true | `# TODO: Consider replacing (-I) with (-EP) ...`; the `(#6627)` three lines up belongs to another line, this one carries no reference |
+| src/poetry/utils/env/env_manager.py | 564 | true | `# TODO: Add backup-ignore markers for other platforms too`, no issue |
+| tests/console/conftest.py | 130 | true | `# TODO: Find a better way to do this in Cleo`, no issue |
+| tests/installation/test_installer.py | 1170 | true | `# FIXME: At the time of writing this test case, ...`, no issue |
+| tests/puzzle/test_solver.py | 672 | true | The same FIXME in a second test, no issue |
+| tests/puzzle/test_solver_internals.py | 669 | true | `# TODO: root extras`, a bare marker at module level |
+| tests/utils/test_python_manager.py | 124 | true | `# TODO: Asses if Poetry needs to discover real path ...`, no issue |
+
+Passes and ships on. Every finding is the rule's exact claim, a TODO or FIXME
+with no issue reference, in a mature project that keeps them deliberately;
+"true" here means the marker is what the rule says it is, and the rule ships
+at `low` severity and `note` level for exactly this reason.
+
+### vulnerable-dependency on PyPI: 20 true of 20
+
+Checked against OSV the same way, ecosystem `PyPI`.
+
+| Line | Package | Advisory | Verdict | Reason |
+| --- | --- | --- | --- | --- |
+| 511 | cryptography 47.0.0 | PYSEC-2026-3553 (UNKNOWN) | true | affected; an alias of GHSA-jwv3-5hgf-82ww below |
+| 511 | cryptography 47.0.0 | PYSEC-2026-3552 (UNKNOWN) | true | affected; an alias of GHSA-g6cj-pr64-35w5 below |
+| 511 | cryptography 47.0.0 | GHSA-537c-gmf6-5ccf (HIGH) | true | affected |
+| 511 | cryptography 47.0.0 | GHSA-jwv3-5hgf-82ww (HIGH) | true | affected |
+| 511 | cryptography 47.0.0 | PYSEC-2026-3554 (UNKNOWN) | true | affected |
+| 511 | cryptography 47.0.0 | GHSA-g6cj-pr64-35w5 (HIGH) | true | affected |
+| 614 | dulwich 1.2.1 | GHSA-555p-6grf-mh7f (LOW) | true | affected |
+| 614 | dulwich 1.2.1 | PYSEC-2026-2465 (UNKNOWN) | true | affected; alias of GHSA-gfhv-vqv2-4544 |
+| 614 | dulwich 1.2.1 | PYSEC-2026-2464 (UNKNOWN) | true | affected; alias of GHSA-9277-mp7x-85jf |
+| 614 | dulwich 1.2.1 | GHSA-xrvj-v92f-53gj (MODERATE) | true | affected |
+| 614 | dulwich 1.2.1 | GHSA-gfhv-vqv2-4544 (HIGH) | true | affected |
+| 614 | dulwich 1.2.1 | PYSEC-2026-2463 (UNKNOWN) | true | affected; alias of GHSA-897w-fcg9-f6xj |
+| 614 | dulwich 1.2.1 | GHSA-9277-mp7x-85jf (HIGH) | true | affected |
+| 614 | dulwich 1.2.1 | PYSEC-2026-2466 (UNKNOWN) | true | affected; alias of GHSA-xrvj-v92f-53gj |
+| 614 | dulwich 1.2.1 | GHSA-897w-fcg9-f6xj (HIGH) | true | affected |
+| 834 | idna 3.13 | GHSA-65pc-fj4g-8rjx (MODERATE) | true | affected |
+| 834 | idna 3.13 | PYSEC-2026-215 (UNKNOWN) | true | affected; alias of the GHSA above, and the finding carries no title |
+| 1123 | msgpack 1.1.2 | PYSEC-2026-3625 (UNKNOWN) | true | affected; no title in the finding |
+| 2031 | urllib3 2.6.3 | PYSEC-2026-141 (UNKNOWN) | true | affected; alias of GHSA-qccp-gfcp-xxvc |
+| 2031 | urllib3 2.6.3 | GHSA-qccp-gfcp-xxvc (HIGH) | true | affected |
+
+Passes and ships on. Two notes that are not precision faults but will read
+as noise to a maintainer: PyPI advisories arrive twice, once as the GHSA and
+once as the PYSEC alias of it, with the PYSEC copy at `UNKNOWN` severity and
+often without a title (10 of the 25 findings are PYSEC copies of a GHSA also
+reported); OSV publishes the alias list on each record, so the rule can keep
+one finding per alias group and prefer the id with a severity. And, as on
+Packagist, no finding names a fixed version.
+
+### Founder ruling on secrets, recorded
+
+`secret-exposed` stays locked and does flag private key material in test
+fixtures; that is by design, and the baseline is the accepted escape for a
+fixture a repository wants to keep. Such a finding is labelled true-by-policy
+in this document. Round one's OIDC fixture key on BookStack is therefore
+true-by-policy, not false, and its STOP is closed; round two met no such
+finding.
+
+### Resulting defaults
+
+- `leftover-agent-marker` on PHP: **off** (`LeftoverMarker::enabled_for`).
+- `leftover-commented-code` on Python: **off**
+  (`LeftoverCommented::enabled_for`).
+- Every other pair: on. `vulnerable-dependency` on Packagist and on PyPI and
+  `leftover-agent-marker` on Python are measured and pass; the rest are
+  unmeasured with the zero checked.
+
+Tests: `python_is_off_by_default_after_the_precision_gate` and
+`php_is_off_by_default_after_the_precision_gate` pin the two defaults through
+`run_rules`; the vocabulary tests for both pairs now run the rule directly
+(`run_unfiltered` in the test helpers) so the language support itself stays
+covered.
+
+### Follow-ups after round two
+
+1. `leftover-agent-marker`: `XXX` glued to a path or a placeholder is not a
+   marker; then re-measure on Monica and turn PHP back on.
+2. `leftover-commented-code`: a Python colon ending is strong only behind a
+   suite keyword or a `(`; then re-measure on Poetry and turn Python back on.
+3. `leftover-commented-code`: a run should survive one blank line, so one
+   dead block is one finding.
+4. `vulnerable-dependency`: one finding per alias group, prefer the id with a
+   severity; and the `ECOSYSTEM` range ordering so a finding can name the
+   upgrade.

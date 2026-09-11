@@ -86,6 +86,18 @@ impl Rule for LeftoverMarker {
     fn languages(&self) -> &'static [Language] {
         ALL
     }
+    /// Off for PHP: the precision gate's second round
+    /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, round
+    /// two, Monica v4.1.2) scored 4 true of 5, which is 80 percent of a sample
+    /// of exactly five and under the 85 the gate asks for. The false finding
+    /// was `XXX` inside the placeholder path `avatars/XXX.jpg` in a prose
+    /// comment. Pooled with round one's 2 of 2 on BookStack the pair is 6 of
+    /// 7, and the fix is one clause in `has_marker` (a marker is not a marker
+    /// inside backticks or a path); the pair comes back on when that lands
+    /// and the pair is re-measured.
+    fn enabled_for(&self, lang: Language) -> bool {
+        lang != Language::Php
+    }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let mut out = Vec::new();

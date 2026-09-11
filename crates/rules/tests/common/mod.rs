@@ -128,6 +128,27 @@ pub fn run_on_seeded(
     previous: &Previous,
     seed: impl FnOnce(&Index, &Path),
 ) -> Vec<Finding> {
+    with_context(root, config, previous, seed, |ctx| run_rules(&[rule], ctx).unwrap())
+}
+
+/// Runs one rule's `run` directly, without `run_rules` and so without the
+/// per-language default (`Rule::enabled_for`). A rule that ships off for a
+/// language after the precision gate still has its vocabulary for that
+/// language, and this is how a test pins that vocabulary: the fixture's
+/// findings come back here and are dropped by `run_on_langs`.
+pub fn run_unfiltered(rule: Box<dyn Rule>, root: &Path, config: &Config) -> Vec<Finding> {
+    with_context(root, config, &Previous::default(), |_ix, _root| {}, |ctx| rule.run(ctx).unwrap())
+}
+
+/// Parses and indexes the fixture, seeds the index, and hands the context to
+/// `run`: the one place every entry point above builds a `RuleContext`.
+fn with_context(
+    root: &Path,
+    config: &Config,
+    previous: &Previous,
+    seed: impl FnOnce(&Index, &Path),
+    run: impl FnOnce(&RuleContext) -> Vec<Finding>,
+) -> Vec<Finding> {
     let root = canonical_root(root);
     let files = parse_dir_langs(&root, config.languages);
     let (ix, entries) = index_dir(&root, &files, config);
@@ -142,7 +163,7 @@ pub fn run_on_seeded(
         previous,
         rule_languages: locrin_core::lang::ALL,
     };
-    run_rules(&[rule], &ctx).unwrap()
+    run(&ctx)
 }
 
 /// (file, start line) pairs in the order the rule produced them.

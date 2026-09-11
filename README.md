@@ -412,11 +412,15 @@ Python's `breakpoint()`, `pdb` and its relatives, never `print`),
 and `poetry.lock` against PyPI). The other sixteen rules are written against
 the TypeScript grammar and never see a PHP or Python file. Every rule can ship
 off for one language on its own once it fails the precision gate there, and
-none does today: all ten pairs were measured on real repositories
-(`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`) and none
-produced enough findings to fail, so all ten ship on. A per-language off is
-not something `rules.<id>.enabled = true` overrides; a `rules.<id>.languages`
-override is the intended knob and does not exist yet.
+two do today: all ten pairs were measured on real repositories
+(`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, two rounds:
+BookStack and FastSpot, then Monica and Poetry), and `leftover-agent-marker`
+ships off on PHP (4 true of 5 on Monica, one `XXX` placeholder in a path) and
+`leftover-commented-code` ships off on Python (0 true of 14 on Poetry, every
+one a prose comment whose header ends in a colon). The other eight pairs ship
+on. A per-language off is not something `rules.<id>.enabled = true`
+overrides; a `rules.<id>.languages` override is the intended knob and does
+not exist yet.
 
 ## The network
 

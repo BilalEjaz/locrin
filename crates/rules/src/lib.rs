@@ -150,10 +150,12 @@ pub trait Rule: Sync {
     /// which does not exist yet. The answer must be a constant of the binary,
     /// because the findings cache keys on which rules run and not on this.
     ///
-    /// Every rule ships `true` for every language it declares: the PHP and
-    /// Python precision gate (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`)
-    /// failed no pair. A rule that fails one overrides this with a doc comment
-    /// citing the report.
+    /// The default is `true` for every language a rule declares. A rule that
+    /// fails the PHP and Python precision gate
+    /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`) for
+    /// one language overrides this with a doc comment citing the report:
+    /// after round two that is `leftover-commented-code` on Python and
+    /// `leftover-agent-marker` on PHP.
     fn enabled_for(&self, lang: Language) -> bool {
         let _ = lang;
         true

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{fixture, run_on, run_on_langs};
+use common::{fixture, run_on, run_on_langs, run_unfiltered};
 use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_commented::LeftoverCommented;
@@ -49,14 +49,24 @@ fn ignores_php_prose_docblocks_and_license_headers() {
 
 /// Python's vocabulary is its own: a run of `#` lines opening with `for` and
 /// `print(` is commented-out code even though none of them ends in a
-/// semicolon.
+/// semicolon. Run directly, because the pair ships off (next test) and
+/// `run_rules` would drop what the vocabulary finds.
 #[test]
 fn flags_python_hash_runs() {
     let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
-    let out = run_on_langs(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/flag"), &config);
+    let out = run_unfiltered(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/flag"), &config);
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2], "{out:?}");
     assert_eq!(out[0].evidence, "for row in rows:");
+}
+
+/// The Python pair ships off: round two of the precision gate scored 0 true of
+/// 14 on Poetry, so the same fixture produces nothing through `run_rules`.
+#[test]
+fn python_is_off_by_default_after_the_precision_gate() {
+    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/flag"), &config);
+    assert!(out.is_empty(), "got {out:?}");
 }
 
 /// A docstring is a string inside an expression statement, never a comment
