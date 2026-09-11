@@ -230,7 +230,13 @@ The three permissions each pay for one thing: `contents: read` for the checkout
 and the release download, `pull-requests: write` for the comment,
 `security-events: write` for the SARIF upload. Drop the last two by setting
 `comment: "false"` and `sarif: "false"`. `fetch-depth: 0` is what gives the run
-a merge base to diff against; a shallow checkout has none.
+a merge base to diff against: a shallow checkout has none, and the default
+pull-request path then exits 2.
+
+The runner's token only reaches the repository the workflow runs in, so while
+`BilalEjaz/locrin` is private the download needs a `token` that can read its
+releases (a fine-grained PAT with Contents read on the locrin repository); once
+that repository is public the default `${{ github.token }}` is enough.
 
 There is one comment, not a wall of them. The summary starts with the marker
 `<!-- locrin-report -->` on its own line, and the action edits the first

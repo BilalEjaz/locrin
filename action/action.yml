@@ -105,6 +105,13 @@ runs:
           1) status=block ;;
           *) status=error ;;
         esac
+        # A 1 with no report means the redirect, not the check, decided the exit
+        # code. Trusting $? alone would publish a BLOCK verdict nobody produced.
+        if [[ "$code" -eq 1 ]] && ! head -n 1 "$comment" | grep -q '^<!-- locrin-report -->'; then
+          echo "::error::Locrin produced no report; the check output could not be written"
+          code=2
+          status=error
+        fi
         {
           echo "exit-code=$code"; echo "status=$status"
           echo "sarif-file=$sarif"; echo "comment-file=$comment"
@@ -122,18 +129,30 @@ runs:
     - name: Comment on the pull request
       if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
       shell: bash
+      # A read-only token, which is what a fork pull request gets, cannot write
+      # a comment. The verdict is the Check step's job, so a 403 here is a
+      # warning, never a red check.
+      continue-on-error: true
       env:
         GH_TOKEN: ${{ inputs.token }}
         PR: ${{ github.event.pull_request.number }}
         FILE: ${{ steps.check.outputs.comment-file }}
       run: |
         set -euo pipefail
-        existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-          --jq '[.[] | select(.body | startswith("<!-- locrin-report -->"))][0].id // empty')
-        if [[ -n "$existing" ]]; then
-          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -F body=@"$FILE" >/dev/null
-        else
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"$FILE" >/dev/null
+        write_comment() {
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -F body=@"$FILE" >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"$FILE" >/dev/null
+          fi
+        }
+        # --slurp so the jq filter sees every page as one array: without it the
+        # filter runs per page and a long thread yields more than one id.
+        existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate --slurp \
+          --jq '[.[][] | select(.body | startswith("<!-- locrin-report -->"))][0].id // empty' | head -n 1) || existing=""
+        if ! write_comment; then
+          echo "::warning::Locrin could not post the comment (missing pull-requests: write, typical for fork pull requests); the verdict is in the run log"
+          exit 0
         fi
 
     - name: Verdict
