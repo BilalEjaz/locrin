@@ -11,9 +11,12 @@ Binary: `target/release/locrin.exe` 0.4.0, built from `engine/languages` at
 `b71846f` (Tasks 1 to 7). The `enabled_for` mechanism this document's gate
 feeds was added afterwards on the same branch and changes no finding: it
 defaults to `true` for every rule and every language, and nothing in round
-one turns it off. Round two (the last section, on Monica and Poetry) turns
-two pairs off: `leftover-agent-marker` on PHP and `leftover-commented-code`
-on Python.
+one turns it off. Round two (on Monica and Poetry) turns two pairs off:
+`leftover-agent-marker` on PHP and `leftover-commented-code` on Python. Round
+three (the last section) fixes the false-positive class behind each,
+re-measures on the same corpora, and turns `leftover-agent-marker` on PHP
+back on; `leftover-commented-code` on Python stays off on one remaining
+false finding.
 
 ## Corpora
 
@@ -645,11 +648,12 @@ in this document. Round one's OIDC fixture key on BookStack is therefore
 true-by-policy, not false, and its STOP is closed; round two met no such
 finding.
 
-### Resulting defaults
+### Resulting defaults (after round two; round three revises these below)
 
 - `leftover-agent-marker` on PHP: **off** (`LeftoverMarker::enabled_for`).
+  Back on in round three.
 - `leftover-commented-code` on Python: **off**
-  (`LeftoverCommented::enabled_for`).
+  (`LeftoverCommented::enabled_for`). Still off after round three.
 - Every other pair: on. `vulnerable-dependency` on Packagist and on PyPI and
   `leftover-agent-marker` on Python are measured and pass; the rest are
   unmeasured with the zero checked.
@@ -671,3 +675,164 @@ covered.
 4. `vulnerable-dependency`: one finding per alias group, prefer the id with a
    severity; and the `ECOSYSTEM` range ordering so a finding can name the
    upgrade.
+
+## Round three: the two fixes, re-measured
+
+Round two named one false-positive class behind each pair it turned off, and
+a third source of noise on PyPI. Round three lands the three fixes on
+`engine/languages` (commits `dd2030e`, `e83c7e9`, `e8e3b8b`) and re-measures
+each on the round-two corpus it was seen on, with the same clones (Monica
+`32028ce3`, Poetry `4d69b9b1`, FastSpot as copied in round one), the same
+`locrin.toml` in each, a fresh `LOCRIN_CACHE_DIR` per run, and the same
+sampling rule and seed (`random.Random(11)`; every pair here is under 20, so
+every finding is labelled). Binary: `target/release/locrin.exe` built from
+`e8e3b8b`.
+
+### Per-pair changes
+
+**`leftover-agent-marker`, a marker word inside a path or a file name.**
+`has_marker` matched the four words on word boundaries, and `/` and `.` are
+word boundaries, so `avatars/XXX.jpg` held a marker. Now a marker word does
+not count when the character before it or after it is one a path or a file
+name is spelled with (`/`, `.`, `_`, `-`), or when what follows it opens a
+file extension (a `.` and one to five letters or digits: `XXX.jpg`,
+`TODO.md`). A `.` closing a sentence (`TODO.` at the end of a line) is not an
+extension, so a marker that ends a sentence still counts. Fixtures: the clean
+fixture carries `avatars/XXX.jpg`, `XXX-XXX-XXXX` and
+`fixtures/TODO_list.json`; the flag fixture carries `XXX handle this`; a new
+PHP clean fixture is the Monica comment verbatim
+(`a_placeholder_inside_a_php_path_is_not_a_marker`).
+
+**`leftover-commented-code`, a trailing colon alone in Python.** The Python
+vocabulary made `:` its only strong ending, so any prose header ending in a
+colon qualified a run on its own. Now no ending is strong on its own in
+Python: a colon is strong only through the `BlockColon` starts, that is,
+when the line opens with `if`, `elif`, `else`, `for`, `while`, `with`,
+`try`, `except`, `class` or `def` and ends in the colon. On its own a colon
+is a supporting signal, like a comma. Fixture: `# Note:` / `# this explains
+the function.` / `# Returns:` and the round-two `# Options Used:` table are
+clean (`python_prose_headers_ending_in_a_colon_are_not_code`, red against
+the old vocabulary); the flag fixture (`# for row in rows:` and two indented
+statements) still flags.
+
+**`vulnerable-dependency`, one finding per advisory family.** OSV returns the
+GHSA record and the PYSEC record that aliases it as two ids for one package.
+`osv::check` now groups the ids the batch returned for a package by their
+`aliases` (read from either record; a record whose detail was unavailable
+still joins through the other side) and reports one finding per family under
+its GHSA id, which is the record that carries the rating and the summary; a
+family with no GHSA id reports under its first id in sort order, so the
+anchor is stable. Two ids that name each other nowhere stay two findings.
+Tests: `two_aliased_advisories_are_one_finding_under_the_ghsa_id` through
+`check` with canned responses, plus two unit tests on the grouping.
+
+### Counts
+
+| Pair | Round two | Round three | Sampled | True | Gate | Default after round three |
+| --- | --- | --- | --- | --- | --- | --- |
+| leftover-agent-marker on PHP (Monica) | 5 | 4 | 4 | 4/4 | unmeasured, sample under 5; round two's false finding gone and the four true ones unchanged | **on** |
+| leftover-commented-code on Python (Poetry) | 14 | 1 | 1 | 0/1 | fails | **off** |
+| leftover-commented-code on Python (FastSpot) | 0 | 0 | 0 | not measurable | unmeasured | (off, above) |
+| vulnerable-dependency on PyPI (Poetry, online) | 25 | 13 | 13 | 13/13 | passes | on |
+
+Runs: Monica offline (fresh cache, 2859 ms engine, 3234 ms wall; ADVISORY
+12 = marker php 4 / js 1, commented php 3 / js 4); Poetry offline (fresh
+cache, 852 ms engine, 1804 ms wall, with the Python pair on for the
+measurement) and Poetry online (fresh cache, 6185 ms engine, 7166 ms wall;
+BLOCK 31 = marker py 18, PyPI 13); FastSpot offline (221 ms engine, 582 ms
+wall, PASS 0).
+
+### leftover-agent-marker on PHP: 4 true of 4, and the pair ships on
+
+| File | Line | Verdict | Reason |
+| --- | --- | --- | --- |
+| app/Http/Controllers/Api/ApiController.php | 68 | true | `// TODO: there is probably a much better way to do that`, no issue |
+| app/Http/Controllers/ContactsController.php | 386 | true | `// TODO: remove this part entirely when we redo this whole SpecialDate`, no issue |
+| tests/Browser/Settings/MultiFAControllerTest.php | 188 | true | `// TODO: test if user has 2fa enabled actually`, no issue |
+| tests/Browser/Settings/MultiFAControllerTest.php | 189 | true | `// TODO: test if session token auth is right`, no issue |
+
+The round-two sample was five with one false; the fix removes exactly that
+one (`MoveContactAvatarToPhotosDirectory.php:96`, `XXX` inside
+`` `avatars/XXX.jpg` ``) and changes nothing else, so the sample is four,
+all true, and no new finding appeared anywhere in the 1800 files. Four is
+under the five the gate scores, so by the letter the pair is unmeasured; the
+false-positive class that failed it is closed on the corpus that showed it,
+and pooled across rounds the pair is 6 true of 6 distinct markers on two
+repositories. `LeftoverMarker::enabled_for` is the trait's `true` again,
+with a doc comment citing this section, and
+`flags_markers_in_php_through_run_rules` pins that the PHP fixture's
+findings come through `run_rules`.
+
+### leftover-commented-code on Python: 0 true of 1, and the pair stays off
+
+| File | Line | Verdict | Reason |
+| --- | --- | --- | --- |
+| src/poetry/puzzle/provider.py | 696 | false | An eleven-line prose comment; the line `# with the following overrides:` opens with `with ` and ends in a colon, so it meets `BlockColon` and reads as a `with` block header, and `# For instance, if the foo (1.2.3) package has the following dependencies:` five lines up, ending in a colon, is the second code-looking line |
+
+Thirteen of round two's fourteen are gone and nothing new appeared; FastSpot
+is 0 as before. The one left is a second class, narrower than the first: a
+suite keyword that is also an English preposition, opening a prose line that
+ends in a colon. `with` is the only one of the ten suite keywords that does
+this naturally (`for instance:` was the other candidate and is case-sensitive
+prose here). A false positive of one finding is still a fail, and the brief
+for this round was to keep the pair off if any remained, so it stays off:
+`LeftoverCommented::enabled_for(Python)` is `false` with a doc comment
+citing this section, `python_is_off_by_default_after_the_precision_gate`
+still pins it, and the vocabulary tests run the rule directly. The fix is
+one more `Needs` variant: a `with` header needs the shape of one (a `(`, an
+` as `, or a dotted name before the colon). Then re-measure on Poetry, which
+should give zero, and the pair comes back on as unmeasured.
+
+### vulnerable-dependency on PyPI: 25 to 13, all 13 true
+
+The batch snapshot the online run stored today holds 25 ids across the five
+affected packages, the same 25 as round two (checked by reading the
+`osv_batch` row back: cryptography 7, dulwich 10, idna 2, msgpack 2, urllib3
+4). Twelve of them are PYSEC records whose `aliases` name a GHSA also in the
+list (round two's "10" counted the PYSEC copies inside its 20-finding
+sample; over all 25 it is 12). After grouping, 13 findings, one per GHSA:
+
+| Line | Package | Findings before | After | Ids reported |
+| --- | --- | --- | --- | --- |
+| 511 | cryptography 47.0.0 | 7 | 4 | GHSA-537c-gmf6-5ccf, GHSA-g6cj-pr64-35w5, GHSA-jwv3-5hgf-82ww, GHSA-m2h6-j472-rp4c |
+| 614 | dulwich 1.2.1 | 10 | 5 | GHSA-555p-6grf-mh7f, GHSA-897w-fcg9-f6xj, GHSA-9277-mp7x-85jf, GHSA-gfhv-vqv2-4544, GHSA-xrvj-v92f-53gj |
+| 834 | idna 3.13 | 2 | 1 | GHSA-65pc-fj4g-8rjx |
+| 1123 | msgpack 1.1.2 | 2 | 1 | GHSA-6v7p-g79w-8964 |
+| 2031 | urllib3 2.6.3 | 4 | 2 | GHSA-mf9v-mfxr-j63j, GHSA-qccp-gfcp-xxvc |
+
+Every GHSA in the round-two list is still reported, every one rated (no
+`UNKNOWN` left, no finding without a title), and no two GHSAs merged: the
+13 after are exactly the 13 GHSA ids before. All 13 were labelled true in
+round two against OSV directly and nothing about them changed. The Packagist
+side is untouched by construction (Packagist advisories arrive as GHSA only;
+round two's 68 had no aliases among themselves).
+
+### Resulting defaults after round three
+
+- `leftover-agent-marker`: **on** for every language.
+- `leftover-commented-code` on Python: **off** (`LeftoverCommented::enabled_for`),
+  the only per-language override left in the binary.
+- Every other pair: on, as after round two.
+
+### The documented limit
+
+Packagist and PyPI findings still do not name a fixed version. Both
+registries publish their advisories with `ECOSYSTEM` ranges, which this
+engine does not order, so every such finding says "Fixed version not read
+from this advisory" and points at the advisory id; a maintainer opens the
+advisory to learn what to upgrade to. This is the round-one follow-up and it
+is unchanged by this round: the family grouping decides which id a finding
+carries, not what the finding knows about versions. Ordering `ECOSYSTEM`
+ranges per registry (PEP 440 for PyPI, Composer's version scheme for
+Packagist) is the next change to this rule.
+
+### Follow-ups after round three
+
+1. `leftover-commented-code`: a `with` header needs the shape of one; then
+   re-measure on Poetry and turn Python back on.
+2. `leftover-commented-code`: a run should survive one blank line (round
+   two's note, still open).
+3. `vulnerable-dependency`: order `ECOSYSTEM` ranges so Packagist and PyPI
+   findings name the upgrade.
+4. A PHP corpus with five or more bare markers, so the PHP marker pair is
+   measured rather than unmeasured-and-clean.

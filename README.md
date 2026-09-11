@@ -412,15 +412,23 @@ Python's `breakpoint()`, `pdb` and its relatives, never `print`),
 and `poetry.lock` against PyPI). The other sixteen rules are written against
 the TypeScript grammar and never see a PHP or Python file. Every rule can ship
 off for one language on its own once it fails the precision gate there, and
-two do today: all ten pairs were measured on real repositories
-(`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, two rounds:
-BookStack and FastSpot, then Monica and Poetry), and `leftover-agent-marker`
-ships off on PHP (4 true of 5 on Monica, one `XXX` placeholder in a path) and
-`leftover-commented-code` ships off on Python (0 true of 14 on Poetry, every
-one a prose comment whose header ends in a colon). The other eight pairs ship
-on. A per-language off is not something `rules.<id>.enabled = true`
-overrides; a `rules.<id>.languages` override is the intended knob and does
-not exist yet.
+one does today: all ten pairs were measured on real repositories
+(`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, three
+rounds: BookStack and FastSpot, then Monica and Poetry, then the fixes
+re-measured on the same corpora). `leftover-commented-code` ships off on
+Python (0 true of 14 on Poetry in round two, every one a prose comment whose
+header ends in a colon; a colon now counts only behind a suite keyword, and
+one prose `with ... :` header remains, so it stays off). `leftover-agent-marker`
+went off on PHP in round two over one `XXX` placeholder inside a path and is
+back on: a marker word inside a path or a file name no longer counts, and the
+re-measure on Monica is 4 true of 4. The other nine pairs ship on. PyPI and
+Packagist advisories arrive under several ids (a GHSA record and the PYSEC or
+CVE record that aliases it); `vulnerable-dependency` reports one finding per
+family, under the GHSA id. Neither registry's findings name a fixed version
+yet: both publish `ECOSYSTEM` ranges the engine does not order, so the finding
+points at the advisory instead. A per-language off is not something
+`rules.<id>.enabled = true` overrides; a `rules.<id>.languages` override is
+the intended knob and does not exist yet.
 
 ## The network
 
