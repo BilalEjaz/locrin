@@ -1,3 +1,5 @@
+# While BilalEjaz/locrin is private, this needs its Actions setting "Access:
+# accessible from repositories owned by the user" and a download-token secret.
 name: deploy gate
 on:
   push:
@@ -15,6 +17,7 @@ jobs:
         run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD | head -n 1)" >> "$GITHUB_OUTPUT"
       - uses: BilalEjaz/locrin/action@v0.3.0
         with:
+          version: v0.3.0
           since: ${{ steps.last.outputs.tag }}
           comment: "false"
       # deploy steps follow; they never run when the gate blocks

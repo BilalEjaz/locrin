@@ -219,6 +219,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: BilalEjaz/locrin/action@v0.3.0
+        with:
+          version: v0.3.0
 ```
 
 The action downloads the release binary for the runner, verifies it against the
@@ -234,9 +236,16 @@ a merge base to diff against: a shallow checkout has none, and the default
 pull-request path then exits 2.
 
 The runner's token only reaches the repository the workflow runs in, so while
-`BilalEjaz/locrin` is private the download needs a `token` that can read its
-releases (a fine-grained PAT with Contents read on the locrin repository); once
-that repository is public the default `${{ github.token }}` is enough.
+`BilalEjaz/locrin` is private the download needs a `download-token` that can read
+its releases (a fine-grained PAT with Contents read on the locrin repository),
+while the comment keeps the workflow's own `token`. While locrin is private,
+`uses: BilalEjaz/locrin/action@...` from another repository also requires the
+locrin repository's Actions setting "Access: accessible from repositories owned
+by the user" (Settings, Actions, General); making the repository public removes
+both requirements and the default `${{ github.token }}` is enough.
+
+`version: latest` follows the newest release, so the binary can move ahead of the
+action ref; a pinned `version` matches the ref, which is what the examples do.
 
 There is one comment, not a wall of them. The summary starts with the marker
 `<!-- locrin-report -->` on its own line, and the action edits the first

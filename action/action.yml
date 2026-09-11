@@ -30,8 +30,11 @@ inputs:
     description: "Fail the step when the verdict is BLOCK"
     default: "true"
   token:
-    description: "Token for the comment and the release download"
+    description: "Token for the comment, and for the release download when download-token is empty"
     default: ${{ github.token }}
+  download-token:
+    description: "Token that can read BilalEjaz/locrin releases; needed while the repository is private; defaults to token"
+    default: ""
 
 outputs:
   exit-code:
@@ -54,7 +57,7 @@ runs:
       if: ${{ inputs.version != 'local' }}
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.token }}
+        GH_TOKEN: ${{ inputs.download-token || inputs.token }}
         REPO: BilalEjaz/locrin
         VERSION: ${{ inputs.version }}
       run: |
@@ -146,8 +149,14 @@ runs:
             gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"$FILE" >/dev/null
           fi
         }
-        existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-          --jq '.[] | select(.body | startswith("<!-- locrin-report -->")) | .id' | head -n 1) || existing=""
+        # No pipe: a `| head -n 1` would mask a failed lookup behind head's own
+        # exit 0, and posting then means a second comment on the pull request.
+        ids=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+          --jq '.[] | select(.body | startswith("<!-- locrin-report -->")) | .id') || {
+          echo "::warning::Locrin could not read the pull-request comments; skipping the comment to avoid a duplicate"
+          exit 0
+        }
+        existing=${ids%%$'\n'*}
         if ! write_comment; then
           echo "::warning::Locrin could not post the comment (missing pull-requests: write, typical for fork pull requests); the verdict is in the run log"
           exit 0
