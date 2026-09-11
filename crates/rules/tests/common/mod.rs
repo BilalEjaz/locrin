@@ -19,7 +19,10 @@ use locrin_rules::{run_rules, Rule, RuleContext};
 /// nothing under `Config::default()`.
 pub fn rule_on(id: &str) -> Config {
     let mut rules = std::collections::BTreeMap::new();
-    rules.insert(id.to_string(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+    rules.insert(
+        id.to_string(),
+        locrin_core::config::RuleOverride { enabled: Some(true), severity: None, languages: None },
+    );
     Config { rules, ..Config::default() }
 }
 

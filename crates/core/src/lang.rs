@@ -73,6 +73,12 @@ impl Language {
         }
     }
 
+    /// The language a config names, by the same spelling [`Language::as_str`]
+    /// prints. The inverse of that, so a repository writes what it reads.
+    pub fn from_name(name: &str) -> Option<Language> {
+        ALL.iter().copied().find(|l| l.as_str() == name)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Language::TypeScript => "typescript",

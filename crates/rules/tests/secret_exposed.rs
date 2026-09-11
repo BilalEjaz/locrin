@@ -207,7 +207,10 @@ fn a_service_role_jwt_and_a_key_in_a_block_comment_are_findings_an_anon_jwt_and_
 #[test]
 fn the_config_can_neither_disable_the_rule_nor_lower_its_severity() {
     let mut rules = std::collections::BTreeMap::new();
-    rules.insert("secret-exposed".to_string(), RuleOverride { enabled: Some(false), severity: Some(Severity::Low) });
+    rules.insert(
+        "secret-exposed".to_string(),
+        RuleOverride { enabled: Some(false), severity: Some(Severity::Low), languages: None },
+    );
     let config = Config { rules, ..Config::default() };
     let out = run_on(Box::new(SecretExposed), &fixture("secret_exposed", "edge"), &config);
     assert_eq!(hits(&out), vec![("mixed.ts".into(), 5), ("mixed.ts".into(), 17)], "{out:?}");

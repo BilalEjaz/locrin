@@ -146,10 +146,14 @@ mod tests {
     fn config_hash_moves_with_a_rule_override() {
         let a = config_hash(&Config::default(), "rules-v1");
         let mut c = Config::default();
-        c.rules.insert("leftover-debug".into(), RuleOverride { enabled: None, severity: Some(Severity::Low) });
+        c.rules.insert(
+            "leftover-debug".into(),
+            RuleOverride { enabled: None, severity: Some(Severity::Low), languages: None },
+        );
         assert_ne!(a, config_hash(&c, "rules-v1"));
         let mut off = Config::default();
-        off.rules.insert("leftover-debug".into(), RuleOverride { enabled: Some(false), severity: None });
+        off.rules
+            .insert("leftover-debug".into(), RuleOverride { enabled: Some(false), severity: None, languages: None });
         assert_ne!(config_hash(&c, "rules-v1"), config_hash(&off, "rules-v1"));
     }
 

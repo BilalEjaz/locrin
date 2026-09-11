@@ -337,7 +337,7 @@ fn a_configured_severity_overrides_every_advisorys_rating() {
     let mut config = locrin_core::config::Config::default();
     config.rules.insert(
         "vulnerable-dependency".into(),
-        locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low) },
+        locrin_core::config::RuleOverride { enabled: None, severity: Some(Severity::Low), languages: None },
     );
     let findings = run_on_seeded(
         Box::new(VulnerableDependency),

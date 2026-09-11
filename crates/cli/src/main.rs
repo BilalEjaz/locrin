@@ -176,6 +176,12 @@ fn real_main() -> anyhow::Result<i32> {
             let diff = base.map(git::DiffScope::Base).or(since.map(git::DiffScope::Since));
             let opts = run::Options { root, paths, changed_only: changed, json, offline, diff };
             let verdict = run::check(&opts)?;
+            // The languages a rule advertises are the ones it reports on in this
+            // repository, so a `[rules.<id>] languages` override is what the
+            // log says. A config that cannot be read here is not worth failing
+            // a finished run over: the run itself already loaded it, and every
+            // rule then keeps its own declaration.
+            let config = locrin_core::config::Config::load(&opts.root).unwrap_or_default();
             let rules = || -> Vec<locrin_reporters::sarif::RuleMeta> {
                 locrin_rules::all_rules()
                     .iter()
@@ -185,7 +191,7 @@ fn real_main() -> anyhow::Result<i32> {
                         severity: r.default_severity(),
                         category: r.category(),
                         enabled_by_default: r.enabled_by_default(),
-                        languages: r.languages().iter().map(|l| l.as_str()).collect(),
+                        languages: locrin_rules::languages_of(r.as_ref(), &config).iter().map(|l| l.as_str()).collect(),
                     })
                     .collect()
             };
