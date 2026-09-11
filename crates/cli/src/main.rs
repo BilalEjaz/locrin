@@ -19,6 +19,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "locrin",
+    // Whatever the crate was built at, so a bug report and the version stamped
+    // into a baseline file name the same build.
+    version,
     about = "Deterministic quality gate for code written by people and agents",
     long_about = "Deterministic quality gate for code written by people and agents.\n\n\
                   The index lives outside the repository, in the platform cache directory. Set \
@@ -86,6 +89,11 @@ enum Cmd {
         cmd: BaselineCmd,
     },
     /// Run as an agent hook, reading the event as JSON on stdin
+    ///
+    /// The two agent hooks give up after LOCRIN_HOOK_BUDGET_MS milliseconds
+    /// (2000 by default) and let the work through unchecked, so that an editor
+    /// never waits on the engine; raise it on a CI box slow enough that a real
+    /// check does not fit.
     Hook {
         #[command(subcommand)]
         cmd: HookCmd,

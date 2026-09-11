@@ -178,8 +178,19 @@ pub fn extract(file: &ParsedFile) -> Vec<Symbol> {
     out
 }
 
+/// The file's symbol table, extracted on the first call and shared after it.
+///
+/// [`extract`] walks the whole tree and allocates a fresh Vec, and its callers
+/// ask per finding rather than per file, so a file with many findings paid for
+/// a walk each. Anything that only reads the table should come through here;
+/// `extract` stays for the caller that wants a table of its own to hand on, as
+/// [`store`] does.
+pub fn symbols_of(file: &ParsedFile) -> &[Symbol] {
+    file.symbols.get_or_init(|| extract(file))
+}
+
 pub fn enclosing_symbol(file: &ParsedFile, line: u32) -> Option<String> {
-    extract(file).into_iter().find(|s| s.start_line <= line && line <= s.end_line).map(|s| s.name)
+    symbols_of(file).iter().find(|s| s.start_line <= line && line <= s.end_line).map(|s| s.name.clone())
 }
 
 /// Replaces the stored symbols for `file.rel` atomically. The delete and every
@@ -432,6 +443,21 @@ export enum Color { Red }
         let p = parsed();
         assert_eq!(enclosing_symbol(&p, 3).as_deref(), Some("main"));
         assert_eq!(enclosing_symbol(&p, 1), None);
+    }
+
+    /// The table is extracted once per file and then shared. `extract` walks the
+    /// whole tree and allocates a fresh Vec, and `anchor_for` asks for the table
+    /// once per finding, so a file with many findings used to pay for one walk
+    /// each; the same allocation coming back is what says it does not any more.
+    #[test]
+    fn symbols_of_extracts_once_and_hands_back_the_same_table() {
+        let p = parsed();
+        let first = symbols_of(&p);
+        let second = symbols_of(&p);
+        assert_eq!(first.as_ptr(), second.as_ptr(), "the second call extracted the file again");
+        // The same symbols a caller of `extract` would have got, in the same
+        // order: the cache is a cache and not a different answer.
+        assert_eq!(first, extract(&p).as_slice());
     }
 
     #[test]

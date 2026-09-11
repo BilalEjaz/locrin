@@ -27,9 +27,41 @@ pub struct Entry {
     pub severity: Option<Severity>,
 }
 
+/// The accepted findings, and the engine version that wrote them down.
+///
+/// `version` is stamped on every save and read back on every load. A finding id
+/// is derived from its rule id and its anchor, and both of those move between
+/// engine versions: ids that changed leave every entry in the file suppressing
+/// nothing, silently. The stamp is what lets [`Baseline::load`] say so. It is
+/// optional and defaulted so a file written before the field existed still
+/// loads, which is the pre-0.2.0 case.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Baseline {
+    #[serde(default)]
+    pub version: Option<String>,
     pub entries: Vec<Entry>,
+}
+
+/// The engine version, as every crate in the workspace shares one.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Says on stderr that the baseline was written by a different engine, once per
+/// load. Nothing is printed when the stamp matches, which is every ordinary run.
+///
+/// An absent stamp is a file written before the field existed rather than an
+/// unknown one, so it is named as an older locrin instead of being guessed at.
+fn warn_if_stale(stamp: Option<&str>) {
+    if stamp == Some(VERSION) {
+        return;
+    }
+    let written_by = match stamp {
+        Some(old) => format!("locrin {old}"),
+        None => "an older locrin".to_string(),
+    };
+    eprintln!(
+        "warning: {BASELINE_FILE} was written by {written_by}; this is {VERSION}. Ids may have changed; run \
+         locrin baseline create to refresh."
+    );
 }
 
 /// Today as `YYYY-MM-DD` in UTC, via Howard Hinnant's civil-from-days, so the
@@ -53,13 +85,21 @@ fn today() -> String {
 impl Baseline {
     /// Reads `locrin-baseline.json` from the repository root. An absent file is
     /// an empty baseline, not an error.
+    ///
+    /// A file another engine version wrote warns on stderr and loads anyway.
+    /// Suppressing what was signed off is the whole job of the file, and
+    /// refusing it over a version string would turn one warning into a wall of
+    /// findings nobody asked to see; the entries whose ids did survive the
+    /// version change still do their job.
     pub fn load(repo_root: &Path) -> anyhow::Result<Baseline> {
         let path = repo_root.join(BASELINE_FILE);
         if !path.exists() {
             return Ok(Baseline::default());
         }
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("invalid {}", path.display()))
+        let baseline: Baseline = serde_json::from_str(&text).with_context(|| format!("invalid {}", path.display()))?;
+        warn_if_stale(baseline.version.as_deref());
+        Ok(baseline)
     }
 
     /// Writes pretty JSON with the entries sorted by id, so the file is a stable
@@ -71,6 +111,10 @@ impl Baseline {
     /// suppresses nothing and no longer parses.
     pub fn save(&self, repo_root: &Path) -> anyhow::Result<()> {
         let mut copy = self.clone();
+        // The version that wrote the file, not the version that first created
+        // it: a file this engine rewrote is a file whose ids this engine
+        // produced, whatever wrote the entries before.
+        copy.version = Some(VERSION.to_string());
         copy.entries.sort_by(|a, b| a.id.cmp(&b.id));
         let path = repo_root.join(BASELINE_FILE);
         let tmp = repo_root.join(format!("{BASELINE_FILE}.tmp"));
@@ -185,6 +229,52 @@ mod tests {
         b.save(path(&dir)).unwrap();
         let b2 = Baseline::load(path(&dir)).unwrap();
         assert_eq!(b2.entries[0].severity, Some(Severity::High));
+    }
+
+    /// Ids are derived from rule ids and anchors, and both change between
+    /// engine versions, so a baseline carries the version that wrote it: the
+    /// stamp is what lets a later run say the suppressions may no longer match.
+    #[test]
+    fn a_saved_baseline_records_the_engine_version() {
+        let dir = fresh("baseline-version");
+        let mut b = Baseline::default();
+        assert_eq!(b.version, None);
+        b.accept(&f("a"), "legacy script", "tester");
+        b.save(path(&dir)).unwrap();
+        let b2 = Baseline::load(path(&dir)).unwrap();
+        assert_eq!(b2.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// A baseline written before the stamp existed is a pre-0.2.0 file, not a
+    /// corrupt one: it loads, and the warning about it is on stderr.
+    #[test]
+    fn a_baseline_without_a_version_still_loads() {
+        let dir = fresh("baseline-no-version");
+        std::fs::write(
+            path(&dir).join(BASELINE_FILE),
+            r#"{"entries":[{"id":"a","rule":"leftover-debug","file":"src/a.ts","reason":"legacy","author":"t","date":"2026-09-05"}]}"#,
+        )
+        .unwrap();
+        let b = Baseline::load(path(&dir)).unwrap();
+        assert_eq!(b.version, None);
+        assert_eq!(b.entries.len(), 1);
+        assert!(b.contains("a"));
+    }
+
+    /// A stale stamp warns and nothing more. Suppressing findings is the whole
+    /// job of the file, and refusing to load it would turn a warning into a
+    /// wall of findings the person never asked to see.
+    #[test]
+    fn a_baseline_from_another_version_still_loads() {
+        let dir = fresh("baseline-stale-version");
+        std::fs::write(
+            path(&dir).join(BASELINE_FILE),
+            r#"{"version":"0.0.1","entries":[{"id":"a","rule":"leftover-debug","file":"src/a.ts","reason":"legacy","author":"t","date":"2026-09-05"}]}"#,
+        )
+        .unwrap();
+        let b = Baseline::load(path(&dir)).unwrap();
+        assert_eq!(b.version.as_deref(), Some("0.0.1"));
+        assert!(b.contains("a"));
     }
 
     /// A baseline written before the severity field existed must still load: the

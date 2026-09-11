@@ -157,14 +157,16 @@ pub fn line_span(file: &ParsedFile, line: u32) -> Span {
 /// part is a line number, so moving the whole function down the file leaves
 /// both ids alone (spec 7.1).
 pub fn anchor_for(file: &ParsedFile, line: u32) -> String {
-    // The symbol table is extracted once here and then asked many times.
-    // `enclosing_symbol` is not a lookup: each call walks the whole tree and
+    // The symbol table is extracted once per file and then asked many times.
+    // `enclosing_symbol` is not a lookup: extracting walks the whole tree and
     // allocates the symbol list again, so asking it once per identical earlier
     // line made a file of byte-identical flagged lines cost tree walks
-    // quadratically. Resolving against this Vec instead picks exactly what
-    // `enclosing_symbol` picks, the first symbol in extraction order whose span
-    // covers the line, for one walk per finding.
-    let symbols = locrin_core::symbols::extract(file);
+    // quadratically, and extracting here made a file with many findings pay for
+    // one walk each. `symbols_of` extracts on the first call and hands back the
+    // same table after it, so a file costs one walk however many findings it
+    // has. Resolving against that table picks exactly what `enclosing_symbol`
+    // picks: the first symbol in extraction order whose span covers the line.
+    let symbols = locrin_core::symbols::symbols_of(file);
     let enclosing = |at: u32| symbols.iter().find(|s| s.start_line <= at && at <= s.end_line).map(|s| s.name.as_str());
     let symbol = enclosing(line);
     let text = line_text(file, line);

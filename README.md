@@ -37,6 +37,17 @@ because the parser is handed a copy with each NUL replaced by a byte the lexer
 does not reserve, one byte for one byte, while every rule reads the file as it
 is written.
 
+A stray `>` in JSX text, as in `5 > 3 wins`, is tolerated by that same rule: the
+scanner's refusal parents to the element among its text children, and only a run
+carrying `<`, `{` or `}` is markup the parser gave up on. What stays excluded is
+an `&` whose text run carries on past a full stop or a comma, as in
+`tea & toast. Lovely`, because the parser recovers by reading the remainder as a
+member expression, which swallows the element and leaves the error at the top of
+the file rather than inside it; the file is then excluded from every rule with
+one `warning: parse errors in <file>; excluded from rules` line on stderr. The
+same text ending at the full stop, `tea & toast.`, is tolerated like any other
+ampersand.
+
 ## Install
 
 ```

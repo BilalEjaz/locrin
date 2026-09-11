@@ -35,7 +35,25 @@ fn stop_payload(name: &str, dir: &Path) -> String {
 /// Runs a hook the way Claude Code does: the payload on stdin, the project
 /// directory as the working directory, nothing on the command line.
 fn run_hook(dir: &Path, subcommand: &str, payload: &str) -> Output {
-    let mut child = locrin(dir)
+    run_hook_with_budget(dir, subcommand, payload, None)
+}
+
+/// The same, with the watchdog budget set for this run only. `None` leaves the
+/// environment variable unset, which is how every other test here runs and how
+/// Claude Code runs the hook.
+fn run_hook_with_budget(dir: &Path, subcommand: &str, payload: &str, budget_ms: Option<&str>) -> Output {
+    let mut cmd = locrin(dir);
+    match budget_ms {
+        Some(ms) => {
+            cmd.env("LOCRIN_HOOK_BUDGET_MS", ms);
+        }
+        // The child inherits this process's environment, so leaving the
+        // variable alone is not the same as leaving it unset.
+        None => {
+            cmd.env_remove("LOCRIN_HOOK_BUDGET_MS");
+        }
+    }
+    let mut child = cmd
         .args(["hook", subcommand])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -71,6 +89,32 @@ fn post_edit_blocks_on_a_dirty_file() {
     assert!(reason.starts_with("BLOCK"), "{reason}");
     assert!(reason.contains("leftover-debug"), "{reason}");
     assert!(reason.contains("src/dirty.ts:"), "{reason}");
+}
+
+/// The budget is an editor's patience rather than a property of the engine, so
+/// a slow box can raise it and this test can lower it. A millisecond is below
+/// any real check, so the file that blocks above times out instead: the edit
+/// goes through unchecked and the person is told, which is what the budget is
+/// for.
+#[test]
+fn the_post_edit_budget_is_overridable_and_defaults_to_two_seconds() {
+    let dir = copy_fixture();
+    let file = dir.path().join("src/dirty.ts");
+    let sent = payload("post_edit_write.json", dir.path(), &file.display().to_string());
+
+    let out = run_hook_with_budget(dir.path(), "post-edit", &sent, Some("1"));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let v = json_of(&out);
+    assert!(v["decision"].is_null(), "{v}");
+    let message = v["systemMessage"].as_str().unwrap();
+    assert!(message.contains("did not finish in 1 ms"), "{message}");
+    assert!(message.contains("src/dirty.ts"), "{message}");
+
+    // Unset, the same edit gets the default budget, which is long enough for
+    // the check to finish and block on it.
+    let out = post_edit(dir.path(), &sent);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(json_of(&out)["decision"], "block");
 }
 
 #[test]
