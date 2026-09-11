@@ -85,9 +85,10 @@ pub enum Fix {
     /// holds the installed version, which is the batch endpoint and the
     /// document disagreeing about what is affected.
     OutsideAllSemver,
-    /// The entry's ranges are all in forms this engine does not order
-    /// (`ECOSYSTEM`, `GIT`), so no range was ever compared against the
-    /// installed version and no upgrade was read. The finding itself is not in
+    /// No range that holds the installed version was read, and at least one of
+    /// the entry's ranges is in a form this engine does not order: a `GIT`
+    /// range, an `ECOSYSTEM` range for a registry with no comparator here, or a
+    /// range one of whose boundaries did not parse. The finding itself is not in
     /// doubt: the batch endpoint matched this exact version server side. Only
     /// the version to move to is missing, and saying that no fix applies would
     /// be the engine reporting a comparison it never made.
@@ -422,11 +423,9 @@ fn advisory_from(id: &str, detail: &Value, package: &str, version: &str, ecosyst
 /// The two answers that name no version and are not that one are the point of
 /// the enum. [`Fix::OutsideAllSemver`] is a document that was read and holds no
 /// range covering this version, which is the batch endpoint and the detail
-/// document disagreeing. [`Fix::UnreadableRanges`] is an entry whose ranges are
-/// all `ECOSYSTEM` or `GIT`, which this comparison does not order and therefore
-/// never looked inside: nothing disagrees there, and nothing was read either.
-/// Most PyPI and Packagist advisories are published that way, so the difference
-/// is the common case rather than a corner of it.
+/// document disagreeing. [`Fix::UnreadableRanges`] is an entry with at least one
+/// range this comparison does not order and none it does that holds the
+/// version: nothing disagrees there, and nothing was read either.
 fn fixed_for(detail: &Value, package: &str, version: &str, ecosystem: &str) -> Fix {
     let mut unordered = false;
     for affected in detail.get("affected").and_then(Value::as_array).into_iter().flatten() {
@@ -437,22 +436,22 @@ fn fixed_for(detail: &Value, package: &str, version: &str, ecosystem: &str) -> F
             continue;
         }
         for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
-            // Counted, not read. Taking its `fixed` event would be naming a
-            // version chosen by its position in a list this engine cannot
-            // order, which is the wrong-upgrade bug the range check exists to
-            // prevent.
-            if !is_semver_range(range) {
-                unordered = true;
-                continue;
-            }
-            match containing_range(range, version) {
+            match containing_range(range, version, ecosystem) {
                 // The range holding the installed version names the upgrade.
-                Some(Some(fixed)) => return Fix::Named(fixed),
+                RangeSays::Holds(Some(fixed)) => return Fix::Named(fixed),
                 // It holds the version and names no upgrade. There is no
                 // second opinion to look for: this is the branch the
                 // repository is on.
-                Some(None) => return Fix::NonePublished,
-                None => continue,
+                RangeSays::Holds(None) => return Fix::NonePublished,
+                RangeSays::Outside => continue,
+                // Counted, not read. Taking its `fixed` event would be naming a
+                // version chosen by its position in a list this engine cannot
+                // order, which is the wrong-upgrade bug the range check exists
+                // to prevent.
+                RangeSays::Unreadable => {
+                    unordered = true;
+                    continue;
+                }
             }
         }
     }
@@ -499,9 +498,54 @@ fn pep503(name: &str) -> String {
     out
 }
 
-/// Whether a range is one this engine orders. See [`containing_range`].
-fn is_semver_range(range: &Value) -> bool {
-    range.get("type").and_then(Value::as_str) == Some("SEMVER")
+/// What one range of an advisory said about the installed version.
+///
+/// Three answers, because "the range does not hold this version" and "this
+/// range was never compared against anything" are different facts and
+/// [`fixed_for`] reports them as different findings.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeSays {
+    /// The range holds the version, and names this release as the fix, or names
+    /// none at all.
+    Holds(Option<String>),
+    /// The range was read and does not hold the version.
+    Outside,
+    /// The range is in a form this engine does not order, or one of its
+    /// boundaries is not a version the ecosystem's comparator reads.
+    Unreadable,
+}
+
+/// How two versions of one ecosystem are ordered, or `None` when either of them
+/// is not a version that comparator reads.
+type Order = fn(&str, &str) -> Option<Ordering>;
+
+/// The SEMVER comparator, in the shape the range reader takes. [`version_cmp`]
+/// is total by construction (an unreadable boundary falls back to a string
+/// comparison), so it never gives up.
+fn semver_order(a: &str, b: &str) -> Option<Ordering> {
+    Some(version_cmp(a, b))
+}
+
+/// The comparator for one range, or `None` when this engine has none for it.
+///
+/// A `SEMVER` range is ordered by semver whatever registry it came from, which
+/// is what the type means. An `ECOSYSTEM` range carries the registry's own
+/// version strings, so it is ordered by the registry's own rules and only for
+/// the registries whose rules are implemented here: PyPI's PEP 440 and
+/// Packagist's Composer ordering. npm keeps none, because npm advisories
+/// publish `SEMVER` ranges and inventing a second reading of the same versions
+/// could only make the two disagree. A `GIT` range names commits and orders
+/// nothing.
+fn range_order(range: &Value, ecosystem: &str) -> Option<Order> {
+    match range.get("type").and_then(Value::as_str) {
+        Some("SEMVER") => Some(semver_order),
+        Some("ECOSYSTEM") => match ecosystem {
+            crate::lockfile::PYPI => Some(pep440_cmp),
+            crate::lockfile::PACKAGIST => Some(composer_cmp),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The upgrade half of [`fixed_for`]. The range tests read it, because the
@@ -514,23 +558,25 @@ fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
     }
 }
 
-/// Whether a SEMVER range contains `version`, and the `fixed` it names if it
-/// does: `Some(Some(fixed))` for a contained version with a fix,
-/// `Some(None)` for a contained version with none, `None` for a range that does
-/// not contain it.
+/// Whether a range contains `version`, and the `fixed` it names if it does.
 ///
-/// Only `SEMVER` ranges are read. A `GIT` range names commits, and an
-/// `ECOSYSTEM` range carries the same version strings but is not guaranteed to
-/// be ordered by them, so neither is a range this comparison can answer. That
-/// costs the `fixed` version on the advisories that publish PyPI and Packagist
-/// ranges as `ECOSYSTEM` only, and [`fixed_for`] reports those as
-/// [`Fix::UnreadableRanges`] rather than as a version no range covers: such a
+/// The range is read with the comparator [`range_order`] picks for its type and
+/// the package's ecosystem. A range with no comparator is
+/// [`RangeSays::Unreadable`], and so is one whose boundaries that comparator
+/// cannot read: a range is read whole or not at all, because a boundary nobody
+/// can order is a comparison nobody can make, and answering from the other half
+/// of the interval would be a guess. [`fixed_for`] turns that into
+/// [`Fix::UnreadableRanges`] rather than into a version no range covers: such a
 /// finding names the advisory and no upgrade, which is a thinner sentence
 /// rather than a wrong one.
-fn containing_range(range: &Value, version: &str) -> Option<Option<String>> {
-    if !is_semver_range(range) {
-        return None;
-    }
+fn containing_range(range: &Value, version: &str, ecosystem: &str) -> RangeSays {
+    let Some(order) = range_order(range, ecosystem) else {
+        return RangeSays::Unreadable;
+    };
+    // Every boundary is compared against the one installed version, so an
+    // unreadable one is either boundary or the version itself, and the answer
+    // is the same in all three cases.
+    let at_least = |boundary: &str| order(version, boundary).map(|o| o != Ordering::Less);
     let mut introduced: Option<&str> = None;
     for event in range.get("events").and_then(Value::as_array).into_iter().flatten() {
         if let Some(at) = event.get("introduced").and_then(Value::as_str) {
@@ -540,10 +586,14 @@ fn containing_range(range: &Value, version: &str) -> Option<Option<String>> {
         // A half-open interval closed by its fix: `introduced <= v < fixed`.
         if let Some(fixed) = event.get("fixed").and_then(Value::as_str) {
             let opened = introduced.take();
-            if opened.is_some_and(|at| version_cmp(version, at) != Ordering::Less)
-                && version_cmp(version, fixed) == Ordering::Less
-            {
-                return Some(Some(fixed.to_string()));
+            let Some(after_start) = opened.map(at_least).unwrap_or(Some(false)) else {
+                return RangeSays::Unreadable;
+            };
+            let Some(order_to_fix) = order(version, fixed) else {
+                return RangeSays::Unreadable;
+            };
+            if after_start && order_to_fix == Ordering::Less {
+                return RangeSays::Holds(Some(fixed.to_string()));
             }
             continue;
         }
@@ -552,18 +602,314 @@ fn containing_range(range: &Value, version: &str) -> Option<Option<String>> {
         // last_affected`, and no version to upgrade to.
         if let Some(last) = event.get("last_affected").and_then(Value::as_str) {
             let opened = introduced.take();
-            if opened.is_some_and(|at| version_cmp(version, at) != Ordering::Less)
-                && version_cmp(version, last) != Ordering::Greater
-            {
-                return Some(None);
+            let Some(after_start) = opened.map(at_least).unwrap_or(Some(false)) else {
+                return RangeSays::Unreadable;
+            };
+            let Some(order_to_last) = order(version, last) else {
+                return RangeSays::Unreadable;
+            };
+            if after_start && order_to_last != Ordering::Greater {
+                return RangeSays::Holds(None);
             }
         }
     }
     // An `introduced` with nothing closing it runs to the end of time.
-    match introduced {
-        Some(at) if version_cmp(version, at) != Ordering::Less => Some(None),
-        _ => None,
+    match introduced.map(at_least) {
+        Some(None) => RangeSays::Unreadable,
+        Some(Some(true)) => RangeSays::Holds(None),
+        _ => RangeSays::Outside,
     }
+}
+
+/// A PyPI version in the form PEP 440 compares by: the epoch, the release
+/// segments with their trailing zeros dropped (`1.0` and `1.0.0` are one
+/// version), and then the three suffixes and the local label, each in a key
+/// whose derived ordering is the specification's own.
+///
+/// The fields are declared in comparison order, which is what `Ord` derives
+/// from, so the whole comparison is `#[derive(Ord)]` over the parse.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Pep440 {
+    epoch: u64,
+    release: Vec<u64>,
+    pre: Pep440Pre,
+    /// A post release sorts after the version it follows, and `None` sorts
+    /// before `Some` already.
+    post: Option<u64>,
+    dev: Pep440Dev,
+    /// A local version sorts after the public version it labels, and `None`
+    /// sorts before `Some` already.
+    local: Option<Vec<LocalSegment>>,
+}
+
+/// Where a version sits against the pre-releases of the same release.
+///
+/// `dev < pre < final < post` is the specification's ordering, and the two ends
+/// of it are not pre-release tags at all, so they are variants here: a bare dev
+/// release (no pre, no post) precedes every pre-release of its version, and a
+/// version with no pre-release at all follows every one of them.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Pep440Pre {
+    DevOnly,
+    Tag(PreTag, u64),
+    Final,
+}
+
+/// `a < b < rc`, after the spellings PEP 440 normalises away (`alpha`, `beta`,
+/// `c`, `pre`, `preview`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PreTag {
+    A,
+    B,
+    Rc,
+}
+
+/// A dev release precedes the version it is a dev release of, so the absent
+/// case has to sort last and cannot be an `Option`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Pep440Dev {
+    At(u64),
+    None,
+}
+
+/// A segment of a local version label. Numeric segments sort after
+/// alphabetic ones, which is what the declaration order says.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalSegment {
+    Text(String),
+    Number(u64),
+}
+
+/// Orders two PyPI versions by PEP 440, or `None` when either is not a version
+/// that specification describes.
+fn pep440_cmp(a: &str, b: &str) -> Option<Ordering> {
+    Some(parse_pep440(a)?.cmp(&parse_pep440(b)?))
+}
+
+/// `[N!]N(.N)*[{a|b|rc}N][.postN][.devN][+local]`, with the separators and
+/// spellings the specification permits and normalises.
+fn parse_pep440(version: &str) -> Option<Pep440> {
+    let lowered = version.trim().to_ascii_lowercase();
+    let public = lowered.strip_prefix('v').unwrap_or(&lowered);
+    let (public, local) = match public.split_once('+') {
+        Some((public, label)) => (public, Some(parse_local(label)?)),
+        None => (public, None),
+    };
+    let (epoch, rest) = match public.split_once('!') {
+        Some((epoch, rest)) => (epoch.parse().ok()?, rest),
+        None => (0, public),
+    };
+    let (release, rest) = parse_release(rest)?;
+    let (pre, rest) = parse_pep440_pre(rest);
+    let (post, rest) = parse_pep440_post(rest);
+    let (dev, rest) = parse_pep440_dev(rest);
+    // Anything left over is a version this comparator does not read, and a
+    // version it does not read is never guessed at.
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(Pep440 {
+        epoch,
+        release,
+        pre: match (pre, post, &dev) {
+            (Some((tag, n)), _, _) => Pep440Pre::Tag(tag, n),
+            (None, None, Pep440Dev::At(_)) => Pep440Pre::DevOnly,
+            (None, _, _) => Pep440Pre::Final,
+        },
+        post,
+        dev,
+        local,
+    })
+}
+
+/// The dotted numbers a version opens with, and whatever follows them. Trailing
+/// zeros are dropped, because `1.0` and `1.0.0` are one version.
+fn parse_release(s: &str) -> Option<(Vec<u64>, &str)> {
+    let mut release = Vec::new();
+    let mut rest = s;
+    loop {
+        let (number, after) = take_number(rest);
+        release.push(number?);
+        rest = after;
+        match rest.strip_prefix('.') {
+            Some(next) if next.starts_with(|c: char| c.is_ascii_digit()) => rest = next,
+            _ => break,
+        }
+    }
+    while release.len() > 1 && release.last() == Some(&0) {
+        release.pop();
+    }
+    Some((release, rest))
+}
+
+/// The leading digits of `s` as a number, and the rest of it. `None` when there
+/// are no leading digits, or too many of them to hold.
+fn take_number(s: &str) -> (Option<u64>, &str) {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    (s[..end].parse().ok(), &s[end..])
+}
+
+/// One optional `-`, `_` or `.` between a version and a suffix.
+fn strip_separator(s: &str) -> &str {
+    s.strip_prefix(['-', '_', '.']).unwrap_or(s)
+}
+
+/// The pre-release suffix, longest spelling first so `alpha` is not read as `a`
+/// and `preview` is not read as `pre`. An absent number is a zero (`1.0a` is
+/// `1.0a0`), and no suffix at all leaves `s` exactly as it was for the next
+/// parser to try.
+fn parse_pep440_pre(s: &str) -> (Option<(PreTag, u64)>, &str) {
+    const TAGS: &[(&str, PreTag)] = &[
+        ("alpha", PreTag::A),
+        ("beta", PreTag::B),
+        ("preview", PreTag::Rc),
+        ("pre", PreTag::Rc),
+        ("rc", PreTag::Rc),
+        ("a", PreTag::A),
+        ("b", PreTag::B),
+        ("c", PreTag::Rc),
+    ];
+    let body = strip_separator(s);
+    for (label, tag) in TAGS {
+        if let Some(after) = body.strip_prefix(label) {
+            let (number, rest) = take_number(strip_separator(after));
+            return (Some((*tag, number.unwrap_or(0))), rest);
+        }
+    }
+    (None, s)
+}
+
+/// The post-release suffix, in both the spelled forms (`post`, `rev`, `r`) and
+/// the bare one PEP 440 keeps for compatibility: `1.0-1` is `1.0.post1`.
+fn parse_pep440_post(s: &str) -> (Option<u64>, &str) {
+    if let Some(after) = s.strip_prefix('-') {
+        if let (Some(number), rest) = take_number(after) {
+            return (Some(number), rest);
+        }
+    }
+    let body = strip_separator(s);
+    for label in ["post", "rev", "r"] {
+        if let Some(after) = body.strip_prefix(label) {
+            let (number, rest) = take_number(strip_separator(after));
+            return (Some(number.unwrap_or(0)), rest);
+        }
+    }
+    (None, s)
+}
+
+fn parse_pep440_dev(s: &str) -> (Pep440Dev, &str) {
+    if let Some(after) = strip_separator(s).strip_prefix("dev") {
+        let (number, rest) = take_number(strip_separator(after));
+        return (Pep440Dev::At(number.unwrap_or(0)), rest);
+    }
+    (Pep440Dev::None, s)
+}
+
+/// A local version label: alphanumeric segments separated by `-`, `_` or `.`.
+fn parse_local(label: &str) -> Option<Vec<LocalSegment>> {
+    if label.is_empty() {
+        return None;
+    }
+    label
+        .split(['-', '_', '.'])
+        .map(|segment| {
+            if segment.is_empty() || !segment.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            Some(match segment.parse() {
+                Ok(number) => LocalSegment::Number(number),
+                Err(_) => LocalSegment::Text(segment.to_string()),
+            })
+        })
+        .collect()
+}
+
+/// A Packagist version in the form Composer's normaliser compares by: the
+/// numeric part with its trailing zeros dropped, then the stability suffix and
+/// its number.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ComposerVersion {
+    release: Vec<u64>,
+    stability: Stability,
+    number: u64,
+}
+
+/// Composer's stability ladder. `stable` is where a version with no suffix
+/// sits, and a patch release (`-p1`, `-pl1`) sits above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Stability {
+    Dev,
+    Alpha,
+    Beta,
+    Rc,
+    Stable,
+    Patch,
+}
+
+/// Orders two Packagist versions the way Composer does, or `None` when either
+/// is not a release: a `dev-` branch name is a branch, and anything this
+/// normaliser does not recognise is not guessed at.
+fn composer_cmp(a: &str, b: &str) -> Option<Ordering> {
+    Some(parse_composer(a)?.cmp(&parse_composer(b)?))
+}
+
+fn parse_composer(version: &str) -> Option<ComposerVersion> {
+    let lowered = version.trim().to_ascii_lowercase();
+    // `dev-main` names a branch rather than a release, and no ordering of it
+    // against a release means anything.
+    if lowered.starts_with("dev-") {
+        return None;
+    }
+    let body = lowered.strip_prefix('v').unwrap_or(&lowered);
+    let (numbers, suffix) = match body.split_once('-') {
+        Some((numbers, suffix)) => (numbers, Some(suffix)),
+        None => (body, None),
+    };
+    let mut release = Vec::new();
+    for part in numbers.split('.') {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        release.push(part.parse().ok()?);
+    }
+    // `1.0` and `1.0.0.0` are one version: Composer pads the numeric part to
+    // four segments, which is the same comparison as dropping trailing zeros.
+    while release.len() > 1 && release.last() == Some(&0) {
+        release.pop();
+    }
+    let (stability, number) = match suffix {
+        Some(suffix) => parse_stability(suffix)?,
+        None => (Stability::Stable, 0),
+    };
+    Some(ComposerVersion { release, stability, number })
+}
+
+/// A stability suffix and its number, with Composer's own aliases (`a`, `b`,
+/// `pl`, `p`) and the longest spelling tried first.
+fn parse_stability(suffix: &str) -> Option<(Stability, u64)> {
+    const LABELS: &[(&str, Stability)] = &[
+        ("alpha", Stability::Alpha),
+        ("beta", Stability::Beta),
+        ("stable", Stability::Stable),
+        ("patch", Stability::Patch),
+        ("dev", Stability::Dev),
+        ("rc", Stability::Rc),
+        ("pl", Stability::Patch),
+        ("a", Stability::Alpha),
+        ("b", Stability::Beta),
+        ("p", Stability::Patch),
+    ];
+    for (label, stability) in LABELS {
+        let Some(after) = suffix.strip_prefix(label) else {
+            continue;
+        };
+        let rest = strip_separator(after);
+        if rest.is_empty() {
+            return Some((*stability, 0));
+        }
+        return Some((*stability, rest.parse().ok()?));
+    }
+    None
 }
 
 /// Orders two version strings.
@@ -958,23 +1304,14 @@ mod tests {
         assert_eq!(elsewhere.fix, Fix::OutsideAllSemver, "no Packagist entry, so no version to name");
     }
 
-    /// Most PyPI and Packagist advisories publish `ECOSYSTEM` ranges, which this
-    /// engine does not order and therefore never compared the installed version
-    /// against. Reporting that as "no range covers this version" would be the
-    /// engine claiming a comparison it never made, so it is its own answer.
+    /// A range in a form nothing here orders was never compared against the
+    /// installed version. Reporting that as "no range covers this version"
+    /// would be the engine claiming a comparison it never made, so it is its
+    /// own answer. A `GIT` range names commits; an `ECOSYSTEM` range is read
+    /// only for the registries whose ordering this engine implements, which
+    /// npm is not.
     #[test]
-    fn an_entry_whose_ranges_are_not_semver_says_the_fix_was_never_read() {
-        let ecosystem_only = json!({
-          "id": "GHSA-eco-only",
-          "affected": [{
-            "package": {"name": "urllib3", "ecosystem": "PyPI"},
-            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.26.5"}]}]
-          }]
-        });
-        let advisory = advisory_from("GHSA-eco-only", &ecosystem_only, "urllib3", "1.26.4", "PyPI");
-        assert_eq!(advisory.fix, Fix::UnreadableRanges, "the ECOSYSTEM fixed event is not taken");
-
-        // A `GIT` range names commits, and is the same answer.
+    fn an_entry_whose_ranges_are_not_ordered_says_the_fix_was_never_read() {
         let git_only = json!({
           "id": "GHSA-git",
           "affected": [{
@@ -987,20 +1324,30 @@ mod tests {
             Fix::UnreadableRanges
         );
 
+        let npm_ecosystem = json!({
+          "id": "GHSA-eco-only",
+          "affected": [{
+            "package": {"name": "lodash", "ecosystem": "npm"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]
+          }]
+        });
+        let advisory = advisory_from("GHSA-eco-only", &npm_ecosystem, "lodash", "4.17.19", "npm");
+        assert_eq!(advisory.fix, Fix::UnreadableRanges, "the ECOSYSTEM fixed event is not taken");
+
         // A SEMVER range beside them still answers, and still wins.
         let both = json!({
           "id": "GHSA-both",
           "affected": [{
-            "package": {"name": "urllib3", "ecosystem": "PyPI"},
+            "package": {"name": "lodash", "ecosystem": "npm"},
             "ranges": [
               {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "9.9.9"}]},
-              {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.26.5"}]}
+              {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}
             ]
           }]
         });
         assert_eq!(
-            advisory_from("GHSA-both", &both, "urllib3", "1.26.4", "PyPI").fix,
-            Fix::Named("1.26.5".to_string())
+            advisory_from("GHSA-both", &both, "lodash", "4.17.19", "npm").fix,
+            Fix::Named("4.17.21".to_string())
         );
 
         // And a document whose SEMVER ranges simply do not hold the version is
@@ -1342,5 +1689,184 @@ mod tests {
         // The last resort, which is arbitrary but never panics.
         assert_eq!(version_cmp("not-a-version", "not-a-version"), Ordering::Equal);
         assert_eq!(version_cmp("1.2.3.4", "1.2.3"), "1.2.3.4".cmp("1.2.3"));
+    }
+
+    /// PEP 440 is what PyPI orders by, and an `ECOSYSTEM` range from a PyPI
+    /// advisory carries versions written in it. Every row here is a rule of
+    /// that specification the range check leans on.
+    #[test]
+    fn pypi_versions_are_ordered_by_pep_440() {
+        let cases: &[(&str, &str, Ordering)] = &[
+            ("1.0", "1.0.0", Ordering::Equal),
+            ("1.0", "1.0.0.0", Ordering::Equal),
+            ("1.0a1", "1.0b1", Ordering::Less),
+            ("1.0b1", "1.0rc1", Ordering::Less),
+            ("1.0rc1", "1.0", Ordering::Less),
+            ("1.0", "1.0.post1", Ordering::Less),
+            ("1.0.dev1", "1.0a1", Ordering::Less),
+            ("1.0.dev1", "1.0.dev2", Ordering::Less),
+            ("1.0.post1.dev1", "1.0.post1", Ordering::Less),
+            ("2!1.0", "1.9", Ordering::Greater),
+            ("1.0+local", "1.0", Ordering::Greater),
+            ("1.0-1", "1.0", Ordering::Greater),
+            ("1.0alpha1", "1.0a1", Ordering::Equal),
+            ("1.0-beta.2", "1.0b2", Ordering::Equal),
+            ("1.0c1", "1.0rc1", Ordering::Equal),
+            ("1.0a", "1.0a0", Ordering::Equal),
+            ("v1.0", "1.0", Ordering::Equal),
+            ("1.26.5", "1.26.4", Ordering::Greater),
+            ("2.19.0", "0", Ordering::Greater),
+            ("1.10", "1.9", Ordering::Greater),
+        ];
+        for (a, b, want) in cases {
+            assert_eq!(pep440_cmp(a, b), Some(*want), "{a} vs {b}");
+            assert_eq!(pep440_cmp(b, a), Some(want.reverse()), "{b} vs {a}");
+        }
+        // Never guessed at: a version this comparator does not read says so,
+        // and the range holding it is reported as one that was not compared.
+        for unreadable in ["1.0.x", "", "latest", "1.2.3+", "1!!2"] {
+            assert_eq!(pep440_cmp(unreadable, "1.0"), None, "{unreadable}");
+            assert_eq!(pep440_cmp("1.0", unreadable), None, "{unreadable}");
+        }
+    }
+
+    /// Composer's own normaliser is what Packagist orders by: a `v` prefix
+    /// means nothing, a missing numeric segment is a zero, and the stability
+    /// suffix runs dev, alpha, beta, RC, stable, patch.
+    #[test]
+    fn composer_versions_are_ordered_by_their_stability_suffixes() {
+        let cases: &[(&str, &str, Ordering)] = &[
+            ("v1.2.3", "1.2.3", Ordering::Equal),
+            ("1.0", "1.0.0.0", Ordering::Equal),
+            ("1.0.0-alpha1", "1.0.0-beta1", Ordering::Less),
+            ("1.0.0-beta1", "1.0.0-RC1", Ordering::Less),
+            ("1.0.0-RC1", "1.0.0", Ordering::Less),
+            ("1.0.0", "1.0.0-p1", Ordering::Less),
+            ("1.0.0-dev", "1.0.0-alpha1", Ordering::Less),
+            ("1.0.0-a1", "1.0.0-alpha1", Ordering::Equal),
+            ("1.0.0-b2", "1.0.0-beta.2", Ordering::Equal),
+            ("1.0.0-pl1", "1.0.0-p1", Ordering::Equal),
+            ("2.0.0", "1.9.9", Ordering::Greater),
+            ("1.10.0", "1.9.0", Ordering::Greater),
+            ("2.0.0", "0", Ordering::Greater),
+        ];
+        for (a, b, want) in cases {
+            assert_eq!(composer_cmp(a, b), Some(*want), "{a} vs {b}");
+            assert_eq!(composer_cmp(b, a), Some(want.reverse()), "{b} vs {a}");
+        }
+        // A branch name is not a release, and nothing else here is a version.
+        for unreadable in ["dev-main", "dev-feature/x", "1.0.x-dev", "", "1.0.0-frog", "v"] {
+            assert_eq!(composer_cmp(unreadable, "1.0.0"), None, "{unreadable}");
+            assert_eq!(composer_cmp("1.0.0", unreadable), None, "{unreadable}");
+        }
+    }
+
+    /// The limit this lifts: PyPI publishes `ECOSYSTEM` ranges, which the
+    /// engine used to count rather than read, so every PyPI finding named the
+    /// advisory and no version to move to.
+    #[test]
+    fn a_pypi_ecosystem_range_names_the_version_to_move_to() {
+        let detail = json!({
+          "id": "GHSA-pypi",
+          "affected": [{
+            "package": {"name": "requests", "ecosystem": "PyPI"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.31.0"}]}]
+          }]
+        });
+        assert_eq!(
+            advisory_from("GHSA-pypi", &detail, "requests", "2.19.0", "PyPI").fix,
+            Fix::Named("2.31.0".to_string())
+        );
+        // The upper bound is exclusive, so the fixed release itself is outside
+        // the range and the document and the batch endpoint disagree.
+        assert_eq!(advisory_from("GHSA-pypi", &detail, "requests", "2.31.0", "PyPI").fix, Fix::OutsideAllSemver);
+        // A boundary the comparator cannot read leaves the whole range
+        // uncompared rather than guessed at.
+        let unreadable = json!({
+          "id": "GHSA-pypi-bad",
+          "affected": [{
+            "package": {"name": "requests", "ecosystem": "PyPI"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.31.x"}]}]
+          }]
+        });
+        assert_eq!(
+            advisory_from("GHSA-pypi-bad", &unreadable, "requests", "2.19.0", "PyPI").fix,
+            Fix::UnreadableRanges
+        );
+        // And the ecosystem still decides: npm has no comparator of its own
+        // here, so an npm `ECOSYSTEM` range is as unread as it ever was.
+        let npm = json!({
+          "id": "GHSA-npm-eco",
+          "affected": [{
+            "package": {"name": "lodash", "ecosystem": "npm"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]
+          }]
+        });
+        assert_eq!(advisory_from("GHSA-npm-eco", &npm, "lodash", "4.17.19", "npm").fix, Fix::UnreadableRanges);
+    }
+
+    /// The same for Packagist, whose advisories publish `ECOSYSTEM` ranges too.
+    #[test]
+    fn a_packagist_ecosystem_range_names_the_version_to_move_to() {
+        let detail = json!({
+          "id": "GHSA-composer",
+          "affected": [{
+            "package": {"name": "monolog/monolog", "ecosystem": "Packagist"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0.0"}]}]
+          }]
+        });
+        assert_eq!(
+            advisory_from("GHSA-composer", &detail, "monolog/monolog", "1.25.0", "Packagist").fix,
+            Fix::Named("2.0.0".to_string())
+        );
+        assert_eq!(
+            advisory_from("GHSA-composer", &detail, "monolog/monolog", "2.0.0", "Packagist").fix,
+            Fix::OutsideAllSemver
+        );
+        // `last_affected` closes an interval without naming a fix, and it is
+        // inclusive where `fixed` is exclusive.
+        let last = json!({
+          "id": "GHSA-composer-last",
+          "affected": [{
+            "package": {"name": "monolog/monolog", "ecosystem": "Packagist"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "1.0.0"}, {"last_affected": "1.25.0"}]}]
+          }]
+        });
+        assert_eq!(
+            advisory_from("GHSA-composer-last", &last, "monolog/monolog", "1.25.0", "Packagist").fix,
+            Fix::NonePublished
+        );
+        assert_eq!(
+            advisory_from("GHSA-composer-last", &last, "monolog/monolog", "1.26.0", "Packagist").fix,
+            Fix::OutsideAllSemver
+        );
+    }
+
+    /// A range this engine cannot order beside one it can: the readable range
+    /// holds the version, so the finding names a fix rather than reporting that
+    /// nothing was read. [`Fix::UnreadableRanges`] is what is left when no
+    /// readable range holds it.
+    #[test]
+    fn a_readable_range_beside_an_unreadable_one_still_names_the_fix() {
+        let mixed = json!({
+          "id": "GHSA-mixed",
+          "affected": [{
+            "package": {"name": "monolog/monolog", "ecosystem": "Packagist"},
+            "ranges": [
+              {"type": "GIT", "repo": "https://example.test/m", "events": [{"introduced": "0"}]},
+              {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0.0"}]}
+            ]
+          }]
+        });
+        assert_eq!(
+            advisory_from("GHSA-mixed", &mixed, "monolog/monolog", "1.25.0", "Packagist").fix,
+            Fix::Named("2.0.0".to_string())
+        );
+        // Outside the readable range, the unreadable one is all that is left,
+        // and it is a range this run never compared anything against.
+        assert_eq!(
+            advisory_from("GHSA-mixed", &mixed, "monolog/monolog", "2.1.0", "Packagist").fix,
+            Fix::UnreadableRanges
+        );
     }
 }

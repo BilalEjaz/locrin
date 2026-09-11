@@ -1,5 +1,17 @@
 # Locrin release notes
 
+## Unreleased
+
+PyPI and Packagist findings name a version to move to. Those registries publish
+their advisory ranges as `ECOSYSTEM`, which 0.4.0 counted rather than read, so
+every such finding pointed at the advisory and no further. The engine now orders
+`ECOSYSTEM` ranges with the registry's own rules, PEP 440 for PyPI and
+Composer's normaliser for Packagist, and names the fix for the range the
+installed version falls in. A range with a boundary the comparator cannot read
+is still reported as a range that was never compared, rather than guessed at,
+and `GIT` ranges and npm `ECOSYSTEM` ranges are unchanged. `SEMVER` ranges are
+read exactly as they were.
+
 ## 0.4.0
 
 PHP and Python are read when the repository asks for them. `[languages]` in

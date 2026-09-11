@@ -487,9 +487,10 @@ The PyPI drop from 25 to 13 is not a precision fix but a de-duplication: PyPI
 and Packagist advisories arrive under several ids (a GHSA record and the PYSEC
 or CVE record that aliases it), and `vulnerable-dependency` now reports one
 finding per family, under the GHSA id. Every GHSA in the round-two list is
-still reported. Neither registry's findings name a fixed version yet: both
-publish `ECOSYSTEM` ranges the engine does not order, so the finding points at
-the advisory instead.
+still reported. Both registries publish `ECOSYSTEM` ranges, which 0.4.0 did not
+order, so its findings pointed at the advisory and named no version; the next
+version orders them by PEP 440 and by Composer's normaliser, and names the fix
+for the range the installed version falls in.
 
 Two limits worth knowing. Five of the ten pairs have never produced five
 findings on a real repository, which is the smallest sample the gate scores, so
