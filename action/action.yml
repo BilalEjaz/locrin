@@ -146,10 +146,8 @@ runs:
             gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"$FILE" >/dev/null
           fi
         }
-        # --slurp so the jq filter sees every page as one array: without it the
-        # filter runs per page and a long thread yields more than one id.
-        existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate --slurp \
-          --jq '[.[][] | select(.body | startswith("<!-- locrin-report -->"))][0].id // empty' | head -n 1) || existing=""
+        existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+          --jq '.[] | select(.body | startswith("<!-- locrin-report -->")) | .id' | head -n 1) || existing=""
         if ! write_comment; then
           echo "::warning::Locrin could not post the comment (missing pull-requests: write, typical for fork pull requests); the verdict is in the run log"
           exit 0

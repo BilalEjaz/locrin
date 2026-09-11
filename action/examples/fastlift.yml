@@ -1,5 +1,7 @@
 # Copy to fasting-app/.github/workflows/locrin.yml. Requires the locrin wiring
 # (locrin.toml, locrin-baseline.json) committed. Needs fetch-depth 0 for --base.
+# While the locrin repository is private, LOCRIN_TOKEN must be a fine-grained PAT
+# with Contents read on BilalEjaz/locrin; drop the token line once locrin is public.
 name: locrin
 on:
   pull_request:
@@ -15,3 +17,5 @@ jobs:
         with:
           fetch-depth: 0
       - uses: BilalEjaz/locrin/action@v0.3.0
+        with:
+          token: ${{ secrets.LOCRIN_TOKEN }}

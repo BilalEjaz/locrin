@@ -226,8 +226,8 @@ release `SHA256SUMS`, and runs one `locrin check` over the pull-request view. It
 posts the verdict as a comment, uploads the SARIF to code scanning, and fails
 the job when the verdict is BLOCK.
 
-The three permissions each pay for one thing: `contents: read` for the checkout
-and the release download, `pull-requests: write` for the comment,
+The three permissions each pay for one thing: `contents: read` for the
+checkout, `pull-requests: write` for the comment,
 `security-events: write` for the SARIF upload. Drop the last two by setting
 `comment: "false"` and `sarif: "false"`. `fetch-depth: 0` is what gives the run
 a merge base to diff against: a shallow checkout has none, and the default
@@ -260,7 +260,7 @@ Tag each deploy, and the ref is the last tag:
 
 ```yaml
 - id: last
-  run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)" >> "$GITHUB_OUTPUT"
+  run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD | head -n 1)" >> "$GITHUB_OUTPUT"
 - uses: BilalEjaz/locrin/action@v0.3.0
   with:
     since: ${{ steps.last.outputs.tag }}
@@ -268,8 +268,10 @@ Tag each deploy, and the ref is the last tag:
 # deploy steps follow; they never run when the gate blocks
 ```
 
-The fallback to the root commit is for the first run, before any deploy tag
-exists. The exit codes below drive the pipeline: a BLOCK fails the step, and the
+On a repository with no deploy tag yet the fallback diffs against the root
+commit, which checks every file touched since the first commit; run one
+whole-repository `locrin check` first if you want a full sweep. The exit codes
+below drive the pipeline: a BLOCK fails the step, and the
 steps after it do not run, so nothing ships over a blocking finding. Set
 `fail-on-block: false` to read the `status` output and decide yourself.
 

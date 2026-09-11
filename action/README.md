@@ -76,4 +76,3 @@ carries one Locrin comment rather than a wall of them.
 - `version: local` skips the download and uses the `locrin` already on PATH.
 - Supported runners: Linux x64, macOS arm64, macOS x64, Windows x64. Checksums
   are verified against the release `SHA256SUMS` before the archive is unpacked.
-</content>
