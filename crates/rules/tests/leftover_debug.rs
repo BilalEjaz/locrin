@@ -1,7 +1,7 @@
 mod common;
 
-use common::{fixture, hits, parse_dir, run_on};
-use locrin_core::config::Config;
+use common::{fixture, hits, parse_dir, run_on, run_on_langs};
+use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_debug::LeftoverDebug;
 use locrin_rules::line_text;
@@ -121,4 +121,71 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
     let out = rule.run(&ctx).unwrap();
     assert_eq!(out.len(), 1, "with no allow list the script's debug line is a finding: {out:?}");
     assert_eq!(out[0].file, "scripts/build.ts");
+}
+
+/// PHP's debug sinks are ordinary function calls, so the rule matches them by
+/// the called name rather than by a `console` member expression. Every sink the
+/// rule knows sits on its own line in the fixture.
+#[test]
+fn flags_php_debug_sinks() {
+    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "php/flag"), &config);
+    assert_eq!(
+        hits(&out),
+        vec![
+            ("a.php".to_string(), 4),
+            ("a.php".to_string(), 5),
+            ("a.php".to_string(), 6),
+            ("a.php".to_string(), 7),
+            ("a.php".to_string(), 8),
+            ("a.php".to_string(), 9),
+            ("a.php".to_string(), 10),
+        ],
+        "{out:?}"
+    );
+    assert!(out.iter().all(|f| f.severity == Severity::High && f.confidence == Confidence::High));
+    assert_eq!(out[0].evidence, "var_dump($rows);");
+}
+
+/// `error_log`, `echo` and `printf` are how PHP writes output on purpose, and a
+/// `->debug()` call is a logger, not a leftover.
+#[test]
+fn ignores_php_logging_and_output() {
+    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "php/clean"), &config);
+    assert!(out.is_empty(), "got {out:?}");
+}
+
+/// Python's sinks are the debugger entry points and the imports that reach
+/// them: an `import pdb` left at the top of a module is the same leftover as
+/// the `set_trace()` it was added for.
+#[test]
+fn flags_python_breakpoints_and_debugger_imports() {
+    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "py/flag"), &config);
+    assert_eq!(
+        hits(&out),
+        vec![
+            ("a.py".to_string(), 1),
+            ("a.py".to_string(), 2),
+            ("a.py".to_string(), 3),
+            ("a.py".to_string(), 7),
+            ("a.py".to_string(), 8),
+            ("a.py".to_string(), 9),
+            ("a.py".to_string(), 10),
+        ],
+        "{out:?}"
+    );
+    assert!(out.iter().all(|f| f.severity == Severity::High && f.confidence == Confidence::High));
+    assert_eq!(out[0].evidence, "import pdb");
+}
+
+/// `print(` is not a sink: it is how a Python script speaks, and flagging it
+/// would fail the precision gate on the first repository with a management
+/// command in it. `logging.debug` is a logger.
+#[test]
+fn print_and_logging_are_not_python_sinks() {
+    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "py/clean"), &config);
+    assert!(out.is_empty(), "got {out:?}");
 }

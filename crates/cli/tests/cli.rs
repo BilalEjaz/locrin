@@ -1425,10 +1425,9 @@ fn a_skipped_language_is_reported_once_per_run() {
 }
 
 /// The other half of the test above: with both languages asked for, the findings
-/// carry PHP and Python files. Waits on Task 5, which teaches `leftover-debug`
-/// the `var_dump` and `breakpoint` calls these two fixture files hold.
+/// carry PHP and Python files. `leftover-debug` is what fires on them, from the
+/// `var_dump` and `breakpoint` calls these two fixture files hold.
 #[test]
-#[ignore = "un-ignored by Task 5, which makes leftover-debug fire on var_dump and breakpoint"]
 fn enabled_languages_are_reported_on() {
     let dir = copy_named_fixture("multilang");
     std::fs::write(dir.path().join("locrin.toml"), "[languages]\nphp = true\npython = true\n").unwrap();
