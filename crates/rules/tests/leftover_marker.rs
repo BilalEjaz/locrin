@@ -1,6 +1,6 @@
 mod common;
 
-use common::{fixture, run_on, run_on_langs, run_unfiltered};
+use common::{fixture, run_on, run_on_langs};
 use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_marker::LeftoverMarker;
@@ -9,10 +9,14 @@ use locrin_rules::leftover_marker::LeftoverMarker;
 fn flags_markers_without_issue_references() {
     let out = run_on(Box::new(LeftoverMarker), &fixture("leftover_marker", "flag"), &Config::default());
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
-    assert_eq!(lines, vec![1, 3, 5]);
+    assert_eq!(lines, vec![1, 3, 5, 6]);
     assert!(out.iter().all(|f| f.severity == Severity::Low && f.confidence == Confidence::Medium));
 }
 
+/// The clean fixture also carries every marker word glued to a path character:
+/// `avatars/XXX.jpg`, `XXX-XXX-XXXX`, `fixtures/TODO_list.json`. A word inside
+/// a path or a file name is a name, not a note; the flag fixture's bare
+/// `XXX handle this` is the note.
 #[test]
 fn ignores_markers_with_references_urls_and_lowercase_prose() {
     let out = run_on(Box::new(LeftoverMarker), &fixture("leftover_marker", "clean"), &Config::default());
@@ -21,23 +25,24 @@ fn ignores_markers_with_references_urls_and_lowercase_prose() {
 
 /// A marker is a comment, and every language has comments, so this rule
 /// declares every language rather than the JavaScript family. With `php = true`
-/// the PHP fixture's `//` and `#` markers are findings. Run directly, because
-/// the pair ships off (next test) and `run_rules` would drop what the rule
-/// finds.
+/// the PHP fixture's `//` and `#` markers are findings, and they come through
+/// `run_rules`: the pair went off after round two of the precision gate (4
+/// true of 5 on Monica) and came back on in round three, once a marker word
+/// inside a path stopped counting.
 #[test]
-fn flags_markers_in_php_when_the_language_is_enabled() {
+fn flags_markers_in_php_through_run_rules() {
     let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
-    let out = run_unfiltered(Box::new(LeftoverMarker), &fixture("leftover_marker", "php/flag"), &config);
+    let out = run_on_langs(Box::new(LeftoverMarker), &fixture("leftover_marker", "php/flag"), &config);
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2, 5], "got {out:?}");
 }
 
-/// The PHP pair ships off: round two of the precision gate scored 4 true of 5
-/// on Monica, under the 85 percent it needs, so the same fixture produces
-/// nothing through `run_rules`.
+/// The round-two false positive, verbatim: `XXX` inside `avatars/XXX.jpg` in
+/// a prose comment is a placeholder, and the `TODO` on the next line carries a
+/// URL.
 #[test]
-fn php_is_off_by_default_after_the_precision_gate() {
+fn a_placeholder_inside_a_php_path_is_not_a_marker() {
     let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
-    let out = run_on_langs(Box::new(LeftoverMarker), &fixture("leftover_marker", "php/flag"), &config);
+    let out = run_on_langs(Box::new(LeftoverMarker), &fixture("leftover_marker", "php/clean"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }

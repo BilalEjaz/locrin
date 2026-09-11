@@ -9,12 +9,33 @@ pub struct LeftoverMarker;
 
 const MARKERS: &[&str] = &["TODO", "FIXME", "HACK", "XXX"];
 
+/// The characters a path or a file name is spelled with. A marker word glued
+/// to one of them on either side is part of a name, not a note to a reader:
+/// `avatars/XXX.jpg`, `XXX-XXX-XXXX`, `fixtures/TODO_list.json`.
+const PATH_CHARS: &[char] = &['/', '.', '_', '-'];
+
+/// Whether the text after a marker word opens a file extension: a `.` and one
+/// to five letters or digits, as in `XXX.jpg` or `TODO.md`. A `.` closing a
+/// sentence (`TODO.` at the end of a line, or before a space) is not one.
+fn opens_extension(after: &str) -> bool {
+    let Some(rest) = after.strip_prefix('.') else { return false };
+    let run = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).count();
+    (1..=5).contains(&run) && rest.chars().nth(run).is_none_or(|c| !c.is_alphanumeric())
+}
+
+/// Whether the text holds one of the marker words on its own: not inside a
+/// longer word, and not inside a path or a file name.
 fn has_marker(text: &str) -> bool {
     MARKERS.iter().any(|m| {
         text.match_indices(m).any(|(i, _)| {
-            let before = text[..i].chars().last().map(|c| !c.is_alphanumeric()).unwrap_or(true);
-            let after = text[i + m.len()..].chars().next().map(|c| !c.is_alphanumeric()).unwrap_or(true);
-            before && after
+            let before = text[..i].chars().last();
+            let after = &text[i + m.len()..];
+            let next = after.chars().next();
+            let word = before.is_none_or(|c| !c.is_alphanumeric()) && next.is_none_or(|c| !c.is_alphanumeric());
+            let in_path = before.is_some_and(|c| PATH_CHARS.contains(&c))
+                || next.is_some_and(|c| c != '.' && PATH_CHARS.contains(&c))
+                || opens_extension(after);
+            word && !in_path
         })
     })
 }
@@ -86,17 +107,17 @@ impl Rule for LeftoverMarker {
     fn languages(&self) -> &'static [Language] {
         ALL
     }
-    /// Off for PHP: the precision gate's second round
+    /// On for PHP again. The precision gate's second round
     /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, round
-    /// two, Monica v4.1.2) scored 4 true of 5, which is 80 percent of a sample
-    /// of exactly five and under the 85 the gate asks for. The false finding
-    /// was `XXX` inside the placeholder path `avatars/XXX.jpg` in a prose
-    /// comment. Pooled with round one's 2 of 2 on BookStack the pair is 6 of
-    /// 7, and the fix is one clause in `has_marker` (a marker is not a marker
-    /// inside backticks or a path); the pair comes back on when that lands
-    /// and the pair is re-measured.
-    fn enabled_for(&self, lang: Language) -> bool {
-        lang != Language::Php
+    /// two, Monica v4.1.2) scored 4 true of 5 and turned the pair off; the one
+    /// false finding was `XXX` inside the placeholder path `avatars/XXX.jpg`.
+    /// Round three made a marker word glued to a path character (`/`, `.`,
+    /// `_`, `-`) or opening a file extension no marker at all, and the
+    /// re-measure on the same corpus with the same seed scored every remaining
+    /// finding true (round three of the same document), so the default is the
+    /// trait's: on everywhere.
+    fn enabled_for(&self, _lang: Language) -> bool {
+        true
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {

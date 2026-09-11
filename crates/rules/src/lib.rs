@@ -153,9 +153,10 @@ pub trait Rule: Sync {
     /// The default is `true` for every language a rule declares. A rule that
     /// fails the PHP and Python precision gate
     /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`) for
-    /// one language overrides this with a doc comment citing the report:
-    /// after round two that is `leftover-commented-code` on Python and
-    /// `leftover-agent-marker` on PHP.
+    /// one language overrides this with a doc comment citing the report.
+    /// `leftover-agent-marker` on PHP went off after round two and came back
+    /// on in round three; `leftover-commented-code` on Python is recorded in
+    /// its own override.
     fn enabled_for(&self, lang: Language) -> bool {
         let _ = lang;
         true
