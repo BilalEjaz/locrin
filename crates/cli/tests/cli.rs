@@ -1220,6 +1220,26 @@ fn a_scoped_run_reads_the_lockfile_only_when_the_scope_names_it() {
     assert!(!err.contains(SKIPPED), "the lockfile is not under src: {err}");
 }
 
+/// A polyglot repository installs from more than one registry, and each
+/// lockfile is its own package list, its own ecosystem and its own snapshot. All
+/// of them are read, each says which file it is about, and an offline run with
+/// no snapshot skips the rule for each rather than failing over any of them.
+#[test]
+fn every_lockfile_in_a_polyglot_repository_is_checked_under_its_own_name() {
+    let dir = copy_named_fixture("multilang");
+    let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
+    let err = String::from_utf8(out.stderr).unwrap();
+    for rel in ["composer.lock", "poetry.lock", "requirements.txt"] {
+        let expected = format!("warning: {rel}: no cached advisory snapshot; vulnerable-dependency skipped");
+        assert!(err.contains(&expected), "{rel} was not checked: {err}");
+    }
+    // The run finished and reported: a lockfile in a language the engine does
+    // not parse is an input, never an error (spec 9).
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();
+    assert!(files.iter().all(|f| !f.ends_with(".lock") && !f.ends_with(".txt")), "no advisories offline: {files:?}");
+}
+
 /// A migration creating a table nothing locks down, written into a scratch copy
 /// rather than committed beside the fixture: every other test in this file
 /// shares that fixture and none of them should start paying for the rule that

@@ -1,0 +1,13 @@
+# Runtime dependencies
+-r base.txt
+--index-url https://pypi.org/simple
+
+urllib3==1.26.4
+requests[security]==2.19.0
+Flask_SQLAlchemy==2.4.1
+django>=3.0
+pyyaml<6
+numpy==1.21.0  # pinned for the wheels we ship
+pytest==6.2.2 ; python_version >= "3.6"
+-e .
+certifi

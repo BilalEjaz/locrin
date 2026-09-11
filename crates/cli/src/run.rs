@@ -171,20 +171,19 @@ struct Explicit {
 ///
 /// The full listing is walked at most once and only when a directory is named,
 /// which is the only case where it can say anything a named path does not. The
-/// lockfile is added on top of it because a repository may have chosen to
-/// gitignore its lockfile, and a file the walk skips is still a file the rule
-/// reads.
+/// lockfiles are added on top of it because a repository may have chosen to
+/// gitignore one, and a file the walk skips is still a file the rule reads.
 fn explicit_files(
     root: &Path,
     paths: &[PathBuf],
     walked: &[PathBuf],
-    lockfile_rel: Option<&str>,
+    lockfile_rels: &[&str],
     walk_opts: &WalkOptions,
 ) -> anyhow::Result<Option<Explicit>> {
     if paths.is_empty() {
         return Ok(None);
     }
-    let lockfile = lockfile_rel.map(|rel| root.join(rel));
+    let lockfiles: Vec<PathBuf> = lockfile_rels.iter().map(|rel| root.join(rel)).collect();
     let mut files = Vec::new();
     let mut raw = Vec::new();
     let mut everything: Option<Vec<PathBuf>> = None;
@@ -210,9 +209,7 @@ fn explicit_files(
             }
             let all = everything.as_ref().expect("just filled");
             raw.extend(all.iter().filter(|f| f.starts_with(&canon)).cloned());
-            if let Some(lock) = lockfile.as_ref().filter(|lock| lock.starts_with(&canon)) {
-                raw.push(lock.clone());
-            }
+            raw.extend(lockfiles.iter().filter(|lock| lock.starts_with(&canon)).cloned());
         } else {
             raw.push(canon.clone());
             match Language::from_path(&canon) {
@@ -639,11 +636,12 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let config = Config::load(root)?;
     let walk_opts = WalkOptions { excludes: config.excludes.clone(), languages: config.languages };
     let walked = source_files(root, &walk_opts)?;
-    // Which file the advisory rule would answer for, found without reading it.
-    // Located once and handed to everything that asks: the question costs a
-    // `stat` per candidate lockfile and has one answer for the whole pass.
-    let lockfile_rel = locrin_core::lockfile::locate(root);
-    let explicit = explicit_files(root, &opts.paths, &walked, lockfile_rel, &walk_opts)?;
+    // Which files the advisory rule would answer for, found without reading
+    // them. Located once and handed to everything that asks: the question costs
+    // a `stat` per candidate lockfile and has one answer for the whole pass. A
+    // polyglot repository has several, one per ecosystem it installs from.
+    let lockfile_rels = locrin_core::lockfile::locate(root);
+    let explicit = explicit_files(root, &opts.paths, &walked, &lockfile_rels, &walk_opts)?;
     let mut candidates = walked;
     if let Some(e) = &explicit {
         candidates.extend(e.files.iter().cloned());
@@ -688,7 +686,7 @@ fn pass(root: &Path, opts: &Options, record: bool) -> anyhow::Result<Run> {
     let lock_in_scope = if opts.changed_only {
         false
     } else {
-        raw_scope.as_ref().is_none_or(|raw| lockfile_rel.is_some_and(|rel| raw.contains(rel)))
+        raw_scope.as_ref().is_none_or(|raw| lockfile_rels.iter().any(|rel| raw.contains(*rel)))
     };
     let rls_in_scope = if opts.changed_only {
         false

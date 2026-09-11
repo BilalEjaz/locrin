@@ -1,29 +1,36 @@
-//! Flags an installed npm package that a published advisory says is vulnerable.
+//! Flags an installed package that a published advisory says is vulnerable, in
+//! any of the registries the engine reads a lockfile for: npm, Packagist, PyPI.
 //!
 //! The rule is a thin reading of two core modules. `lockfile::read` says what an
-//! install of this repository puts on disk and which line of the lockfile
-//! declares each package; `osv::check` says which of those versions osv.dev has
-//! an advisory for, from the network when the run allows it and from the index's
-//! snapshot otherwise. Nothing here parses a package or resolves a version
-//! range: the answer belongs to the advisory database, and this file's whole job
-//! is to turn it into findings a reader can act on.
+//! install of this repository puts on disk, which registry each package came
+//! from, and which line of which lockfile declares it; `osv::check` says which
+//! of those versions osv.dev has an advisory for, from the network when the run
+//! allows it and from the index's snapshot otherwise. Nothing here parses a
+//! package or resolves a version range: the answer belongs to the advisory
+//! database, and this file's whole job is to turn it into findings a reader can
+//! act on.
+//!
+//! A repository can install from more than one registry, and each lockfile is
+//! its own question: its own package list, its own ecosystem, its own snapshot,
+//! and findings against its own path. So the rule loops, and an answer about one
+//! lockfile is never reused for another.
 //!
 //! Graph scope, so it runs on every whole-repository pass. A file rule would
-//! never fire, because the lockfile is not a source file the engine parses, and
+//! never fire, because a lockfile is not a source file the engine parses, and
 //! the answer can change without any file changing at all: an advisory published
 //! this morning affects a repository nobody has touched.
 //!
 //! Which is also the scoping contract, and the CLI enforces it before the rule
 //! is asked to run (see `lock_in_scope` in `crates/cli/src/run.rs`). A run
-//! narrowed to a scope answers for the lockfile only when the scope names the
-//! lockfile itself: a diff whose git file list includes it, or a path argument
-//! naming it. Any other scope skips the rule outright, reading neither the
-//! lockfile nor the snapshot and making no request, because nothing else can put
-//! the lockfile in scope: it is in no walk, no index and no import
-//! neighbourhood, so every finding would have been discarded after being paid
-//! for. `--changed` is therefore never a run that reports advisories, whatever
-//! was done to the lockfile: that scope is the index's watermark and the index
-//! holds source files only.
+//! narrowed to a scope answers for the lockfiles only when the scope names one
+//! of them: a diff whose git file list includes it, or a path argument naming
+//! it. Any other scope skips the rule outright, reading no lockfile and no
+//! snapshot and making no request, because nothing else can put a lockfile in
+//! scope: it is in no walk, no index and no import neighbourhood, so every
+//! finding would have been discarded after being paid for. `--changed` is
+//! therefore never a run that reports advisories, whatever was done to a
+//! lockfile: that scope is the index's watermark and the index holds source
+//! files only.
 //!
 //! Severity comes from the advisory rather than from the rule, which is why
 //! [`crate::run_rules`] overwrites a finding's severity only when the config
@@ -108,16 +115,29 @@ impl Rule for VulnerableDependency {
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
-        let Some(lock) = lockfile::read(ctx.root)? else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for lock in lockfile::read(ctx.root)? {
+            out.extend(self.check_one(ctx, &lock)?);
+        }
+        Ok(out)
+    }
+}
+
+impl VulnerableDependency {
+    /// The findings for one lockfile. A repository can hold several, and each is
+    /// its own package list, its own ecosystem and its own snapshot: an npm
+    /// answer says nothing about a `requirements.txt` beside it.
+    fn check_one(&self, ctx: &RuleContext, lock: &lockfile::Lockfile) -> anyhow::Result<Vec<Finding>> {
         let fetch: &dyn Fn(&str, Option<&str>) -> anyhow::Result<String> =
             if ctx.offline { &no_network } else { &osv::http_fetch };
-        let outcome = osv::check(ctx.index()?, &lock, ctx.offline, fetch)?;
-        // The rule runs once per run, so each warning is printed once. They go to
-        // stderr and not into the findings: a stale snapshot or an unreachable
-        // registry is something the reader should know about the run, not
-        // something the repository has to fix (spec 9).
+        let outcome = osv::check(ctx.index()?, lock, ctx.offline, fetch)?;
+        // The rule runs once per run and once per lockfile, so each warning is
+        // printed once for the file it is about. They go to stderr and not into
+        // the findings: a stale snapshot or an unreachable registry is something
+        // the reader should know about the run, not something the repository has
+        // to fix (spec 9).
         for warning in &outcome.warnings {
-            eprintln!("warning: {warning}");
+            eprintln!("warning: {}: {warning}", lock.rel);
         }
 
         let mut out = Vec::new();

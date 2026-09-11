@@ -20,6 +20,8 @@
 //! that the list has not moved under it. Installing or upgrading a package
 //! invalidates the snapshot, which is exactly when the answer can change, and a
 //! snapshot from today is reused without a request even when the run is online.
+//! A repository with several lockfiles is several checks with several keys: the
+//! ecosystem is in the key, so an npm answer is never served for a PyPI list.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -191,7 +193,7 @@ pub fn check(
     for (package, ids) in lock.packages.iter().zip(per_package) {
         for id in ids {
             let advisory = match details.get(&id) {
-                Some(detail) => advisory_from(&id, detail, &package.name, &package.version),
+                Some(detail) => advisory_from(&id, detail, &package.name, &package.version, package.ecosystem),
                 None => Advisory {
                     id: id.clone(),
                     summary: String::new(),
@@ -235,7 +237,7 @@ fn fetch_batch(
     for chunk in lock.packages.chunks(CHUNK) {
         let queries: Vec<Value> = chunk
             .iter()
-            .map(|p| json!({ "package": { "name": p.name, "ecosystem": "npm" }, "version": p.version }))
+            .map(|p| json!({ "package": { "name": p.name, "ecosystem": p.ecosystem }, "version": p.version }))
             .collect();
         let text = fetch(BATCH_URL, Some(&json!({ "queries": queries }).to_string()))?;
         let parsed: Value = serde_json::from_str(&text).context("parsing the OSV batch response")?;
@@ -306,8 +308,8 @@ fn is_safe_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advisory {
-    let (fixed, holds) = fixed_for(detail, package, version);
+fn advisory_from(id: &str, detail: &Value, package: &str, version: &str, ecosystem: &str) -> Advisory {
+    let (fixed, holds) = fixed_for(detail, package, version, ecosystem);
     let severity = detail
         .get("database_specific")
         .and_then(|d| d.get("severity"))
@@ -334,10 +336,10 @@ fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advi
 /// An advisory can carry ranges for several ecosystems and several packages, so
 /// the entry has to be matched by name and by ecosystem: the same name lives in
 /// npm and in Maven and in PyPI, with version numbers that have nothing to do
-/// with each other, and everything this engine reads came out of an npm
-/// lockfile. An entry that does not say which ecosystem it is for is not read as
-/// npm; a finding then carries no fix, which is a weaker sentence, not a wrong
-/// version.
+/// with each other, and `ecosystem` is the registry the package was actually
+/// installed from. An entry that does not say which ecosystem it is for matches
+/// none of them; a finding then carries no fix, which is a weaker sentence, not
+/// a wrong version.
 ///
 /// Within the matching entry the range has to be the one the installed version
 /// falls in, and that is the whole point of this function. A package that
@@ -358,12 +360,12 @@ fn advisory_from(id: &str, detail: &Value, package: &str, version: &str) -> Advi
 /// endpoint and the detail document disagree about what is affected; the second
 /// half of the return value separates the two, and a finding whose version no
 /// range holds reads "No fixed version applies to this version" instead.
-fn fixed_for(detail: &Value, package: &str, version: &str) -> (Option<String>, bool) {
+fn fixed_for(detail: &Value, package: &str, version: &str, ecosystem: &str) -> (Option<String>, bool) {
     for affected in detail.get("affected").and_then(Value::as_array).into_iter().flatten() {
         let named = affected.get("package");
         let name = named.and_then(|p| p.get("name")).and_then(Value::as_str);
-        let ecosystem = named.and_then(|p| p.get("ecosystem")).and_then(Value::as_str);
-        if name != Some(package) || ecosystem != Some("npm") {
+        let named_ecosystem = named.and_then(|p| p.get("ecosystem")).and_then(Value::as_str);
+        if name != Some(package) || named_ecosystem != Some(ecosystem) {
             continue;
         }
         for range in affected.get("ranges").and_then(Value::as_array).into_iter().flatten() {
@@ -385,7 +387,7 @@ fn fixed_for(detail: &Value, package: &str, version: &str) -> (Option<String>, b
 /// version a range names is the whole of what they pin.
 #[cfg(test)]
 fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
-    fixed_for(detail, package, version).0
+    fixed_for(detail, package, version, "npm").0
 }
 
 /// Whether a SEMVER range contains `version`, and the `fixed` it names if it
@@ -394,9 +396,11 @@ fn first_fixed(detail: &Value, package: &str, version: &str) -> Option<String> {
 /// not contain it.
 ///
 /// Only `SEMVER` ranges are read. A `GIT` range names commits, and an
-/// `ECOSYSTEM` range on npm carries the same version strings but is not
-/// guaranteed to be ordered by them, so neither is a range this comparison can
-/// answer.
+/// `ECOSYSTEM` range carries the same version strings but is not guaranteed to
+/// be ordered by them, so neither is a range this comparison can answer. That
+/// costs the `fixed` version on the advisories that publish PyPI and Packagist
+/// ranges as `ECOSYSTEM` only: such a finding names the advisory and no upgrade,
+/// which is a thinner sentence rather than a wrong one.
 fn containing_range(range: &Value, version: &str) -> Option<Option<String>> {
     if range.get("type").and_then(Value::as_str) != Some("SEMVER") {
         return None;
@@ -436,7 +440,7 @@ fn containing_range(range: &Value, version: &str) -> Option<Option<String>> {
     }
 }
 
-/// Orders two npm version strings.
+/// Orders two version strings.
 ///
 /// This is the smallest comparison the range check needs and not a semver
 /// implementation: `major.minor.patch` compared as numbers, a missing part read
@@ -569,7 +573,7 @@ mod tests {
         if url == BATCH_URL {
             let body = body.expect("the batch endpoint is a POST");
             assert!(body.contains(r#""name":"lodash""#), "every package is queried: {body}");
-            assert!(body.contains(r#""ecosystem":"npm""#), "the ecosystem is npm: {body}");
+            assert!(body.contains(r#""ecosystem":"npm""#), "the fixture is an npm lockfile: {body}");
             return Ok(BATCH.to_string());
         }
         if url == format!("{VULN_URL}{VULN_ID}") {
@@ -585,7 +589,11 @@ mod tests {
 
     fn fixture_lock() -> Lockfile {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lockfiles");
-        lockfile::read(&dir).unwrap().expect("the fixture directory has a lockfile")
+        lockfile::read(&dir).unwrap().into_iter().next().expect("the fixture directory has a lockfile")
+    }
+
+    fn package(name: &str, version: &str, ecosystem: &'static str) -> Package {
+        Package { name: name.to_string(), version: version.to_string(), line: 1, ecosystem }
     }
 
     fn backdate_batch(ix: &Index, days: u64) {
@@ -752,15 +760,15 @@ mod tests {
         let detail: Value = serde_json::from_str(DETAIL).unwrap();
         let bare = json!({"id": "GHSA-x", "affected": []});
 
-        assert_eq!(advisory_from("GHSA-x", &bare, "lodash", "4.17.19").severity, "UNKNOWN");
-        assert_eq!(advisory_from("GHSA-x", &bare, "lodash", "4.17.19").fixed, None);
-        assert_eq!(advisory_from(VULN_ID, &detail, "left-pad", "1.3.0").fixed.as_deref(), Some("9.9.9"));
-        assert_eq!(advisory_from(VULN_ID, &detail, "not-in-the-advisory", "1.0.0").fixed, None);
+        assert_eq!(advisory_from("GHSA-x", &bare, "lodash", "4.17.19", "npm").severity, "UNKNOWN");
+        assert_eq!(advisory_from("GHSA-x", &bare, "lodash", "4.17.19", "npm").fixed, None);
+        assert_eq!(advisory_from(VULN_ID, &detail, "left-pad", "1.3.0", "npm").fixed.as_deref(), Some("9.9.9"));
+        assert_eq!(advisory_from(VULN_ID, &detail, "not-in-the-advisory", "1.0.0", "npm").fixed, None);
     }
 
     /// An advisory can carry the same name in several ecosystems, and only the
-    /// npm entry's versions mean anything to a package this engine read out of
-    /// an npm lockfile.
+    /// npm entry's versions mean anything to a package read out of an npm
+    /// lockfile.
     #[test]
     fn a_fixed_version_comes_only_from_the_npm_entry() {
         let detail = json!({
@@ -776,7 +784,7 @@ mod tests {
             }
           ]
         });
-        assert_eq!(advisory_from("GHSA-y", &detail, "lodash", "4.17.19").fixed.as_deref(), Some("4.17.21"));
+        assert_eq!(advisory_from("GHSA-y", &detail, "lodash", "4.17.19", "npm").fixed.as_deref(), Some("4.17.21"));
 
         let unstated = json!({
           "id": "GHSA-z",
@@ -786,10 +794,63 @@ mod tests {
           }]
         });
         assert_eq!(
-            advisory_from("GHSA-z", &unstated, "lodash", "4.17.19").fixed,
+            advisory_from("GHSA-z", &unstated, "lodash", "4.17.19", "npm").fixed,
             None,
             "an entry that does not say it is npm is not read as one"
         );
+    }
+
+    /// `requests` is a PyPI package and an npm package, `monolog/monolog` is a
+    /// Packagist one, and their version numbers have nothing to do with each
+    /// other. The entry an advisory answers with is the one for the ecosystem
+    /// the package was actually installed from, so a PyPI package never reads
+    /// an npm range as its own.
+    #[test]
+    fn a_fix_comes_only_from_the_entry_for_the_packages_own_ecosystem() {
+        let detail = json!({
+          "id": "GHSA-eco",
+          "affected": [
+            {
+              "package": {"name": "requests", "ecosystem": "npm"},
+              "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.9.9"}]}]
+            },
+            {
+              "package": {"name": "requests", "ecosystem": "PyPI"},
+              "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "2.20.0"}]}]
+            }
+          ]
+        });
+        assert_eq!(advisory_from("GHSA-eco", &detail, "requests", "2.19.0", "PyPI").fixed.as_deref(), Some("2.20.0"));
+        assert_eq!(advisory_from("GHSA-eco", &detail, "requests", "2.19.0", "npm").fixed.as_deref(), Some("9.9.9"));
+        let elsewhere = advisory_from("GHSA-eco", &detail, "requests", "2.19.0", "Packagist");
+        assert_eq!(elsewhere.fixed, None, "no Packagist entry, so no version to name");
+        assert!(elsewhere.outside_every_range);
+    }
+
+    /// Every package is queried under the ecosystem it was installed from, so
+    /// one run over a repository with a `composer.lock` and a `requirements.txt`
+    /// asks osv.dev two different questions.
+    #[test]
+    fn the_batch_query_names_each_packages_own_ecosystem() {
+        let ix = Index::open_in_memory().unwrap();
+        let lock = Lockfile {
+            rel: "requirements.txt".into(),
+            hash: "pypi-list".into(),
+            packages: vec![package("urllib3", "1.26.4", "PyPI"), package("monolog/monolog", "2.0.0", "Packagist")],
+        };
+        let body = std::cell::RefCell::new(String::new());
+        let capture = |url: &str, sent: Option<&str>| -> anyhow::Result<String> {
+            assert_eq!(url, BATCH_URL);
+            *body.borrow_mut() = sent.expect("the batch endpoint is a POST").to_string();
+            Ok(r#"{"results":[{},{}]}"#.to_string())
+        };
+
+        check(&ix, &lock, false, &capture).unwrap();
+
+        let sent = body.borrow();
+        assert!(sent.contains(r#"{"ecosystem":"PyPI","name":"urllib3"}"#), "{sent}");
+        assert!(sent.contains(r#"{"ecosystem":"Packagist","name":"monolog/monolog"}"#), "{sent}");
+        assert!(!sent.contains(r#""ecosystem":"npm""#), "nothing here came out of an npm lockfile: {sent}");
     }
 
     #[test]
@@ -864,9 +925,15 @@ mod tests {
     #[test]
     fn a_version_no_range_holds_is_told_apart_from_one_with_no_published_fix() {
         let uri = two_branches("fast-uri", "2.4.5", "3.1.6");
-        assert!(advisory_from("GHSA-test", &uri, "fast-uri", "3.2.0").outside_every_range, "past the last fix");
-        assert!(advisory_from("GHSA-test", &uri, "other", "1.0.0").outside_every_range, "another package entirely");
-        assert!(!advisory_from("GHSA-test", &uri, "fast-uri", "3.1.5").outside_every_range, "the 3.x range holds it");
+        assert!(advisory_from("GHSA-test", &uri, "fast-uri", "3.2.0", "npm").outside_every_range, "past the last fix");
+        assert!(
+            advisory_from("GHSA-test", &uri, "other", "1.0.0", "npm").outside_every_range,
+            "another package entirely"
+        );
+        assert!(
+            !advisory_from("GHSA-test", &uri, "fast-uri", "3.1.5", "npm").outside_every_range,
+            "the 3.x range holds it"
+        );
 
         // An `introduced` with nothing closing it holds the version and names
         // no fix, which is the advisory saying no fix has shipped.
@@ -875,7 +942,7 @@ mod tests {
                  "ranges": [{"type": "SEMVER", "events": [{"introduced": "2.0.0"}]}]}]}"#,
         )
         .unwrap();
-        let advisory = advisory_from("GHSA-test", &open, "p", "2.5.0");
+        let advisory = advisory_from("GHSA-test", &open, "p", "2.5.0", "npm");
         assert_eq!(advisory.fixed, None);
         assert!(!advisory.outside_every_range);
     }
