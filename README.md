@@ -1,7 +1,8 @@
 # Locrin
 
-Locrin is a deterministic quality gate for TypeScript and JavaScript, built for
-code written by people and by agents. It parses with tree-sitter, keeps a
+Locrin is a deterministic quality gate for TypeScript and JavaScript, with PHP
+and Python behind a one-line opt-in, built for code written by people and by
+agents. It parses with tree-sitter, keeps a
 SQLite index of the repository outside the working tree, and answers with a
 verdict: pass, advisory, or block. The same engine serves a person on the
 command line, a git pre-commit hook, Claude Code's hooks, and an MCP client.
@@ -325,6 +326,8 @@ override is in force when it is not.
 | `boundaries` | `[]` | Import directions. Each entry sets `from` and exactly one of `forbid` or `allow`, with an optional `name`. |
 | `framework.auth_middleware` | `[]` | Identifiers that mark an Express route as authenticated. `express-route-without-auth` runs only when you have named one. |
 | `framework.server_paths` | `["supabase/functions/**", "server/**", "api/**", "scripts/**", "**/*.server.*", "**/*.test.*", "**/*.spec.*"]` | Globs for code that runs on a server, so a service-role key there is not client exposure. |
+| `languages.php` | `false` | Reads `.php` and `.phtml` files too. See "PHP and Python" under Rules for what runs on them. |
+| `languages.python` | `false` | Reads `.py` files too (`.pyi` stubs are never read). |
 | `rules.<id>.enabled` | the rule's own default | Turns one rule on or off. |
 | `rules.<id>.severity` | the rule's own default | Overrides one rule's severity. |
 
@@ -397,6 +400,23 @@ gate. Turn any of them on with `rules.<id>.enabled = true`.
 `boundary-violation` is on but silent until you write a `[[boundaries]]` entry,
 and `express-route-without-auth` is on but silent until you name an auth
 middleware.
+
+### PHP and Python
+
+Every rule runs on the JavaScript family. With `[languages] php = true` or
+`python = true` in `locrin.toml` the engine also reads that language, and five
+rules run on it: `leftover-debug` (PHP's dump family and `xdebug_break`;
+Python's `breakpoint()`, `pdb` and its relatives, never `print`),
+`leftover-commented-code`, `leftover-agent-marker`, `secret-exposed` and
+`vulnerable-dependency` (`composer.lock` against Packagist; `requirements.txt`
+and `poetry.lock` against PyPI). The other sixteen rules are written against
+the TypeScript grammar and never see a PHP or Python file. Every rule can ship
+off for one language on its own once it fails the precision gate there, and
+none does today: all ten pairs were measured on real repositories
+(`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`) and none
+produced enough findings to fail, so all ten ship on. A per-language off is
+not something `rules.<id>.enabled = true` overrides; a `rules.<id>.languages`
+override is the intended knob and does not exist yet.
 
 ## The network
 

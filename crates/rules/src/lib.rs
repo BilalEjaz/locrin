@@ -133,6 +133,31 @@ pub trait Rule: Sync {
     fn enabled_by_default(&self) -> bool {
         true
     }
+    /// Whether the rule reports on files of one language. The per-language half
+    /// of `enabled_by_default`: a rule is measured against the spec 10.2
+    /// precision gate once per language it declares, and a pair that fails
+    /// ships off for that language alone while the rule stays on for every
+    /// language it passed. [`run_rules`] drops a finding whose file is in a
+    /// language the rule answers `false` for, so the answer holds for a graph
+    /// rule reading the index as much as for a file rule, and a file whose
+    /// extension names no language (a lockfile, a `.sql` migration) is never
+    /// asked, because no language was measured for it.
+    ///
+    /// A config `[rules.<id>] enabled = true` does not override a per-language
+    /// off: that key says whether the rule runs at all, and the languages a rule
+    /// failed on are the engine's own measurement rather than the repository's
+    /// choice. The intended knob is a `[rules.<id>] languages = [...]` override,
+    /// which does not exist yet. The answer must be a constant of the binary,
+    /// because the findings cache keys on which rules run and not on this.
+    ///
+    /// Every rule ships `true` for every language it declares: the PHP and
+    /// Python precision gate (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`)
+    /// failed no pair. A rule that fails one overrides this with a doc comment
+    /// citing the report.
+    fn enabled_for(&self, lang: Language) -> bool {
+        let _ = lang;
+        true
+    }
     /// A locked rule ignores config overrides: it cannot be disabled and its
     /// severity cannot be lowered (spec 4.3, `secret-exposed`). A repository
     /// that wants a locked finding to stop failing the build accepts it into the
@@ -167,6 +192,16 @@ pub fn rule_runs(rule: &dyn Rule, config: &Config) -> bool {
 fn language_allowed(rel: &str, languages: &[Language]) -> bool {
     match Language::from_path(Path::new(rel)) {
         Some(language) => languages.contains(&language),
+        None => true,
+    }
+}
+
+/// Whether a rule reports on this file under its own per-language default
+/// ([`Rule::enabled_for`]). A path naming no language is kept, for the reason
+/// [`language_allowed`] keeps it.
+fn enabled_for_file(rule: &dyn Rule, rel: &str) -> bool {
+    match Language::from_path(Path::new(rel)) {
+        Some(language) => rule.enabled_for(language),
         None => true,
     }
 }
@@ -314,6 +349,15 @@ pub fn run_rules(rules: &[Box<dyn Rule>], ctx: &RuleContext) -> anyhow::Result<V
             // rather than on what went in. Asked before the spec 9 gate, which
             // is the half that may have to go to the index for an answer.
             if !language_allowed(&f.file, languages) {
+                continue;
+            }
+            // The per-language default, applied to findings for the same reason
+            // the declaration is: it is the one place both kinds of rule pass
+            // through. A file rule is still handed the files of a language it
+            // ships off for and its findings there are dropped here, which
+            // costs the rule's work on those files and nothing else; no rule
+            // ships off for a language today, so nothing pays it.
+            if !enabled_for_file(rule.as_ref(), &f.file) {
                 continue;
             }
             if dropped(&f)? {
@@ -661,6 +705,74 @@ mod tests {
     /// no language the engine parses (a `.sql` migration, a lockfile) is kept,
     /// because the declaration says nothing about it and the rules that report
     /// on those files are exactly the ones reading them off disk.
+    /// A rule on for every language it declares except PHP, which is what a
+    /// rule that failed the precision gate on one language looks like.
+    struct OffForPhp;
+    impl Rule for OffForPhp {
+        fn id(&self) -> &'static str {
+            "off-for-php"
+        }
+        fn description(&self) -> &'static str {
+            "test rule"
+        }
+        fn scope(&self) -> Scope {
+            Scope::Graph
+        }
+        fn category(&self) -> Category {
+            Category::Erosion
+        }
+        fn default_severity(&self) -> Severity {
+            Severity::Medium
+        }
+        fn confidence(&self) -> Confidence {
+            Confidence::Medium
+        }
+        fn languages(&self) -> &'static [Language] {
+            ALL
+        }
+        fn enabled_for(&self, lang: Language) -> bool {
+            lang != Language::Php
+        }
+        fn run(&self, _ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
+            let span = Span { start_line: 1, start_col: 0, end_line: 1, end_col: 0 };
+            Ok(["src/a.ts", "src/x.php", "src/y.py", "db/schema.sql"]
+                .iter()
+                .map(|rel| finding_at(self, rel, span.clone(), "a", "hit", "fix"))
+                .collect())
+        }
+    }
+
+    /// [`Rule::enabled_for`] drops the findings of the language it is off for
+    /// and nothing else: the other declared languages and the files naming no
+    /// language stay. A config `enabled = true` turns the rule on, which it
+    /// already is, and does not reach the per-language default.
+    #[test]
+    fn a_rule_off_for_one_language_keeps_its_findings_elsewhere() {
+        let files: Vec<ParsedFile> = vec![];
+        let mut config = Config::default();
+        let ix = Index::open_in_memory().unwrap();
+        let entries = EntryPoints::detect(Path::new("."), &[]).unwrap();
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+
+        let out = run_rules(&[Box::new(OffForPhp)], &ctx).unwrap();
+        assert_eq!(
+            out.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "src/y.py", "db/schema.sql"],
+            "the PHP finding is dropped and the rest are kept"
+        );
+
+        config
+            .rules
+            .insert("off-for-php".into(), locrin_core::config::RuleOverride { enabled: Some(true), severity: None });
+        let ctx = test_ctx(&files, &config, Some(&ix), &entries);
+        let out = run_rules(&[Box::new(OffForPhp)], &ctx).unwrap();
+        assert_eq!(
+            out.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.ts", "src/y.py", "db/schema.sql"],
+            "enabled = true does not override a per-language off"
+        );
+    }
+
     #[test]
     fn a_finding_in_a_language_the_rule_did_not_declare_is_dropped() {
         let files: Vec<ParsedFile> = vec![];
