@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn the_watchdog_gives_up_on_a_worker_that_outlasts_the_budget() {
         let slow = watchdog(|| {
-            std::thread::sleep(Duration::from_millis(HOOK_BUDGET_MS + 500));
+            std::thread::sleep(Duration::from_millis(hook_budget_ms() + 500));
             Ok(1)
         });
         assert!(matches!(slow, Outcome::Timeout));

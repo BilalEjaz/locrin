@@ -43,8 +43,15 @@ fn run_hook(dir: &Path, subcommand: &str, payload: &str) -> Output {
 /// Claude Code runs the hook.
 fn run_hook_with_budget(dir: &Path, subcommand: &str, payload: &str, budget_ms: Option<&str>) -> Output {
     let mut cmd = locrin(dir);
-    if let Some(ms) = budget_ms {
-        cmd.env("LOCRIN_HOOK_BUDGET_MS", ms);
+    match budget_ms {
+        Some(ms) => {
+            cmd.env("LOCRIN_HOOK_BUDGET_MS", ms);
+        }
+        // The child inherits this process's environment, so leaving the
+        // variable alone is not the same as leaving it unset.
+        None => {
+            cmd.env_remove("LOCRIN_HOOK_BUDGET_MS");
+        }
     }
     let mut child = cmd
         .args(["hook", subcommand])

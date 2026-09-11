@@ -296,12 +296,9 @@ mod tests {
     /// rule.
     #[test]
     fn a_stray_closing_angle_bracket_in_jsx_text_is_tolerated() {
-        for src in [
-            "function A() { return <Label>a > b</Label>; }
-",
-            "function A() { return <Label>5 > 3 wins</Label>; }
-",
-        ] {
+        for src in
+            ["function A() { return <Label>a > b</Label>; }\n", "function A() { return <Label>5 > 3 wins</Label>; }\n"]
+        {
             let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
             assert!(!p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
         }
@@ -318,22 +315,16 @@ mod tests {
     #[test]
     fn an_ampersand_whose_text_run_carries_on_past_a_full_stop_is_still_an_error() {
         for src in [
-            "function A() { return <Label>tea & toast. Lovely</Label>; }
-",
-            "function A() { return <Label>a & b, c</Label>; }
-",
-            "function A() { return <Label>AT&T. now</Label>; }
-",
+            "function A() { return <Label>tea & toast. Lovely</Label>; }\n",
+            "function A() { return <Label>a & b, c</Label>; }\n",
+            "function A() { return <Label>AT&T. now</Label>; }\n",
         ] {
             let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
             assert!(p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
         }
-        for src in [
-            "function A() { return <Label>tea & toast.</Label>; }
-",
-            "function A() { return <Label>R&D.</Label>; }
-",
-        ] {
+        for src in
+            ["function A() { return <Label>tea & toast.</Label>; }\n", "function A() { return <Label>R&D.</Label>; }\n"]
+        {
             let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
             assert!(!p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
         }
