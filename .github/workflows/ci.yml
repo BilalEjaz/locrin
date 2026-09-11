@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+        env:
+          LOCRIN_HOOK_BUDGET_MS: "10000"
+
+  action-smoke:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p locrin-cli && echo "$PWD/target/release" >> "$GITHUB_PATH"
+      - id: gate
+        uses: ./action
+        with:
+          version: local
+          path: crates/cli/tests/fixtures/repo
+          # The fixture is not touched by this pull request, so a merge-base diff
+          # would select no files. Empty base means check every fixture file.
+          base: ""
+          comment: "false"
+          sarif: "false"
+          offline: "true"
+          fail-on-block: "false"
+      - name: The fixture must block
+        run: |
+          test "${{ steps.gate.outputs.status }}" = "block"
+          test "${{ steps.gate.outputs.exit-code }}" = "1"
+          grep -q '<!-- locrin-report -->' "${{ steps.gate.outputs.comment-file }}"
+          python3 -c "import json,sys; d=json.load(open('${{ steps.gate.outputs.sarif-file }}')); assert d['version']=='2.1.0' and len(d['runs'][0]['results'])>=2"

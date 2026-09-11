@@ -54,8 +54,11 @@ ampersand.
 cargo install --path crates/cli
 ```
 
-That is the only supported install for now. An npm package and a Homebrew
-formula are phase two.
+Release binaries for Linux, macOS (Intel and Apple silicon) and Windows are
+attached to every GitHub release with a `SHA256SUMS` file. The GitHub Action
+below downloads one of them and verifies it against that file.
+
+An npm package and a Homebrew formula are phase two.
 
 ## Quick start
 
@@ -178,8 +181,12 @@ the same way, so a bad call never takes the server down.
   view. `--since <ref>` checks the files changed by the commits in `ref..HEAD`,
   which is the deployment gate. `--json` prints the compact agent form, capped
   at ten findings. `--sarif` prints SARIF 2.1.0 with every finding, for code
-  scanning uploads. `--offline` skips the network. Paths and the diff scopes
-  cannot be combined: each names its own set of files.
+  scanning uploads. `--markdown` prints the pull-request summary: a marker line,
+  the verdict, and at most ten findings, with a `Details:` link when
+  `LOCRIN_RUN_URL` is set. `--sarif-file <path>` writes the full SARIF to a file
+  whatever stdout is showing, so one run can both comment and upload. `--offline`
+  skips the network. The three output forms are exclusive. Paths and the diff
+  scopes cannot be combined: each names its own set of files.
 - `locrin scan` indexes the repository and warms the findings cache without
   printing a verdict, so the next check pays only for what changed. `--offline`
   skips the network.
@@ -193,6 +200,89 @@ the same way, so a bad call never takes the server down.
 - `locrin init` wires the repository up. `--offline` skips the network on the
   first scan, which is the one scan `init` runs online.
 - `locrin mcp` serves the five tools.
+
+## GitHub Action
+
+```yaml
+name: locrin
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: BilalEjaz/locrin/action@v0.3.0
+        with:
+          version: v0.3.0
+```
+
+The action downloads the release binary for the runner, verifies it against the
+release `SHA256SUMS`, and runs one `locrin check` over the pull-request view. It
+posts the verdict as a comment, uploads the SARIF to code scanning, and fails
+the job when the verdict is BLOCK.
+
+The three permissions each pay for one thing: `contents: read` for the
+checkout, `pull-requests: write` for the comment,
+`security-events: write` for the SARIF upload. Drop the last two by setting
+`comment: "false"` and `sarif: "false"`. `fetch-depth: 0` is what gives the run
+a merge base to diff against: a shallow checkout has none, and the default
+pull-request path then exits 2.
+
+The runner's token only reaches the repository the workflow runs in, so while
+`BilalEjaz/locrin` is private the download needs a `download-token` that can read
+its releases (a fine-grained PAT with Contents read on the locrin repository),
+while the comment keeps the workflow's own `token`. While locrin is private,
+`uses: BilalEjaz/locrin/action@...` from another repository also requires the
+locrin repository's Actions setting "Access: accessible from repositories owned
+by the user" (Settings, Actions, General); making the repository public removes
+both requirements and the default `${{ github.token }}` is enough.
+
+`version: latest` follows the newest release, so the binary can move ahead of the
+action ref; a pinned `version` matches the ref, which is what the examples do.
+
+There is one comment, not a wall of them. The summary starts with the marker
+`<!-- locrin-report -->` on its own line, and the action edits the first
+pull-request comment whose body starts with that marker. A new comment is
+written only when no marked comment exists, so every push edits the same one.
+
+The action sets `LOCRIN_RUN_URL` to the run's own URL, which puts a `Details:`
+link at the end of the comment. Set it yourself on any other CI and
+`--markdown` does the same thing there.
+
+`action/README.md` documents every input and output, and `action/examples/`
+holds ready-to-copy workflows.
+
+## Deployment gate
+
+`locrin check --since <ref>` checks the files changed by the commits in
+`ref..HEAD`, which is what a deployment needs: not what one pull request
+touched, but everything that has landed since the last release went out.
+
+Tag each deploy, and the ref is the last tag:
+
+```yaml
+- id: last
+  run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD | head -n 1)" >> "$GITHUB_OUTPUT"
+- uses: BilalEjaz/locrin/action@v0.3.0
+  with:
+    since: ${{ steps.last.outputs.tag }}
+    comment: "false"
+# deploy steps follow; they never run when the gate blocks
+```
+
+On a repository with no deploy tag yet the fallback diffs against the root
+commit, which checks every file touched since the first commit; run one
+whole-repository `locrin check` first if you want a full sweep. The exit codes
+below drive the pipeline: a BLOCK fails the step, and the
+steps after it do not run, so nothing ships over a blocking finding. Set
+`fail-on-block: false` to read the `status` output and decide yourself.
 
 ## Exit codes
 

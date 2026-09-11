@@ -1,0 +1,25 @@
+# Copy to fasting-app/.github/workflows/locrin.yml. Requires the locrin wiring
+# (locrin.toml, locrin-baseline.json) committed. Needs fetch-depth 0 for --base.
+# While the locrin repository is private, LOCRIN_TOKEN must be a fine-grained PAT
+# with Contents read on BilalEjaz/locrin, and that repository needs the Actions
+# setting "Access: accessible from repositories owned by the user"; both
+# requirements go away once locrin is public, along with the download-token line.
+name: locrin
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+jobs:
+  locrin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: BilalEjaz/locrin/action@v0.3.0
+        with:
+          version: v0.3.0
+          # The download only; the comment keeps the workflow's own github.token.
+          download-token: ${{ secrets.LOCRIN_TOKEN }}
