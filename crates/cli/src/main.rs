@@ -11,6 +11,7 @@ mod run;
 #[cfg(test)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+use anyhow::Context;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -55,6 +56,12 @@ enum Cmd {
         /// SARIF 2.1.0 on stdout, every finding, for code scanning uploads
         #[arg(long, conflicts_with = "json")]
         sarif: bool,
+        /// Markdown summary for a pull-request comment (marker line, verdict, top ten findings)
+        #[arg(long, conflicts_with_all = ["json", "sarif"])]
+        markdown: bool,
+        /// Also write SARIF 2.1.0 with every finding to PATH, whatever stdout shows
+        #[arg(long, value_name = "PATH")]
+        sarif_file: Option<PathBuf>,
         /// Files that differ from the merge base with REF, plus untracked files (the pull-request view)
         #[arg(long, value_name = "REF", conflicts_with_all = ["changed", "since"])]
         base: Option<String>,
@@ -165,12 +172,12 @@ fn real_main() -> anyhow::Result<i32> {
         None => std::env::current_dir()?,
     };
     match cli.cmd {
-        Cmd::Check { paths, changed, json, sarif, base, since, offline } => {
+        Cmd::Check { paths, changed, json, sarif, markdown, sarif_file, base, since, offline } => {
             let diff = base.map(git::DiffScope::Base).or(since.map(git::DiffScope::Since));
             let opts = run::Options { root, paths, changed_only: changed, json, offline, diff };
             let verdict = run::check(&opts)?;
-            if sarif {
-                let rules: Vec<locrin_reporters::sarif::RuleMeta> = locrin_rules::all_rules()
+            let rules = || -> Vec<locrin_reporters::sarif::RuleMeta> {
+                locrin_rules::all_rules()
                     .iter()
                     .map(|r| locrin_reporters::sarif::RuleMeta {
                         id: r.id().to_string(),
@@ -179,11 +186,24 @@ fn real_main() -> anyhow::Result<i32> {
                         category: r.category(),
                         enabled_by_default: r.enabled_by_default(),
                     })
-                    .collect();
-                println!("{}", locrin_reporters::sarif::render(&verdict, &rules, env!("CARGO_PKG_VERSION")));
-                return Ok(verdict.exit_code());
+                    .collect()
+            };
+            // The file is written before anything reaches stdout: a path the
+            // engine cannot write is the engine failing, and the caller must
+            // not have read a verdict off stdout by the time it hears so.
+            if let Some(path) = &sarif_file {
+                let doc = locrin_reporters::sarif::render(&verdict, &rules(), env!("CARGO_PKG_VERSION"));
+                std::fs::write(path, doc).with_context(|| format!("writing SARIF to {}", path.display()))?;
             }
-            if opts.json {
+            if sarif {
+                println!("{}", locrin_reporters::sarif::render(&verdict, &rules(), env!("CARGO_PKG_VERSION")));
+            } else if markdown {
+                let run_url = std::env::var("LOCRIN_RUN_URL").ok().filter(|s| !s.trim().is_empty());
+                print!(
+                    "{}",
+                    locrin_reporters::markdown::render(&verdict, env!("CARGO_PKG_VERSION"), run_url.as_deref())
+                );
+            } else if opts.json {
                 println!("{}", locrin_reporters::agent::render(&verdict));
             } else {
                 print!("{}", locrin_reporters::terminal::render(&verdict));

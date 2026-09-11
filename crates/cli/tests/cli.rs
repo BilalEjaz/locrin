@@ -1316,3 +1316,69 @@ fn version_flag_prints_the_crate_version() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with(&format!("locrin {}", env!("CARGO_PKG_VERSION"))), "{text}");
 }
+
+/// The pull-request view: one marker line the action greps for, then the
+/// verdict, so a comment can be found again and edited rather than piled on.
+#[test]
+fn markdown_output_carries_the_marker_and_blocks() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path()).args(["check", "--markdown", "--offline"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("<!-- locrin-report -->\n### Locrin: BLOCK"), "{text}");
+    assert!(text.contains("`leftover-debug`"));
+}
+
+/// Three output formats for one stdout, so clap refuses any pair of them.
+#[test]
+fn markdown_conflicts_with_json_and_sarif() {
+    let dir = copy_fixture();
+    for other in ["--json", "--sarif"] {
+        let out = locrin(dir.path()).args(["check", "--markdown", other]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{other}");
+    }
+}
+
+/// The file is not an output format: it is the complete list, written whatever
+/// stdout is showing, so one run can both comment and upload.
+#[test]
+fn sarif_file_is_written_alongside_any_stdout_format() {
+    let dir = copy_fixture();
+    let sarif = dir.path().join("out").join("locrin.sarif");
+    std::fs::create_dir_all(sarif.parent().unwrap()).unwrap();
+    let out =
+        locrin(dir.path()).args(["check", "--markdown", "--offline", "--sarif-file"]).arg(&sarif).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("<!-- locrin-report -->"));
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&sarif).unwrap()).unwrap();
+    assert_eq!(doc["version"], "2.1.0");
+    assert!(doc["runs"][0]["results"].as_array().unwrap().len() >= 2);
+}
+
+/// A path the engine cannot write is the engine failing, not the code failing,
+/// so it exits 2 and names the file rather than reporting a clean verdict.
+#[test]
+fn sarif_file_in_a_missing_directory_is_an_engine_error() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path())
+        .args(["check", "--offline", "--sarif-file"])
+        .arg(dir.path().join("nope").join("x.sarif"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("x.sarif"));
+}
+
+/// The action sets `LOCRIN_RUN_URL` to the workflow run, so the comment can
+/// link to the log the SARIF upload came from.
+#[test]
+fn markdown_details_line_comes_from_locrin_run_url() {
+    let dir = copy_fixture();
+    let out = locrin(dir.path())
+        .args(["check", "--markdown", "--offline"])
+        .env("LOCRIN_RUN_URL", "https://example/run/9")
+        .output()
+        .unwrap();
+    assert!(String::from_utf8(out.stdout).unwrap().ends_with("Details: https://example/run/9\n"));
+}
