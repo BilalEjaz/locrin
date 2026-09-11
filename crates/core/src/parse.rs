@@ -269,4 +269,54 @@ mod tests {
             assert!(p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
         }
     }
+
+    /// The same tolerance covers a stray `>`: the scanner refuses the run, the
+    /// refusal parents to the element among its text children, and only `<`,
+    /// `{` and `}` mark a run as markup the parser gave up on. `5 > 3` in a
+    /// label is prose, and it must not exempt the screen around it from every
+    /// rule.
+    #[test]
+    fn a_stray_closing_angle_bracket_in_jsx_text_is_tolerated() {
+        for src in [
+            "function A() { return <Label>a > b</Label>; }
+",
+            "function A() { return <Label>5 > 3 wins</Label>; }
+",
+        ] {
+            let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
+            assert!(!p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
+        }
+    }
+
+    /// What a bare `&` costs depends on what follows it in the same text run.
+    /// The parser recovers by reading the remainder as an expression, and a full
+    /// stop or a comma with more text after it makes that expression a member
+    /// access or a sequence: the recovery then swallows the element itself, the
+    /// ERROR node lands at the top of the file instead of among an element's
+    /// text children, and the file is excluded from every rule. A run that ends
+    /// at the full stop has nothing for the parser to read past it, so it stays
+    /// tolerated.
+    #[test]
+    fn an_ampersand_whose_text_run_carries_on_past_a_full_stop_is_still_an_error() {
+        for src in [
+            "function A() { return <Label>tea & toast. Lovely</Label>; }
+",
+            "function A() { return <Label>a & b, c</Label>; }
+",
+            "function A() { return <Label>AT&T. now</Label>; }
+",
+        ] {
+            let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
+            assert!(p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
+        }
+        for src in [
+            "function A() { return <Label>tea & toast.</Label>; }
+",
+            "function A() { return <Label>R&D.</Label>; }
+",
+        ] {
+            let p = parse_source(Path::new("x/a.tsx"), "x/a.tsx", src.to_string()).unwrap();
+            assert!(!p.has_error, "{src:?} tree: {}", p.tree.root_node().to_sexp());
+        }
+    }
 }
