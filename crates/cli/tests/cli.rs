@@ -1305,3 +1305,14 @@ fn has_head_is_true_only_once_there_is_a_commit() {
     git(dir.path(), &["commit", "-qm", "init"]);
     assert!(git_src::has_head(dir.path()));
 }
+
+/// `--version` is what a bug report is asked for and what an install script
+/// checks, and the baseline stamp names the same string, so the flag has to
+/// exist and print the crate's own version rather than clap's "unknown".
+#[test]
+fn version_flag_prints_the_crate_version() {
+    let out = Command::cargo_bin("locrin").unwrap().arg("--version").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with(&format!("locrin {}", env!("CARGO_PKG_VERSION"))), "{text}");
+}

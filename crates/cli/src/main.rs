@@ -19,6 +19,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "locrin",
+    // Whatever the crate was built at, so a bug report and the version stamped
+    // into a baseline file name the same build.
+    version,
     about = "Deterministic quality gate for code written by people and agents",
     long_about = "Deterministic quality gate for code written by people and agents.\n\n\
                   The index lives outside the repository, in the platform cache directory. Set \
