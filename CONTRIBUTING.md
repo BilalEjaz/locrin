@@ -8,8 +8,9 @@
     cargo clippy --workspace --all-targets -- -D warnings
     bash scripts/tests/run.sh
 
-All five must pass before a pull request is reviewed. CI runs them on Linux and
-Windows.
+All five must pass before a pull request is reviewed. CI runs `cargo fmt`,
+`cargo clippy` and the script harness on Linux only, `cargo test` on Linux and
+Windows, and the install smoke on Linux, macOS and Windows.
 
 ## Rules and the precision gate
 

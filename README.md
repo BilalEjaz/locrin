@@ -2,7 +2,8 @@
 
 Locrin is a deterministic quality gate for code written by people and by
 agents. It answers one question about a change, pass, advisory or block, the
-same way every time, in under a second, with no model in the loop.
+same way every time, in under a second once the index is built, with no model
+in the loop.
 
 It reads TypeScript and JavaScript, and PHP and Python behind a one-line
 opt-in, with tree-sitter, keeps a SQLite index of the repository outside the
@@ -19,9 +20,11 @@ Claude Code's hooks, an MCP client and a GitHub Action.
     curl -fsSL https://raw.githubusercontent.com/BilalEjaz/locrin/main/install.sh | bash
     irm https://raw.githubusercontent.com/BilalEjaz/locrin/main/install.ps1 | iex
 
-Every channel ships the same binary from the same release, verified against the
-release's `SHA256SUMS`. Linux x86_64, macOS (Intel and Apple silicon) and
-Windows x86_64 are prebuilt; anything else builds from source with cargo.
+The installer scripts, the Homebrew formula and the GitHub Action download the
+release assets and verify them against `SHA256SUMS`; npm and PyPI carry the same
+binaries inside their packages; `cargo install` builds from source. Linux
+x86_64, macOS (Intel and Apple silicon) and Windows x86_64 are prebuilt;
+anything else builds from source with cargo.
 
 ## Thirty seconds
 

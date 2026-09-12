@@ -14,6 +14,7 @@
 # publish, which is what lets their path dependencies resolve.
 set -euo pipefail
 assets="$1"; mode="$2"
+[[ "$mode" == "live" || "$mode" == "dry" ]] || { echo "publish.sh: mode must be live or dry, got '$mode'" >&2; exit 2; }
 cd "$(dirname "$0")/../.."
 version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
 tag="v$version"
@@ -51,10 +52,10 @@ if [[ "$mode" == "live" ]]; then dry=""; else dry="--dry-run"; fi
 echo "== npm $version"
 node npm/scripts/stage.js --version "$version" --binary "$linux" --platform linux-x64 --binary "$darm" --platform darwin-arm64 --binary "$dx64" --platform darwin-x64 --binary "$win" --platform win32-x64
 for p in linux-x64 darwin-arm64 darwin-x64 win32-x64; do
-  if [[ "$mode" == "live" ]] && npm view "@raxbi/locrin-$p@$version" version >/dev/null 2>&1; then echo "npm @raxbi/locrin-$p@$version exists, skipping"; continue; fi
+  if [[ "$mode" == "live" ]] && [[ "$(npm view "@raxbi/locrin-$p@$version" version 2>/dev/null)" == "$version" ]]; then echo "npm @raxbi/locrin-$p@$version exists, skipping"; continue; fi
   (cd "npm/platforms/$p" && npm publish --access public $dry)
 done
-if [[ "$mode" == "live" ]] && npm view "locrin@$version" version >/dev/null 2>&1; then echo "npm locrin@$version exists, skipping"; else (cd npm/locrin && npm publish --access public $dry); fi
+if [[ "$mode" == "live" ]] && [[ "$(npm view "locrin@$version" version 2>/dev/null)" == "$version" ]]; then echo "npm locrin@$version exists, skipping"; else (cd npm/locrin && npm publish --access public $dry); fi
 
 echo "== pypi $version"
 python pypi/build_wheel.py --version "$version" --binary "$linux" --platform-tag manylinux_2_35_x86_64 --out "$work/whl"

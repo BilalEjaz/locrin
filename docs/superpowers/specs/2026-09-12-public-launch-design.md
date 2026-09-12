@@ -118,7 +118,7 @@ The harness never runs or compares other vendors' tools. Head-to-head comparison
 1. Pre-flight (section 3.1 to 3.3) on a branch; merged while private.
 2. Packaging (section 4) built and dry-run tested while private.
 3. Benchmark repo created and its harness tested against 0.4.0 while the engine repo is still private (the benchmark repo can be public from day one; it contains no engine code).
-4. Founder creates an npm automation token and stores it as the NPM_TOKEN secret on the repository (the local npm login has expired; CI publishes with the secret). The same for PyPI (PYPI_TOKEN) and crates.io (CARGO_REGISTRY_TOKEN).
+4. Founder creates an npm automation token and stores it as the NPM_TOKEN secret on the repository (the local npm login has expired; CI publishes with the secret). The same for PyPI (PYPI_TOKEN), crates.io (CARGO_REGISTRY_TOKEN) and the Homebrew tap (HOMEBREW_TAP_TOKEN, a fine-grained PAT with Contents read and write on BilalEjaz/homebrew-locrin only), and creates the empty public tap repository `BilalEjaz/homebrew-locrin`.
 5. Public flip: one command, after 1 to 4 are green and the founder says "make it public".
 6. Tag 0.5.0 as the first public release; the publish job populates every channel; the benchmark CI publishes results for 0.5.0.
 7. Section 3.4 after-the-flip steps.

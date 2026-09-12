@@ -7,6 +7,8 @@ param(
   [string]$BaseUrl = "https://github.com/BilalEjaz/locrin/releases/download"
 )
 $ErrorActionPreference = "Stop"
+# Invoke-WebRequest on PowerShell 5.1 renders a progress bar that costs more than the download.
+$ProgressPreference = "SilentlyContinue"
 $repo = "BilalEjaz/locrin"
 $tmp = $null
 # Exits 2 when run as a file (the -File contract the tests assert); throws when the script was
@@ -52,7 +54,12 @@ if ($actual -ne $expected) { Fail "checksum mismatch for $asset" }
 
 Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath $tmp -Force
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Move-Item -Force -Path (Join-Path $tmp "locrin-$Version-$target\locrin.exe") -Destination (Join-Path $InstallDir "locrin.exe")
+# Stage inside the install directory so the final step is a rename on one volume: %TEMP% and
+# %LOCALAPPDATA% can sit on different drives, and Move-Item across volumes is a copy that can
+# half-write over a running binary.
+$staged = Join-Path $InstallDir "locrin.exe.tmp"
+Copy-Item -Force -LiteralPath (Join-Path $tmp "locrin-$Version-$target\locrin.exe") -Destination $staged
+Move-Item -Force -Path $staged -Destination (Join-Path $InstallDir "locrin.exe")
 Remove-Item -Recurse -Force $tmp
 Write-Output "locrin $Version installed to $InstallDir\locrin.exe"
 if (($env:PATH -split ";") -notcontains $InstallDir) { Write-Output "add $InstallDir to your PATH" }
