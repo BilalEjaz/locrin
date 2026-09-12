@@ -1,4 +1,4 @@
-import os, subprocess, sys, tempfile, unittest, zipfile
+import os, stat, subprocess, sys, tempfile, unittest, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,7 +35,10 @@ class BuildWheel(unittest.TestCase):
             self.assertEqual(len(record), 7)
             self.assertIn("locrin-9.9.9.dist-info/RECORD,,", record)
             self.assertTrue(any(l.startswith("locrin/bin/locrin,sha256=") for l in record))
-            self.assertEqual((z.getinfo("locrin/bin/locrin").external_attr >> 16) & 0o111, 0o111)
+            info = z.getinfo("locrin/bin/locrin")
+            self.assertEqual((info.external_attr >> 16) & 0o111, 0o111)
+            self.assertEqual(info.create_system, 3)
+            self.assertTrue(stat.S_ISREG(info.external_attr >> 16))
 
     def test_windows_binary_name(self):
         whl = self.build("win_amd64", exe=True)

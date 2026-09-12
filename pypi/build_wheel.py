@@ -59,6 +59,7 @@ def build(version, binary, platform_tag, out):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data, mode in files:
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3  # Unix host marker: installers only honour the mode bits when the entry says Unix, whatever host built the wheel
             info.external_attr = (0o100000 | mode) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(info, data)
