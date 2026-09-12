@@ -79,7 +79,7 @@ The existing release.yml builds four targets (Linux x86_64, macOS Intel, macOS A
 - Both refuse clearly on unsupported platforms and on checksum mismatch, and never leave a half-written binary on the path.
 
 ### 4.6 cargo
-- `cargo install locrin` works once the crates are published from the tag. The publish job publishes the five crates in dependency order (locrin-core, locrin-rules, locrin-reporters, locrin-mcp, locrin-cli).
+- `cargo install locrin` works once the crates are published from the tag. The publish job publishes the five crates in dependency order (locrin-core, locrin-rules, locrin-reporters, locrin-mcp, locrin).
 
 ### 4.7 Version discipline
 All channels publish the version in the root Cargo.toml. The publish job reads it once and refuses to run if the tag does not match it.
