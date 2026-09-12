@@ -30,10 +30,10 @@ inputs:
     description: "Fail the step when the verdict is BLOCK"
     default: "true"
   token:
-    description: "Token for the comment, and for the release download when download-token is empty"
+    description: "Token for the comment and the release download"
     default: ${{ github.token }}
   download-token:
-    description: "Token that can read BilalEjaz/locrin releases; needed while the repository is private; defaults to token"
+    description: "Optional token for the release download; only needed if the repository ever needs one. Defaults to token"
     default: ""
 
 outputs:

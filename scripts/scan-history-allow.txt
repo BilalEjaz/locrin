@@ -1,0 +1,45 @@
+# Paths whose secret-shaped strings are the secret-exposed rule's own synthetic
+# test material, so a hit there is the detector finding its own corpus and not a
+# credential that was ever live.
+#
+# One repository-relative path per line. A finding whose file path is covered by
+# an entry is reported as allowlisted instead of failing the scan. Blank lines
+# and lines starting with # are ignored.
+#
+# An entry ending in "/" is a directory prefix and covers every path under it.
+# An entry that does not end in "/" is one exact file path and covers nothing
+# else: "crates/rules/src/secrets/jwt.rs" does not cover "jwt.rs.bak" or
+# "jwt.rsx". Widening an entry to a whole directory means adding the "/".
+#
+# Nothing is added here without a hit from scripts/scan-history.sh and a reason.
+
+# The whole secret-exposed fixture tree. keys.ts opens by stating that every line
+# below it is a synthetic credential in its provider's documented shape and that
+# the character runs are typed filler; tests/secret_exposed.rs asserts the file
+# holds exactly one line per entry in the rule's PATTERNS table, so the contents
+# are generated from that table rather than copied from anywhere. clean/config.ts
+# and edge/mixed.ts are the placeholder and mixed counterparts of the same set.
+crates/rules/tests/fixtures/secret_exposed/
+
+# The test that drives those fixtures. It carries the same synthetic shapes
+# inline in its assertions.
+crates/rules/tests/secret_exposed.rs
+
+# The JWT decoder's #[cfg(test)] constants (SERVICE, ANON, EXPIRED). They are
+# hand-built tokens over the fake Supabase project ref abcdefghijklmnop.
+crates/rules/src/secrets/jwt.rs
+
+# The service-role rule's #[cfg(test)] constants, the same fake-ref token shapes.
+crates/rules/src/supabase/service_role.rs
+
+# The Supabase fixture that must flag: a service-role token for the same fake
+# project ref, pasted into a screen on purpose.
+crates/rules/tests/fixtures/supabase/flag/app/(tabs)/home.tsx
+
+# The Supabase fixture that must stay clean: the anon key for the same fake
+# project ref, which is the correct key to ship and is still token-shaped.
+crates/rules/tests/fixtures/supabase/clean/src/client.ts
+
+# The weak-crypto fixture. Its hard-coded demo key is there to give the weak
+# cipher something to encrypt.
+crates/rules/tests/fixtures/weak_crypto/flag/a.ts

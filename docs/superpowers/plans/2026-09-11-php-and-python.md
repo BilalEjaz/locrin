@@ -15,7 +15,7 @@
 - Default behaviour is byte-identical for repositories without a `[languages]` table: `.php` and `.py` files are skipped by the walker and refused as explicit paths (with a one-line hint) unless enabled.
 - Rules that run on PHP or Python in this plan, and only these: `leftover-debug`, `leftover-commented-code`, `leftover-agent-marker`, `secret-exposed`, `vulnerable-dependency`. Every other rule declares the JS family and never receives a PHP or Python file. `already-exists` stays release two.
 - Precision gate (spec 4.3): each new rule-language pair is hand-checked on 20 sampled findings from the corpora in Task 8; under 17 of 20 the pair ships disabled for that language (recorded in the plan and README), never removed.
-- Corpora, read-only: Python is `<home>/fastspot` (the founder's bot, 96 files); PHP is a clone of `https://github.com/BookStackApp/BookStack` (MIT) at its latest release tag into the scratchpad directory, never into the repository. No corpus file is ever written to.
+- Corpora, read-only: Python is the FastSpot checkout (the founder's bot, 96 files); PHP is a clone of `https://github.com/BookStackApp/BookStack` (MIT) at its latest release tag into the scratchpad directory, never into the repository. No corpus file is ever written to.
 - Performance: the five existing benchmarks (TypeScript, FastLift) must not regress; a PHP cold index number on BookStack is recorded, not gated.
 - Ids: no existing finding id changes (the anchor rules are untouched), so FastLift's baseline stays valid.
 - Git: branch `engine/languages` off `main`. One commit per task, plain messages, no attribution trailers, never `git add -A`, no em dashes. `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, zero warnings, `cargo test --workspace` green before every commit. Toolchain in Git Bash: `export PATH="$USERPROFILE/.cargo/bin:$PATH"`.
@@ -107,7 +107,7 @@ Append to the tests in `crates/core/src/parse.rs`:
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-core -q 2>&1 | tail -5
+cd . && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-core -q 2>&1 | tail -5
 ```
 Expected: compile errors (`Php` and `JS_FAMILY` unknown).
 
@@ -125,14 +125,14 @@ Run `cargo update -p tree-sitter` so the lock moves to 0.24.x. Every `match` on 
 - [ ] **Step 4: Run the full workspace**
 
 ```bash
-cd <repo> && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test --workspace -q 2>&1 | grep -E "test result|error" | head -12 && cargo clippy --workspace --all-targets -q -- -D warnings && cargo fmt --all --check && echo CLEAN
+cd . && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test --workspace -q 2>&1 | grep -E "test result|error" | head -12 && cargo clippy --workspace --all-targets -q -- -D warnings && cargo fmt --all --check && echo CLEAN
 ```
 Expected: every crate ok (477 plus 2 new), `CLEAN`. If `LANGUAGE_PHP` is not the export name in the installed tree-sitter-php, run `cargo doc -p tree-sitter-php --no-deps` and use the documented constant; record it.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add Cargo.toml Cargo.lock crates/core/Cargo.toml crates/core/src/lang.rs crates/core/src/parse.rs $(git diff --name-only) && git commit -m "engine: tree-sitter 0.24, PHP and Python grammars, language variants; version 0.4.0"
+cd . && git add Cargo.toml Cargo.lock crates/core/Cargo.toml crates/core/src/lang.rs crates/core/src/parse.rs $(git diff --name-only) && git commit -m "engine: tree-sitter 0.24, PHP and Python grammars, language variants; version 0.4.0"
 ```
 (The `$(git diff --name-only)` picks up the exhaustive-match sites you had to touch; list them in the report.)
 
@@ -191,7 +191,7 @@ Implement `Languages`, `Config.languages`, `Language::enabled`, the walker gate 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/config.rs crates/core/src/walk.rs crates/cli/src/run.rs crates/cli/tests/cli.rs crates/cli/tests/fixtures/multilang && git commit -m "engine: [languages] flag gates PHP and Python in the walker and explicit paths"
+cd . && git add crates/core/src/config.rs crates/core/src/walk.rs crates/cli/src/run.rs crates/cli/tests/cli.rs crates/cli/tests/fixtures/multilang && git commit -m "engine: [languages] flag gates PHP and Python in the walker and explicit paths"
 ```
 
 ---
@@ -239,7 +239,7 @@ cd <repo> && git add crates/core/src/config.rs crates/core/src/walk.rs crates/cl
 - [ ] **Step 2: Run to verify failure, implement per language in `collect` (dispatch on `file.language`), run to verify pass, run the workspace, commit**
 
 ```bash
-cd <repo> && git add crates/core/src/symbols.rs && git commit -m "engine: PHP and Python top-level symbols"
+cd . && git add crates/core/src/symbols.rs && git commit -m "engine: PHP and Python top-level symbols"
 ```
 
 ---
@@ -259,7 +259,7 @@ In `crates/rules/src/lib.rs` tests: a test rule with default `languages()` given
 - [ ] **Step 2: Implement, run, commit**
 
 ```bash
-cd <repo> && git add crates/rules/src && git commit -m "rules: per-rule language declaration and file filter"
+cd . && git add crates/rules/src && git commit -m "rules: per-rule language declaration and file filter"
 ```
 
 ---
@@ -279,7 +279,7 @@ cd <repo> && git add crates/rules/src && git commit -m "rules: per-rule language
 - [ ] **Step 2: Implement per language (dispatch on `file.language`; the TypeScript path is untouched), run, commit**
 
 ```bash
-cd <repo> && git add crates/rules/src/leftover_debug.rs crates/rules/tests && git commit -m "rules: leftover-debug sinks for PHP and Python"
+cd . && git add crates/rules/src/leftover_debug.rs crates/rules/tests && git commit -m "rules: leftover-debug sinks for PHP and Python"
 ```
 
 ---
@@ -299,7 +299,7 @@ cd <repo> && git add crates/rules/src/leftover_debug.rs crates/rules/tests && gi
 - [ ] **Step 2: Implement, run, commit**
 
 ```bash
-cd <repo> && git add crates/rules/src/leftover_commented.rs crates/rules/tests && git commit -m "rules: commented-code vocabularies for PHP and Python"
+cd . && git add crates/rules/src/leftover_commented.rs crates/rules/tests && git commit -m "rules: commented-code vocabularies for PHP and Python"
 ```
 
 ---
@@ -317,7 +317,7 @@ cd <repo> && git add crates/rules/src/leftover_commented.rs crates/rules/tests &
 - [ ] **Step 2: Implement, run, commit**
 
 ```bash
-cd <repo> && git add crates/core/src/lockfile.rs crates/core/src/osv.rs crates/rules/src/vulnerable_dependency.rs crates/core/tests/fixtures/lockfiles crates/cli/tests/fixtures/multilang && git commit -m "engine: Composer, Poetry and requirements lockfiles with per-package ecosystems"
+cd . && git add crates/core/src/lockfile.rs crates/core/src/osv.rs crates/rules/src/vulnerable_dependency.rs crates/core/tests/fixtures/lockfiles crates/cli/tests/fixtures/multilang && git commit -m "engine: Composer, Poetry and requirements lockfiles with per-package ecosystems"
 ```
 
 ---
@@ -330,7 +330,7 @@ cd <repo> && git add crates/core/src/lockfile.rs crates/core/src/osv.rs crates/r
 
 - [ ] **Step 1: Corpora**
 
-Python: `<home>/fastspot` (read-only; use `LOCRIN_CACHE_DIR` in the scratchpad; write a temporary `locrin.toml` enabling python into a COPY of the repo in the scratchpad, never into the original). PHP: `git clone --depth 1 --branch <latest release tag> https://github.com/BookStackApp/BookStack` into the scratchpad; write `locrin.toml` with `php = true` there. Run `locrin check --json --offline` (cap lifted: use `--sarif-file` to get every finding) on each.
+Python: the FastSpot checkout (read-only; use `LOCRIN_CACHE_DIR` in the scratchpad; write a temporary `locrin.toml` enabling python into a COPY of the repo in the scratchpad, never into the original). PHP: `git clone --depth 1 --branch <latest release tag> https://github.com/BookStackApp/BookStack` into the scratchpad; write `locrin.toml` with `php = true` there. Run `locrin check --json --offline` (cap lifted: use `--sarif-file` to get every finding) on each.
 
 - [ ] **Step 2: Sample and label**
 
@@ -343,7 +343,7 @@ A pair under 17 of 20 ships off for that language via `enabled_for`, with the re
 - [ ] **Step 4: Commit**
 
 ```bash
-cd <repo> && git add docs/superpowers/plans/2026-09-11-php-and-python-precision.md crates/rules/src README.md && git commit -m "rules: precision gate results for PHP and Python; per-language defaults"
+cd . && git add docs/superpowers/plans/2026-09-11-php-and-python-precision.md crates/rules/src README.md && git commit -m "rules: precision gate results for PHP and Python; per-language defaults"
 ```
 
 ---
@@ -358,7 +358,7 @@ cd <repo> && git add docs/superpowers/plans/2026-09-11-php-and-python-precision.
 - [ ] **Step 2: Docs and SARIF, commit**
 
 ```bash
-cd <repo> && git add README.md crates/reporters/src/sarif.rs crates/cli/tests/bench.rs && git commit -m "docs: languages section; SARIF rule languages; PHP cold-index benchmark"
+cd . && git add README.md crates/reporters/src/sarif.rs crates/cli/tests/bench.rs && git commit -m "docs: languages section; SARIF rule languages; PHP cold-index benchmark"
 ```
 
 Post-merge, founder's actions: tag `v0.4.0` (the release pipeline from plan A publishes it); the examples' pins move to `v0.4.0` in a follow-up docs commit.

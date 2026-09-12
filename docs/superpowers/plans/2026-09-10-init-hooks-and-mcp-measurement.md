@@ -17,7 +17,7 @@ and that `init` works on a repository nobody wrote it against.
 ### Benchmarks
 
 `cargo test --release -p locrin-cli -- --ignored --nocapture`, on `92b2886`.
-Bench repository `<home>/fasting-app` (1846 files), a fresh temporary
+Bench repository the FastLift checkout (1846 files), a fresh temporary
 cache per benchmark, every run `--offline`, on an idle machine: no cargo, rustc
 or locrin process running before the first run (`tasklist` empty on all three
 names), and six CPU samples over eighteen seconds reading 1, 1, 4, 1, 0, 1
@@ -71,7 +71,7 @@ is not one this measurement has, so the budget stays where spec 9 put it.
 
 ### The dogfood run
 
-`init` was run on a copy of `<home>/fastlift-admin` (a Cloudflare Worker,
+`init` was run on a copy of the FastLift admin checkout (a Cloudflare Worker,
 five source files, a real git repository with commits). The copy is a temporary
 directory, `LOCRIN_CACHE_DIR` points at a second temporary directory, and both
 were deleted afterwards. The original checkout was never written to: `git status`
@@ -96,7 +96,7 @@ baseline written with 33 finding(s)
 stderr, verbatim (progress, which names no file the command touched):
 
 ```
-indexing 5 source file(s) under <home>\<local-appdata>\Temp\claude\C--Users-chars\a63b6673-05bd-485b-a2b0-126e2b7498aa\scratchpad\dogfood\fastlift-admin
+indexing 5 source file(s) under the scratchpad directory
 indexed 5 file(s) in 5.0 s
 ```
 
@@ -244,7 +244,7 @@ unchanged locrin-baseline.json
 stderr:
 
 ```
-indexing 5 source file(s) under <home>\<local-appdata>\Temp\claude\C--Users-chars\a63b6673-05bd-485b-a2b0-126e2b7498aa\scratchpad\dogfood\fastlift-admin
+indexing 5 source file(s) under the scratchpad directory
 indexed 5 file(s) in 0.0 s
 ```
 
@@ -267,7 +267,7 @@ rather than a new gate: the same five targets, re-run on the branch head, beside
 Part A's numbers.
 
 Method as in Part A: `cargo test --release -p locrin-cli -- --ignored
---nocapture`, bench repository `<home>/fasting-app` (1846 files, the
+--nocapture`, bench repository the FastLift checkout (1846 files, the
 same count Part A measured), a fresh temporary cache per benchmark, every run
 `--offline`, four sequential runs of the whole ignored set with the first
 discarded as the page-cache run. `tasklist` was empty on `cargo`, `rustc` and
@@ -332,7 +332,7 @@ stand.
 
 Method as above and as in Part A, narrowed to one benchmark per invocation:
 `cargo test --release -p locrin-cli --test bench <name> -- --ignored --nocapture`,
-bench repository `<home>/fasting-app`, a fresh temporary cache per
+bench repository the FastLift checkout, a fresh temporary cache per
 benchmark, `--offline`, four sequential runs with the first discarded. The
 release test binary was built before the first run, and `tasklist` was empty on
 `cargo`, `rustc` and `locrin` at that point.
@@ -520,7 +520,7 @@ after an upgrade rebuilds the cache and pays one cold pass.
 ### Benchmarks
 
 Method as in Part A and Part B: `cargo test --release -p locrin-cli -- --ignored
---nocapture`, bench repository `<home>/fasting-app` (1846 files, the same
+--nocapture`, bench repository the FastLift checkout (1846 files, the same
 count both earlier parts measured and the count this branch's scan reports), a
 fresh temporary cache per benchmark, every run `--offline`, four sequential runs
 of the whole ignored set with the first discarded as the page-cache run. The
@@ -591,7 +591,7 @@ recorded here and reported to the controller.
 
 ### The read-only FastLift check
 
-`<home>/fasting-app`, nothing written into it. `locrin-baseline.json` was
+the FastLift checkout, nothing written into it. `locrin-baseline.json` was
 moved to a scratch directory before the run and moved back after, so every
 finding the repository has is reported rather than filtered, and
 `git status --short` was taken before and after and both listings were saved:
@@ -669,7 +669,7 @@ ledger. The same bullets are appended to the plan.
 
 - **Task 5, the FastLift tracker entry D9 line was written by the controller, not
   by this task.** The plan's Global Constraints ask for a line in
-  `<home>/fasting-app/.planning/ROADMAP-SMART-2026-08-25.md`; the
+  the FastLift checkout's roadmap file; the
   controller's read-only amendment forbade this task writing anything into that
   checkout beyond moving the baseline out and back, so the controller wrote the
   tracker line itself. The constraint is met, by the controller's hand rather

@@ -1,0 +1,10 @@
+{
+  "name": "@raxbi/locrin-win32-x64",
+  "version": "0.0.0",
+  "description": "Locrin binary for Windows x64. Install the `locrin` package instead of this one.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/BilalEjaz/locrin" },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin"]
+}

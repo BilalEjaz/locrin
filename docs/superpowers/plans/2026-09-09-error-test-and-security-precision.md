@@ -209,7 +209,7 @@ was a fix; the third is a limit of reading one call site at a time.
 ## Benchmarks after Task 7c
 
 `cargo test --release -p locrin-cli -- --ignored --nocapture`, on `db10d5d`.
-Bench repository `<home>/fasting-app`, fresh temporary cache per
+Bench repository the FastLift checkout, fresh temporary cache per
 benchmark, on an idle machine (no cargo, rustc or locrin process running, CPU at
 2 percent before the first run).
 
@@ -599,7 +599,7 @@ committed credential, all of them with row-level security already on.
 ### Benchmarks after Part B
 
 `cargo test --release -p locrin-cli -- --ignored --nocapture`, on `d5d0865`.
-Bench repository `<home>/fasting-app`, fresh temporary cache per
+Bench repository the FastLift checkout, fresh temporary cache per
 benchmark, on an idle machine (no cargo, rustc or locrin process running before
 the first run).
 
@@ -686,7 +686,7 @@ process and each individual `Regex` now sits behind its own `OnceLock` and
 compiles on the first line that matches its pattern. Re-measured at `8c79f53`
 with the whole four-run method repeated at the branch base `8fe38e0` in a
 detached worktree in the same session, machine confirmed idle beforehand (`0`
-cargo, rustc or locrin processes), bench repository `<home>/fasting-app`,
+cargo, rustc or locrin processes), bench repository the FastLift checkout,
 fresh temporary cache per benchmark.
 
 | Benchmark | Target | `8fe38e0` (base), four runs | `8c79f53` (HEAD), four runs |
@@ -730,7 +730,7 @@ The ruling above left the cold gate red with the whole of the red attributed to
 the machine, and asked for a re-measurement on a quiet box. Re-measured on
 `c26c1e6` (main, PRs #6 and #7 merged), `cargo test --release -p locrin-cli --
 --ignored --nocapture` run four times in sequence, bench repository
-`<home>/fasting-app`, fresh temporary cache per benchmark, machine
+the FastLift checkout, fresh temporary cache per benchmark, machine
 confirmed idle beforehand (`0` cargo, rustc or locrin processes, CPU load 0
 percent).
 

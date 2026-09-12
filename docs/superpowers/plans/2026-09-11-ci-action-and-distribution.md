@@ -139,7 +139,7 @@ mod tests {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-reporters -q 2>&1 | tail -5
+cd . && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-reporters -q 2>&1 | tail -5
 ```
 Expected: compile error, module `markdown` not found.
 
@@ -207,14 +207,14 @@ Add `pub mod markdown;` to `crates/reporters/src/lib.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-reporters -q 2>&1 | tail -3
+cd . && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-reporters -q 2>&1 | tail -3
 ```
 Expected: all reporter tests pass (three new). If the backtick-in-evidence assertion fails on the exact string, print the rendered row and align the test to the `cell` rules above, never the other way round.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/reporters/src/markdown.rs crates/reporters/src/lib.rs && git commit -m "reporters: markdown summary for pull-request comments"
+cd . && git add crates/reporters/src/markdown.rs crates/reporters/src/lib.rs && git commit -m "reporters: markdown summary for pull-request comments"
 ```
 
 ---
@@ -297,7 +297,7 @@ fn markdown_details_line_comes_from_locrin_run_url() {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-cli --test cli markdown -q 2>&1 | tail -5
+cd . && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-cli --test cli markdown -q 2>&1 | tail -5
 ```
 Expected: the `--markdown` runs exit 2 with an unexpected-argument error, so the first test fails on the exit code.
 
@@ -353,14 +353,14 @@ Add `use anyhow::Context;` at the top of `main.rs` if it is not already imported
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-cli --test cli -q 2>&1 | tail -3 && cargo clippy --workspace --all-targets -q -- -D warnings && cargo fmt --all --check && echo CLEAN
+cd . && export PATH="$USERPROFILE/.cargo/bin:$PATH" && cargo test -p locrin-cli --test cli -q 2>&1 | tail -3 && cargo clippy --workspace --all-targets -q -- -D warnings && cargo fmt --all --check && echo CLEAN
 ```
 Expected: all cli tests pass (five new) and `CLEAN`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/cli/src/main.rs crates/cli/tests/cli.rs && git commit -m "cli: --markdown summary and --sarif-file alongside any stdout format"
+cd . && git add crates/cli/src/main.rs crates/cli/tests/cli.rs && git commit -m "cli: --markdown summary and --sarif-file alongside any stdout format"
 ```
 
 ---
@@ -419,7 +419,7 @@ The hook budget override exists so the post-edit watchdog test does not flake on
 - [ ] **Step 2: Push the branch and watch the run**
 
 ```bash
-cd <repo> && git add .github/workflows/ci.yml && git commit -m "ci: fmt, clippy and tests on ubuntu and windows" && git push -u origin engine/ci && sleep 20 && gh run list --branch engine/ci --limit 3
+cd . && git add .github/workflows/ci.yml && git commit -m "ci: fmt, clippy and tests on ubuntu and windows" && git push -u origin engine/ci && sleep 20 && gh run list --branch engine/ci --limit 3
 ```
 Then `gh run watch <id> --exit-status` for the newest run. Expected: `lint` and both `test` jobs green. If clippy fails on something the local run did not show, fix the code in a follow-up commit on this branch (do not relax `-D warnings`).
 
@@ -544,7 +544,7 @@ jobs:
 - [ ] **Step 3: Dry-run the build matrix**
 
 ```bash
-cd <repo> && git add Cargo.toml Cargo.lock .github/workflows/release.yml && git commit -m "release: tag-triggered four-target build with checksums; version 0.3.0" && git push && gh workflow run release.yml --ref engine/ci -f dry-run=true && sleep 30 && gh run list --workflow release.yml --limit 1
+cd . && git add Cargo.toml Cargo.lock .github/workflows/release.yml && git commit -m "release: tag-triggered four-target build with checksums; version 0.3.0" && git push && gh workflow run release.yml --ref engine/ci -f dry-run=true && sleep 30 && gh run list --workflow release.yml --limit 1
 ```
 Then `gh run watch <id> --exit-status`. Expected: four `build` jobs green, `publish` skipped. Download one artifact with `gh run download <id> -n x86_64-pc-windows-msvc -D /tmp/locrin-dry` and confirm the zip contains `locrin.exe` that prints `locrin 0.3.0` with `--version`. Record the four build durations in the task report.
 
@@ -741,7 +741,7 @@ Append to `.github/workflows/ci.yml` under `jobs:`:
 - [ ] **Step 4: Push and watch**
 
 ```bash
-cd <repo> && git add action/action.yml action/README.md .github/workflows/ci.yml && git commit -m "action: composite GitHub Action with comment, SARIF and status; smoke job" && git push && sleep 20 && gh run list --branch engine/ci --limit 1
+cd . && git add action/action.yml action/README.md .github/workflows/ci.yml && git commit -m "action: composite GitHub Action with comment, SARIF and status; smoke job" && git push && sleep 20 && gh run list --branch engine/ci --limit 1
 ```
 Then `gh run watch <id> --exit-status`. Expected: `lint`, both `test`, and `action-smoke` green. The pull-request comment path cannot be exercised in the smoke job (it runs on `pull_request` events only against the PR of this branch); Task 7 covers it.
 
@@ -807,7 +807,7 @@ Install section: keep `cargo install --path crates/cli`, add "Release binaries f
 - [ ] **Step 3: Commit**
 
 ```bash
-cd <repo> && git add action/examples README.md && git commit -m "docs: action examples, FastLift workflow, README sections for the action and the deployment gate"
+cd . && git add action/examples README.md && git commit -m "docs: action examples, FastLift workflow, README sections for the action and the deployment gate"
 ```
 
 ---

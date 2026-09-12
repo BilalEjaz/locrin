@@ -1,0 +1,17 @@
+{
+  "name": "locrin",
+  "version": "0.0.0",
+  "description": "Locrin: the deterministic quality gate for code written by people and agents.",
+  "license": "MIT",
+  "homepage": "https://locrin.com",
+  "repository": { "type": "git", "url": "https://github.com/BilalEjaz/locrin" },
+  "bin": { "locrin": "bin/locrin.js" },
+  "files": ["bin", "lib", "README.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {
+    "@raxbi/locrin-linux-x64": "0.0.0",
+    "@raxbi/locrin-darwin-x64": "0.0.0",
+    "@raxbi/locrin-darwin-arm64": "0.0.0",
+    "@raxbi/locrin-win32-x64": "0.0.0"
+  }
+}

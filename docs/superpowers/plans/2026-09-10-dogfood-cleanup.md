@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021, tree-sitter 0.23 (grammar pinned at tree-sitter-typescript 0.23.2, the newest on crates.io; both grammar bugs are open upstream: tree-sitter-javascript #366, tree-sitter-typescript #322), blake3, rusqlite (all present). No new crates.
 
-**Spec:** `docs/superpowers/specs/2026-09-05-agent-native-quality-gate-design.md`, sections 7.1 (`id` is "stable across line shifts"; a hash of rule id, symbol id or normalised span, and file path), 9 (parse failure: file marked unparsed, one warning, no findings from that file), 3.5 and 7.6 (baseline entries keyed by id). Evidence: the dogfood record in `docs/superpowers/plans/2026-09-10-init-hooks-and-mcp-measurement.md` and the FastLift tracker entries D9 to D11 and C13 in `<home>/fasting-app/.planning/ROADMAP-SMART-2026-08-25.md`. Read `crates/core/src/finding.rs` (`make_id`), `crates/rules/src/lib.rs` (`anchor_for`, `finding`, `finding_at`), `crates/rules/src/vulnerable_dependency.rs` (the anchor at line 134), `crates/core/src/parse.rs`, `crates/cli/src/run.rs` (`baseline_create`, `full_findings`) and `crates/cli/src/init.rs` before Task 1.
+**Spec:** `docs/superpowers/specs/2026-09-05-agent-native-quality-gate-design.md`, sections 7.1 (`id` is "stable across line shifts"; a hash of rule id, symbol id or normalised span, and file path), 9 (parse failure: file marked unparsed, one warning, no findings from that file), 3.5 and 7.6 (baseline entries keyed by id). Evidence: the dogfood record in `docs/superpowers/plans/2026-09-10-init-hooks-and-mcp-measurement.md` and the FastLift tracker entries D9 to D11 and C13 in the FastLift checkout's roadmap file. Read `crates/core/src/finding.rs` (`make_id`), `crates/rules/src/lib.rs` (`anchor_for`, `finding`, `finding_at`), `crates/rules/src/vulnerable_dependency.rs` (the anchor at line 134), `crates/core/src/parse.rs`, `crates/cli/src/run.rs` (`baseline_create`, `full_findings`) and `crates/cli/src/init.rs` before Task 1.
 
 **What the dogfood showed, exactly.**
 - `init` reported 778 findings and wrote 756 baseline entries: 13 ids shared by 33 `vulnerable-dependency` findings (three installed versions of `@xmldom/xmldom` share one advisory, and the anchor is `name\x1fadvisory`, no version) and one id shared by 2 `leftover-commented-code` findings (two identical commented lines inside one function; the line-rule anchor is the enclosing symbol's name). `Baseline::accept` dedupes by id, so accepting one instance silently accepts the others, and fixing one version leaves the entry suppressing the rest.
@@ -69,7 +69,7 @@
 
 - **Task 5, the FastLift tracker entry D9 line was written by the controller, not
   by this task.** The Global Constraint above asks for a line in
-  `<home>/fasting-app/.planning/ROADMAP-SMART-2026-08-25.md`; the
+  the FastLift checkout's roadmap file; the
   controller's read-only amendment forbade this task writing anything into that
   checkout beyond moving the baseline out and back, so the controller wrote the
   tracker line itself. The constraint is met, by the controller's hand rather

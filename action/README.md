@@ -7,9 +7,9 @@ uploads SARIF to code scanning, and fails the job on a BLOCK verdict.
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: BilalEjaz/locrin/action@v0.4.0
+- uses: BilalEjaz/locrin/action@v0.5.0
   with:
-    version: v0.4.0
+    version: v0.5.0
 ```
 
 The default pull-request path (`--base`) diffs against the merge base, so the
@@ -20,7 +20,7 @@ shallow checkout has none and the check exits 2.
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | Release tag (`v0.4.0`), `latest`, or `local` for a `locrin` already on PATH. `latest` follows the newest release, so pin it to the action ref as the examples do |
+| `version` | `latest` | Release tag (`v0.5.0`), `latest`, or `local` for a `locrin` already on PATH. `latest` follows the newest release, so pin it to the action ref as the examples do |
 | `path` | `.` | Repository-relative directory to check |
 | `base` | `${{ github.event.pull_request.base.sha }}` | Base ref for the pull-request view (files that differ from the merge base). Set it to `""` to check every file under `path` |
 | `since` | `""` | Ref for the deployment gate (files changed by `REF..HEAD`); overrides `base` |
@@ -28,8 +28,8 @@ shallow checkout has none and the check exits 2.
 | `sarif` | `true` | Upload SARIF to code scanning |
 | `offline` | `false` | Never touch the network (vulnerable-dependency uses its snapshot or skips) |
 | `fail-on-block` | `true` | Fail the step when the verdict is BLOCK |
-| `token` | `${{ github.token }}` | Token for the comment |
-| `download-token` | `""` | Token that can read `BilalEjaz/locrin` releases; needed while that repository is private; defaults to `token` |
+| `token` | `${{ github.token }}` | Token for the comment and the release download |
+| `download-token` | `""` | Optional token for the release download; only needed if the repository ever needs one. Defaults to `token` |
 
 ## Outputs
 
@@ -49,18 +49,13 @@ permissions:
   security-events: write  # only when sarif is true
 ```
 
-The runner's token only reaches the repository the workflow runs in, so while
-`BilalEjaz/locrin` is private the Install step needs a `download-token` that can
-read its releases: a fine-grained PAT with Contents read on locrin, passed as
-`download-token: ${{ secrets.LOCRIN_TOKEN }}`. The comment keeps the workflow's
-own `token`. While locrin is private, `uses: BilalEjaz/locrin/action@...` from
-another repository also requires the locrin repository's Actions setting
-"Access: accessible from repositories owned by the user" (Settings, Actions,
-General); making the repository public removes both requirements.
+The workflow's own `token` downloads the release and posts the comment; the
+optional `download-token` overrides it for the download alone.
 
 The comment and the SARIF steps are both `continue-on-error`: a fork pull
 request, whose token is read-only, logs a `::warning::` instead of turning the
-check red. Code scanning on a private repository needs Advanced Security.
+check red. Code scanning needs GitHub Advanced Security on a repository that
+is not public.
 
 ## One comment, edited in place
 

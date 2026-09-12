@@ -3,13 +3,16 @@ name = "locrin-rules"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Locrin rules: the deterministic rule set for TypeScript, JavaScript, PHP and Python"
 
 [lib]
 name = "locrin_rules"
 path = "src/lib.rs"
 
 [dependencies]
-locrin-core = { path = "../core" }
+locrin-core = { path = "../core", version = "0.5.0" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 globset.workspace = true

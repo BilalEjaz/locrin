@@ -17,7 +17,7 @@
 - Product name is Locrin (decided 2026-09-05): binary `locrin`, config file `locrin.toml`, baseline file `locrin-baseline.json`. They are defined once each (in `crates/cli/Cargo.toml` `[[bin]]`, `core::config::CONFIG_FILE`, `core::baseline::BASELINE_FILE`) so a rename is three edits.
 - No LLM anywhere. No network access anywhere in this plan.
 - Languages in scope: TypeScript (`.ts`), TSX (`.tsx`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`). `.d.ts` files are skipped.
-- Performance targets are tests, not aspirations: cold index of `<home>/fasting-app` (about 1,900 TypeScript files including tests) under 5 s in release mode; warm single-file `check` under 300 ms; binary start to first output under 50 ms. Benchmark tests are `#[ignore]` and run with `cargo test --release -- --ignored`.
+- Performance targets are tests, not aspirations: cold index of the FastLift checkout (about 1,900 TypeScript files including tests) under 5 s in release mode; warm single-file `check` under 300 ms; binary start to first output under 50 ms. Benchmark tests are `#[ignore]` and run with `cargo test --release -- --ignored`.
 - Index lives at `<cache dir>/locrin/<blake3 of canonical repo path, first 16 hex>/index.db`; cache dir from the `dirs` crate (`dirs::cache_dir()`), falling back to `<repo>/.locrin-cache` if unavailable (and that folder is then gitignored by `init` in plan 4; here the fallback is only used in tests via an env var `LOCRIN_CACHE_DIR`).
 - Every finding carries: `id`, `rule`, `category`, `severity`, `confidence`, `file`, `span` (start_line, start_col, end_line, end_col, 1-based lines, 0-based cols), `evidence` (one line), `fix` (one line), `related` (list of symbol refs, may be empty), and optional `owasp` and `cwe` (both `None` for every rule in this plan).
 - Finding id is stable across line shifts: `blake3(rule_id + "\x1f" + repo-relative file path + "\x1f" + anchor)` truncated to 16 hex chars, where `anchor` is the enclosing top-level symbol name when there is one, otherwise the trimmed text of the flagged line.
@@ -260,14 +260,14 @@ target/
 - [ ] **Step 4: Build and run the smoke test**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `test result: ok. 1 passed`. The first build downloads and compiles tree-sitter and bundled SQLite; allow several minutes.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add Cargo.toml Cargo.lock .gitignore crates/core/Cargo.toml crates/core/src/lib.rs crates/rules/Cargo.toml crates/rules/src/lib.rs crates/reporters/Cargo.toml crates/reporters/src/lib.rs crates/cli/Cargo.toml crates/cli/src/main.rs && git commit -m "engine: cargo workspace scaffold"
+cd . && git add Cargo.toml Cargo.lock .gitignore crates/core/Cargo.toml crates/core/src/lib.rs crates/rules/Cargo.toml crates/rules/src/lib.rs crates/reporters/Cargo.toml crates/reporters/src/lib.rs crates/cli/Cargo.toml crates/cli/src/main.rs && git commit -m "engine: cargo workspace scaffold"
 ```
 
 ---
@@ -351,7 +351,7 @@ mod tests {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -5
+cd . && cargo test -p core -q 2>&1 | tail -5
 ```
 Expected: compile errors, `Language` and `parse_source` not found.
 
@@ -466,14 +466,14 @@ mod tests {
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `7 passed`. If `LANGUAGE_TYPESCRIPT` is not found, the installed grammar crate is older than 0.23; check `cargo tree -p core | grep tree-sitter-typescript` and, if it is 0.21 or 0.22, use `tree_sitter_typescript::language_typescript()` and `language_tsx()` instead and record the change in the report.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/lang.rs crates/core/src/parse.rs crates/core/src/lib.rs && git commit -m "engine: language detection and tree-sitter parsing"
+cd . && git add crates/core/src/lang.rs crates/core/src/parse.rs crates/core/src/lib.rs && git commit -m "engine: language detection and tree-sitter parsing"
 ```
 
 ---
@@ -570,7 +570,7 @@ mod tests {
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -5
+cd . && cargo test -p core -q 2>&1 | tail -5
 ```
 Expected: compile error, `source_files` not found.
 
@@ -638,14 +638,14 @@ Add `pub mod walk;` to `crates/core/src/lib.rs`.
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `9 passed`. If `dist/index.js` shows up, the fixture `.gitignore` is not being honoured because the fixture directory is not itself a git repository; in that case add `.require_git(false)` to the `WalkBuilder` chain (the `ignore` crate reads `.gitignore` files only inside git repos by default).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/walk.rs crates/core/src/lib.rs crates/core/tests/fixtures/mini/package.json crates/core/tests/fixtures/mini/src crates/core/tests/fixtures/mini/.gitignore crates/core/tests/fixtures/mini/dist && git add -f crates/core/tests/fixtures/mini/node_modules && git commit -m "engine: source file discovery with gitignore and excludes"
+cd . && git add crates/core/src/walk.rs crates/core/src/lib.rs crates/core/tests/fixtures/mini/package.json crates/core/tests/fixtures/mini/src crates/core/tests/fixtures/mini/.gitignore crates/core/tests/fixtures/mini/dist && git add -f crates/core/tests/fixtures/mini/node_modules && git commit -m "engine: source file discovery with gitignore and excludes"
 ```
 
 ---
@@ -738,7 +738,7 @@ mod tests {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -5
+cd . && cargo test -p core -q 2>&1 | tail -5
 ```
 Expected: compile error, `Index` not found.
 
@@ -894,14 +894,14 @@ Add `pub mod index;` to `crates/core/src/lib.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `13 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/index.rs crates/core/src/lib.rs && git commit -m "engine: sqlite index with file hashes and change detection"
+cd . && git add crates/core/src/index.rs crates/core/src/lib.rs && git commit -m "engine: sqlite index with file hashes and change detection"
 ```
 
 ---
@@ -989,7 +989,7 @@ export enum Color { Red }
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -5
+cd . && cargo test -p core -q 2>&1 | tail -5
 ```
 Expected: compile error, `extract` not found.
 
@@ -1108,14 +1108,14 @@ Add `pub mod symbols;` to `crates/core/src/lib.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `16 passed`. If the `export_statement` node exposes its declaration as a plain child rather than the `declaration` field in this grammar version, iterate `node.children` and recurse into the first named child whose kind is one of the declaration kinds; record the change.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/symbols.rs crates/core/src/lib.rs && git commit -m "engine: top-level symbol extraction into the index"
+cd . && git add crates/core/src/symbols.rs crates/core/src/lib.rs && git commit -m "engine: top-level symbol extraction into the index"
 ```
 
 ---
@@ -1205,7 +1205,7 @@ mod tests {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -5
+cd . && cargo test -p core -q 2>&1 | tail -5
 ```
 Expected: compile error, `Finding` not found.
 
@@ -1338,14 +1338,14 @@ Add `pub mod finding;` to `crates/core/src/lib.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `20 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/finding.rs crates/core/src/lib.rs && git commit -m "engine: finding and verdict contract"
+cd . && git add crates/core/src/finding.rs crates/core/src/lib.rs && git commit -m "engine: finding and verdict contract"
 ```
 
 ---
@@ -1467,7 +1467,7 @@ mod tests {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -5
+cd . && cargo test -p core -q 2>&1 | tail -5
 ```
 Expected: compile error, `Config` and `Baseline` not found.
 
@@ -1625,14 +1625,14 @@ Add `pub mod config;` and `pub mod baseline;` to `crates/core/src/lib.rs`.
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p core -q 2>&1 | tail -3
+cd . && cargo test -p core -q 2>&1 | tail -3
 ```
 Expected: `24 passed`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd <repo> && git add crates/core/src/config.rs crates/core/src/baseline.rs crates/core/src/lib.rs && git commit -m "engine: config file and baseline file"
+cd . && git add crates/core/src/config.rs crates/core/src/baseline.rs crates/core/src/lib.rs && git commit -m "engine: config file and baseline file"
 ```
 
 ---
@@ -1702,7 +1702,7 @@ mod tests {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd <repo> && cargo test -p rules -q 2>&1 | tail -5
+cd . && cargo test -p rules -q 2>&1 | tail -5
 ```
 Expected: compile error, `Rule` not found.
 
@@ -1783,14 +1783,14 @@ Because `finding()` is used by the test's `Always` rule before any real rule exi
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p rules -q 2>&1 | tail -3
+cd . && cargo test -p rules -q 2>&1 | tail -3
 ```
 Expected: `2 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/rules/src/lib.rs && git commit -m "engine: rule trait, context, and registry"
+cd . && git add crates/rules/src/lib.rs && git commit -m "engine: rule trait, context, and registry"
 ```
 
 ---
@@ -1912,7 +1912,7 @@ The shadowed-console case is flagged on purpose: the rule is syntactic and a loc
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p rules --test leftover_debug -q 2>&1 | tail -5
+cd . && cargo test -p rules --test leftover_debug -q 2>&1 | tail -5
 ```
 Expected: compile error, module `leftover_debug` not found.
 
@@ -2005,14 +2005,14 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p rules -q 2>&1 | tail -3
+cd . && cargo test -p rules -q 2>&1 | tail -3
 ```
 Expected: `5 passed` across the unit and integration tests. If the `scripts/build.ts` fixture is flagged, the default `debug_allowed` glob `**/scripts/**` did not match a `rel` like `scripts/build.ts` because `**/` requires a leading segment in globset; add `scripts/**` alongside in `Config::default()` and in the test expectations, and record it.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd <repo> && git add crates/rules/src/leftover_debug.rs crates/rules/src/lib.rs crates/rules/tests/common/mod.rs crates/rules/tests/leftover_debug.rs crates/rules/tests/fixtures/leftover_debug && git commit -m "engine: leftover-debug rule"
+cd . && git add crates/rules/src/leftover_debug.rs crates/rules/src/lib.rs crates/rules/tests/common/mod.rs crates/rules/tests/leftover_debug.rs crates/rules/tests/fixtures/leftover_debug && git commit -m "engine: leftover-debug rule"
 ```
 
 ---
@@ -2154,7 +2154,7 @@ fn ignores_markers_with_references_urls_and_lowercase_prose() {
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p rules -q 2>&1 | tail -5
+cd . && cargo test -p rules -q 2>&1 | tail -5
 ```
 Expected: compile errors, modules not found.
 
@@ -2371,14 +2371,14 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p rules -q 2>&1 | tail -3
+cd . && cargo test -p rules -q 2>&1 | tail -3
 ```
 Expected: `10 passed` across all rules tests. The block-comment case in `flag/a.ts` should report line 8 (where `/*` starts); if the grammar reports the comment node one line earlier or later, adjust the fixture expectation only after printing the node's start row, and record it.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd <repo> && git add crates/rules/src/leftover_commented.rs crates/rules/src/leftover_marker.rs crates/rules/src/lib.rs crates/rules/tests/leftover_commented.rs crates/rules/tests/leftover_marker.rs crates/rules/tests/fixtures/leftover_commented crates/rules/tests/fixtures/leftover_marker && git commit -m "engine: leftover-commented-code and leftover-agent-marker rules"
+cd . && git add crates/rules/src/leftover_commented.rs crates/rules/src/leftover_marker.rs crates/rules/src/lib.rs crates/rules/tests/leftover_commented.rs crates/rules/tests/leftover_marker.rs crates/rules/tests/fixtures/leftover_commented crates/rules/tests/fixtures/leftover_marker && git commit -m "engine: leftover-commented-code and leftover-agent-marker rules"
 ```
 
 ---
@@ -2483,7 +2483,7 @@ mod tests {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p reporters -q 2>&1 | tail -5
+cd . && cargo test -p reporters -q 2>&1 | tail -5
 ```
 Expected: compile error, `render` not found.
 
@@ -2553,14 +2553,14 @@ pub mod terminal;
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p reporters -q 2>&1 | tail -3
+cd . && cargo test -p reporters -q 2>&1 | tail -3
 ```
 Expected: `3 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add crates/reporters/src/terminal.rs crates/reporters/src/agent.rs crates/reporters/src/lib.rs && git commit -m "engine: terminal and agent JSON reporters"
+cd . && git add crates/reporters/src/terminal.rs crates/reporters/src/agent.rs crates/reporters/src/lib.rs && git commit -m "engine: terminal and agent JSON reporters"
 ```
 
 ---
@@ -2719,7 +2719,7 @@ fn engine_error_exits_two() {
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd <repo> && cargo test -p cli -q 2>&1 | tail -5
+cd . && cargo test -p cli -q 2>&1 | tail -5
 ```
 Expected: failures (the binary prints the engine name and exits 0, so every assertion fails).
 
@@ -2980,21 +2980,21 @@ Add `serde_json` is already a dependency of `cli`; `assert_cmd` and `tempfile` a
 - [ ] **Step 6: Run tests to verify they pass**
 
 ```bash
-cd <repo> && cargo test -p cli -q 2>&1 | tail -5
+cd . && cargo test -p cli -q 2>&1 | tail -5
 ```
 Expected: `6 passed`. Two likely trips: (a) `check_blocks_on_debug_and_reports_marker` expects exactly 2 findings; if `leftover-commented-code` fires on the fixture, the fixture has no three-line comment run so investigate the rule rather than the fixture; (b) on Windows `USERNAME` is set, on other hosts `USER`, both handled.
 
 - [ ] **Step 7: Run the whole workspace once**
 
 ```bash
-cd <repo> && cargo test -q 2>&1 | grep -E "test result|error" | head
+cd . && cargo test -q 2>&1 | grep -E "test result|error" | head
 ```
 Expected: every crate reports `ok`.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-cd <repo> && git add crates/cli/src/run.rs crates/cli/src/main.rs crates/cli/tests/cli.rs crates/cli/tests/fixtures/repo && git commit -m "engine: check, scan, and baseline commands"
+cd . && git add crates/cli/src/run.rs crates/cli/src/main.rs crates/cli/tests/cli.rs crates/cli/tests/fixtures/repo && git commit -m "engine: check, scan, and baseline commands"
 ```
 
 ---
@@ -3014,7 +3014,7 @@ cd <repo> && git add crates/cli/src/run.rs crates/cli/src/main.rs crates/cli/tes
 `crates/cli/tests/bench.rs`:
 ```rust
 //! Spec section 3.4 targets. Run: cargo test --release -p cli -- --ignored --nocapture
-//! Requires the founder's FastLift checkout at <home>/fasting-app (override with LOCRIN_BENCH_REPO).
+//! Requires LOCRIN_BENCH_REPO set to the checkout to benchmark against; the recorded numbers are from the FastLift checkout.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -3023,7 +3023,7 @@ use std::time::Instant;
 use assert_cmd::prelude::*;
 
 fn repo() -> PathBuf {
-    PathBuf::from(std::env::var("LOCRIN_BENCH_REPO").unwrap_or_else(|_| "<home>/fasting-app".into()))
+    PathBuf::from(std::env::var("LOCRIN_BENCH_REPO").unwrap_or_default())
 }
 
 fn locrin(cache: &std::path::Path) -> Command {
@@ -3077,14 +3077,14 @@ codegen-units = 1
 - [ ] **Step 2: Run the benchmarks in release mode**
 
 ```bash
-cd <repo> && cargo test --release -p cli -- --ignored --nocapture 2>&1 | grep -E "ms|test result"
+cd . && cargo test --release -p cli -- --ignored --nocapture 2>&1 | grep -E "ms|test result"
 ```
 Expected: three timings printed and `3 passed`. If `cold_index_under_five_seconds` fails, the likely cost is parsing every file on the first scan; the fix is to parallelise `index_files` across files with `std::thread::scope` chunks (rules still run single-threaded), not to relax the target. Record the numbers in the task report either way.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd <repo> && git add crates/cli/tests/bench.rs Cargo.toml && git commit -m "engine: benchmark tests for the spec performance targets"
+cd . && git add crates/cli/tests/bench.rs Cargo.toml && git commit -m "engine: benchmark tests for the spec performance targets"
 ```
 
 ---

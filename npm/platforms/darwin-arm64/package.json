@@ -1,0 +1,10 @@
+{
+  "name": "@raxbi/locrin-darwin-arm64",
+  "version": "0.0.0",
+  "description": "Locrin binary for macOS arm64. Install the `locrin` package instead of this one.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/BilalEjaz/locrin" },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin"]
+}

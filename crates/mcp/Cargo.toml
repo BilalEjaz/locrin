@@ -3,6 +3,9 @@ name = "locrin-mcp"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Locrin MCP server: the quality gate as tools for coding agents"
 
 [lib]
 name = "locrin_mcp"

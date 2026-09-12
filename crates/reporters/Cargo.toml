@@ -3,12 +3,15 @@ name = "locrin-reporters"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Locrin reporters: terminal, agent JSON, Markdown and SARIF output"
 
 [lib]
 name = "locrin_reporters"
 path = "src/lib.rs"
 
 [dependencies]
-locrin-core = { path = "../core" }
+locrin-core = { path = "../core", version = "0.5.0" }
 serde.workspace = true
 serde_json.workspace = true

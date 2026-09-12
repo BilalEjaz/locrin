@@ -1673,7 +1673,7 @@ Open a draft pull request (`gh pr create --draft --title "Public launch A: pre-f
 **Interfaces:**
 - Consumes: the four build artifacts and SHA256SUMS from the `build` job; `npm/scripts/stage.js`; `pypi/build_wheel.py`; `scripts/homebrew-formula.sh`.
 - Produces: on a tag push, a GitHub release created as pre-release, then npm, PyPI, crates.io and the Homebrew tap published in that order, then the pre-release flag cleared. On `workflow_dispatch` with dry-run, the same staging with every publish command in its dry-run form and no release.
-- Secrets the founder creates before the first real tag (not needed for the dry run): `NPM_TOKEN` (npm granular access token, publish, packages `locrin` and scope `@raxbi`, bypass two-factor for automation), `PYPI_TOKEN` (PyPI API token scoped to the `locrin` project), `CARGO_REGISTRY_TOKEN` (crates.io token with publish-update for the five crates), `HOMEBREW_TAP_TOKEN` (fine-grained PAT, Contents read and write on `BilalEjaz/homebrew-locrin` only).
+- Secrets the founder creates before the first real tag (not needed for the dry run): `NPM_TOKEN` (npm granular access token, publish, packages `locrin` and scope `@raxbi`, bypass two-factor for automation), `PYPI_TOKEN` (PyPI API token scoped to the `locrin` project), `CARGO_REGISTRY_TOKEN` (crates.io token with publish-new and publish-update scopes for the five crates (four of them have never been published)), `HOMEBREW_TAP_TOKEN` (fine-grained PAT, Contents read and write on `BilalEjaz/homebrew-locrin` only).
 
 - [ ] **Step 1: Write the publish script**
 
@@ -2016,7 +2016,7 @@ Mark the draft ready and fill the body: what changed per task, the pre-flight hi
 ## After this plan (not tasks; the lead runs these on the founder's word)
 
 1. Merge the pull request. Run the release dry run from main if Task 11 could not: `gh workflow run release.yml -f dry-run=true`.
-2. Founder creates the four secrets on BilalEjaz/locrin: `NPM_TOKEN`, `PYPI_TOKEN`, `CARGO_REGISTRY_TOKEN`, `HOMEBREW_TAP_TOKEN` (the lead gives exact click paths at that point).
+2. Founder creates the four secrets on BilalEjaz/locrin: `NPM_TOKEN` (granular token from the `raxbi` account, publish, packages `locrin` and scope `@raxbi`, bypass two-factor for automation), `PYPI_TOKEN` (project-scoped to `locrin`), `CARGO_REGISTRY_TOKEN` (publish-new and publish-update), `HOMEBREW_TAP_TOKEN` (fine-grained PAT, Contents read and write on `BilalEjaz/homebrew-locrin` only). The lead gives exact click paths at that point. The tap repository (step 3) must exist before the first tag.
 3. Lead creates the empty public tap repository: `gh repo create BilalEjaz/homebrew-locrin --public --description "Homebrew tap for locrin"` with a one-line README.
 4. Plan B (benchmark repository) lands and runs against 0.4.0.
 5. Founder says "make it public". Lead runs `gh repo edit BilalEjaz/locrin --visibility public --accept-visibility-change-consequences`, enables private vulnerability reporting (`gh api -X PUT repos/BilalEjaz/locrin/private-vulnerability-reporting`), and resets the Actions access setting (`gh api -X PUT repos/BilalEjaz/locrin/actions/permissions/access -f access_level=none`).

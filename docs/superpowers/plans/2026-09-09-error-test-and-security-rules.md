@@ -36,7 +36,7 @@
 - Schema bumps once, to `"4"`, in Task 3 (`skipped_tests`, `osv_batch`, `osv_vulns`); spec 9 rebuilds on mismatch.
 - Performance targets stay tests (cold under 5 s, warm single-file under 300 ms, warm 30-file under 1 s, startup under 50 ms); the security rules are file rules and run in the parallel pass; `vulnerable-dependency` is a graph rule that runs every run and must cost under 50 ms warm (cached), measured in Task 16.
 - Git: Part A on `engine/erosion` off `main`; Part B on `engine/security` off `main` after A merges (stacked if A is in review). One commit per task, `cargo fmt --all` before every commit, plain `engine: ...` messages, no attribution trailers, never `git add -A`. No em dashes anywhere.
-- `export PATH="$HOME/.cargo/bin:$PATH"` before any cargo command. Corpus checkouts: `<home>/fasting-app`, `<home>/strongspan`, `<home>/teyji`, `<home>/autoqa`, `<home>/fastlift-admin`. Never write into them; use a fresh `LOCRIN_CACHE_DIR` per measurement.
+- `export PATH="$HOME/.cargo/bin:$PATH"` before any cargo command. Corpus checkouts: the FastLift checkout, the StrongSpan checkout, the Teyji checkout, the autoQA checkout, the FastLift admin checkout. Never write into them; use a fresh `LOCRIN_CACHE_DIR` per measurement.
 - Expected fixture line numbers were counted by hand; if a test fails only on a line number, recount against the fixture before touching the rule.
 
 ## Deviations recorded during execution

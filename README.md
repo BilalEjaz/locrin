@@ -1,14 +1,58 @@
 # Locrin
 
-Locrin is a deterministic quality gate for TypeScript and JavaScript, with PHP
-and Python behind a one-line opt-in, built for code written by people and by
-agents. It parses with tree-sitter, keeps a
-SQLite index of the repository outside the working tree, and answers with a
-verdict: pass, advisory, or block. The same engine serves a person on the
-command line, a git pre-commit hook, Claude Code's hooks, and an MCP client.
+Locrin is a deterministic quality gate for code written by people and by
+agents. It answers one question about a change, pass, advisory or block, the
+same way every time, in under a second once the index is built, with no model
+in the loop.
 
-There is no model in the loop and no scoring. A rule either fires on what is in
-the file or it does not, so two runs on the same bytes give the same answer.
+It reads TypeScript and JavaScript, and PHP and Python behind a one-line
+opt-in, with tree-sitter, keeps a SQLite index of the repository outside the
+working tree, and ships 21 rules whose precision is measured before they ship.
+The same binary serves a person on the command line, a git pre-commit hook,
+Claude Code's hooks, an MCP client and a GitHub Action.
+
+## Install
+
+    npm i -D locrin            # or: npx locrin --version
+    pip install locrin
+    brew install BilalEjaz/locrin/locrin
+    cargo install locrin
+    curl -fsSL https://raw.githubusercontent.com/BilalEjaz/locrin/main/install.sh | bash
+    irm https://raw.githubusercontent.com/BilalEjaz/locrin/main/install.ps1 | iex
+
+The installer scripts, the Homebrew formula and the GitHub Action download the
+release assets and verify them against `SHA256SUMS`; npm and PyPI carry the same
+binaries inside their packages; `cargo install` builds from source. Linux
+x86_64, macOS (Intel and Apple silicon) and Windows x86_64 are prebuilt;
+anything else builds from source with cargo.
+
+## Thirty seconds
+
+    locrin init          # writes locrin.toml, the baseline, and the hooks
+    locrin check         # verdict on the repository; exit 1 blocks, 2 is an engine error
+
+With Claude Code, `init` also wires the post-edit hook, so an agent hears about
+a blocking finding before it moves on, and the stop hook, which sends the agent
+back, up to three times, rather than letting the session end with a block
+outstanding. Without an agent, the pre-commit hook and the GitHub Action give
+the same verdict.
+
+## Free and paid
+
+Everything in this repository is free and MIT licensed: the engine, all 21
+rules including the ten security rules, the hooks, the MCP server and the
+Action. Nothing here needs an account or touches the network except the
+dependency advisory lookup, which `--offline` turns off.
+
+Paid, later and separate: a security pack with further framework-specific
+checks and compliance reports, unlocked offline by licence key, and a hosted
+layer for history across runs and people. Neither will take back anything that
+shipped free.
+
+## Benchmark
+
+Precision and recall per rule, measured on a public corpus anyone can rerun:
+https://github.com/BilalEjaz/locrin-benchmark
 
 ## Limits worth knowing first
 
@@ -48,18 +92,6 @@ the file rather than inside it; the file is then excluded from every rule with
 one `warning: parse errors in <file>; excluded from rules` line on stderr. The
 same text ending at the full stop, `tea & toast.`, is tolerated like any other
 ampersand.
-
-## Install
-
-```
-cargo install --path crates/cli
-```
-
-Release binaries for Linux, macOS (Intel and Apple silicon) and Windows are
-attached to every GitHub release with a `SHA256SUMS` file. The GitHub Action
-below downloads one of them and verifies it against that file.
-
-An npm package and a Homebrew formula are phase two.
 
 ## Quick start
 
@@ -219,9 +251,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: BilalEjaz/locrin/action@v0.4.0
+      - uses: BilalEjaz/locrin/action@v0.5.0
         with:
-          version: v0.4.0
+          version: v0.5.0
 ```
 
 The action downloads the release binary for the runner, verifies it against the
@@ -236,14 +268,8 @@ checkout, `pull-requests: write` for the comment,
 a merge base to diff against: a shallow checkout has none, and the default
 pull-request path then exits 2.
 
-The runner's token only reaches the repository the workflow runs in, so while
-`BilalEjaz/locrin` is private the download needs a `download-token` that can read
-its releases (a fine-grained PAT with Contents read on the locrin repository),
-while the comment keeps the workflow's own `token`. While locrin is private,
-`uses: BilalEjaz/locrin/action@...` from another repository also requires the
-locrin repository's Actions setting "Access: accessible from repositories owned
-by the user" (Settings, Actions, General); making the repository public removes
-both requirements and the default `${{ github.token }}` is enough.
+The default `${{ github.token }}` is enough for both the download and the
+comment, and `uses: BilalEjaz/locrin/action@...` works from any repository.
 
 `version: latest` follows the newest release, so the binary can move ahead of the
 action ref; a pinned `version` matches the ref, which is what the examples do.
@@ -271,7 +297,7 @@ Tag each deploy, and the ref is the last tag:
 ```yaml
 - id: last
   run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD | head -n 1)" >> "$GITHUB_OUTPUT"
-- uses: BilalEjaz/locrin/action@v0.4.0
+- uses: BilalEjaz/locrin/action@v0.5.0
   with:
     since: ${{ steps.last.outputs.tag }}
     comment: "false"
@@ -521,6 +547,10 @@ BookStack test helper, which is accurate and is not something a maintainer
 acts on; a fixture key under `tests/` is accepted into the baseline with a
 reason, like any other locked finding.
 
+The public numbers, precision and recall per rule on a corpus anyone can
+rerun, live in their own repository:
+https://github.com/BilalEjaz/locrin-benchmark
+
 ### Speed
 
 Spec 3.4's targets name a TypeScript repository, so the benchmark suite
@@ -538,7 +568,7 @@ scan:
 | Startup (`--help`) | under 50 ms | 21 ms |
 | Cold index, PHP (BookStack, 2152 files, 1773 of them PHP) | recorded, not gated | 6.56 s |
 
-Run them with `cargo test --release -p locrin-cli -- --ignored --nocapture`;
+Run them with `cargo test --release -p locrin -- --ignored --nocapture`;
 the PHP one needs `LOCRIN_PHP_BENCH_REPO` pointed at a checkout whose
 `locrin.toml` enables PHP, and says so and measures nothing without it.
 
