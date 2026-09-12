@@ -1,6 +1,6 @@
 //! Spec section 3.4 targets, and spec 5.2's hook budget. Run:
 //! cargo test --release -p locrin -- --ignored --nocapture
-//! Requires the founder's FastLift checkout at <home>/fasting-app (override with LOCRIN_BENCH_REPO).
+//! Requires LOCRIN_BENCH_REPO set to the checkout to benchmark against; the recorded numbers are from the FastLift checkout.
 //!
 //! Every run here passes `--offline`. These are engine targets, and since
 //! `vulnerable-dependency` joined the registry an online run also waits on
@@ -31,7 +31,7 @@ fn serial() -> MutexGuard<'static, ()> {
 }
 
 fn repo() -> PathBuf {
-    PathBuf::from(std::env::var("LOCRIN_BENCH_REPO").unwrap_or_else(|_| "<home>/fasting-app".into()))
+    PathBuf::from(std::env::var("LOCRIN_BENCH_REPO").unwrap_or_default())
 }
 
 fn locrin(cache: &std::path::Path) -> Command {

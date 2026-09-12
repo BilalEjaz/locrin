@@ -21,6 +21,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: bash scripts/tests/run.sh
       - run: bash scripts/check-versions.sh
+      - run: bash scripts/check-private-refs.sh
 
   test:
     strategy:

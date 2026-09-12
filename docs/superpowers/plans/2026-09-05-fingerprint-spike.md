@@ -18,7 +18,7 @@
 - Precision target 85 percent at recall 90 percent, both defined in Task 9. The report states the number even if it fails.
 - Minimum function size 40 normalised tokens; smaller functions are ignored everywhere (extractor, planting, labelling).
 - No LLM anywhere in the pipeline. Labelling is done by a person (Claude may pre-label with a written reason; the founder spot-checks 50 pairs, see Task 10).
-- Repos under test, read-only: `<home>/fasting-app` (folders `src`, `app`, `components`), `<home>/strongspan/src`, `<home>/food-data-platform` (folders `apps`, `packages`). Exclude any `node_modules`, `android`, `ios`, `.expo`, `dist`, `build`, `coverage`, `__mocks__`, and `*.d.ts`.
+- Repos under test, read-only: the FastLift checkout (folders `src`, `app`, `components`), the StrongSpan checkout (folder `src`), the food data platform checkout (folders `apps`, `packages`). Exclude any `node_modules`, `android`, `ios`, `.expo`, `dist`, `build`, `coverage`, `__mocks__`, and `*.d.ts`.
 - Git: branch `spike/fingerprint` off `main`, one commit per task, plain commit messages, no attribution trailers, pull request at the end. Never `git add -A`.
 - Every Python command runs through the venv interpreter: `spike/fingerprint/.venv/Scripts/python`. Written below as `$PY` for brevity; executors substitute the full path or export `PY` in their shell.
 
@@ -82,7 +82,7 @@ class FunctionRecord:
 - [ ] **Step 1: Create the branch**
 
 ```bash
-cd <repo> && git checkout -b spike/fingerprint
+cd . && git checkout -b spike/fingerprint
 ```
 
 - [ ] **Step 2: Write requirements and pytest config**
@@ -117,20 +117,20 @@ def test_imports():
 - [ ] **Step 4: Create the venv and install**
 
 ```bash
-cd <repo>/spike/fingerprint && python -m venv .venv && .venv/Scripts/python -m pip install -q -r requirements.txt
+cd spike/fingerprint && python -m venv .venv && .venv/Scripts/python -m pip install -q -r requirements.txt
 ```
 Expected: no errors. If `tree-sitter-typescript` fails to find a wheel, pin `tree-sitter==0.22.3` and `tree-sitter-typescript==0.21.2` and re-run; note the change in README.
 
 - [ ] **Step 5: Run the smoke test**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest -q
 ```
 Expected: `1 passed`.
 
 - [ ] **Step 6: Gitignore and README**
 
-Append to `<repo>/.gitignore`:
+Append to `.gitignore`:
 ```
 spike/fingerprint/.venv/
 spike/fingerprint/data/
@@ -154,7 +154,7 @@ Nothing in here ships. The production engine is Rust.
 - [ ] **Step 7: Commit**
 
 ```bash
-cd <repo> && git add .gitignore spike/fingerprint/README.md spike/fingerprint/requirements.txt spike/fingerprint/pytest.ini spike/fingerprint/fp/__init__.py spike/fingerprint/tests/test_smoke.py && git commit -m "spike: scaffold fingerprint spike package"
+cd . && git add .gitignore spike/fingerprint/README.md spike/fingerprint/requirements.txt spike/fingerprint/pytest.ini spike/fingerprint/fp/__init__.py spike/fingerprint/tests/test_smoke.py && git commit -m "spike: scaffold fingerprint spike package"
 ```
 
 ---
@@ -233,7 +233,7 @@ def test_tiny_arrow_is_still_extracted_here():
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_extract.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_extract.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.extract'`.
 
@@ -343,14 +343,14 @@ def extract_functions(path: str, source: str) -> list[FunctionRecord]:
 - [ ] **Step 6: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_extract.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_extract.py -q
 ```
 Expected: `3 passed`. If `function_expression` versus `function` naming differs in the installed grammar, both are in `FUNCTION_TYPES`, so no change is needed.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/parse.py spike/fingerprint/fp/extract.py spike/fingerprint/tests/fixtures/basic.ts spike/fingerprint/tests/test_extract.py && git commit -m "spike: tree-sitter parse and function extraction"
+cd . && git add spike/fingerprint/fp/parse.py spike/fingerprint/fp/extract.py spike/fingerprint/tests/fixtures/basic.ts spike/fingerprint/tests/test_extract.py && git commit -m "spike: tree-sitter parse and function extraction"
 ```
 
 ---
@@ -411,7 +411,7 @@ def test_min_tokens_constant():
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_normalize.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_normalize.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.normalize'`.
 
@@ -482,14 +482,14 @@ def structural_hash(toks: list[str]) -> str:
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_normalize.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_normalize.py -q
 ```
 Expected: `4 passed`. If the renamed test fails, print `tokens(A)` and `tokens(A_RENAMED)` side by side; any differing token is an identifier or literal node type missing from the sets above. Add it and re-run.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/normalize.py spike/fingerprint/tests/test_normalize.py && git commit -m "spike: normalised token stream and structural hash"
+cd . && git add spike/fingerprint/fp/normalize.py spike/fingerprint/tests/test_normalize.py && git commit -m "spike: normalised token stream and structural hash"
 ```
 
 ---
@@ -558,7 +558,7 @@ def test_lsh_retrieves_near_not_far():
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_minhash.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_minhash.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.minhash'`.
 
@@ -603,14 +603,14 @@ class LshIndex:
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_minhash.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_minhash.py -q
 ```
 Expected: `3 passed`. If the similarity assertion is off by a little, adjust the test bounds to 0.5 and 0.35 once, note it in the commit message, and move on; the real thresholds come from the sweep in Task 9.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/minhash.py spike/fingerprint/tests/test_minhash.py && git commit -m "spike: shingles, MinHash and LSH index"
+cd . && git add spike/fingerprint/fp/minhash.py spike/fingerprint/tests/test_minhash.py && git commit -m "spike: shingles, MinHash and LSH index"
 ```
 
 ---
@@ -671,7 +671,7 @@ def test_different_signatures_score_low_and_gate_fails():
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_signature.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_signature.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.signature'`.
 
@@ -771,14 +771,14 @@ def gate(a: Signature, b: Signature) -> bool:
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_signature.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_signature.py -q
 ```
 Expected: `3 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/signature.py spike/fingerprint/tests/test_signature.py && git commit -m "spike: signature vector and similarity"
+cd . && git add spike/fingerprint/fp/signature.py spike/fingerprint/tests/test_signature.py && git commit -m "spike: signature vector and similarity"
 ```
 
 ---
@@ -879,7 +879,7 @@ def test_candidate_pairs_find_the_near_duplicate(tmp_path):
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_index.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_index.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.index'`.
 
@@ -1031,21 +1031,21 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_index.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_index.py -q
 ```
 Expected: `3 passed`.
 
 - [ ] **Step 6: Run on the real repos and record timing**
 
 ```bash
-cd <repo>/spike/fingerprint && time .venv/Scripts/python -m fp.index <home>/fasting-app/src <home>/fasting-app/app <home>/fasting-app/components <home>/strongspan/src <home>/food-data-platform/apps <home>/food-data-platform/packages data/candidates.jsonl
+cd spike/fingerprint && time .venv/Scripts/python -m fp.index <fastlift>/src <fastlift>/app <fastlift>/components <strongspan>/src <food-data-platform>/apps <food-data-platform>/packages data/candidates.jsonl
 ```
 Expected: a line like `functions=NNNN pairs=MMMM`. Write both numbers and the wall time into README under a heading `## Run log`. If it takes longer than ten minutes, stop it, add `--max-files` handling by slicing `iter_source_files` output in `__main__`, and run on `fasting-app/src` alone first.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/index.py spike/fingerprint/tests/fixtures/repo spike/fingerprint/tests/test_index.py spike/fingerprint/README.md && git commit -m "spike: repo indexer and candidate pair emission"
+cd . && git add spike/fingerprint/fp/index.py spike/fingerprint/tests/fixtures/repo spike/fingerprint/tests/test_index.py spike/fingerprint/README.md && git commit -m "spike: repo indexer and candidate pair emission"
 ```
 
 ---
@@ -1116,7 +1116,7 @@ def test_plant_extends_items_and_pairs_find_them():
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_mutate.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_mutate.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.mutate'`.
 
@@ -1246,21 +1246,21 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_mutate.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_mutate.py -q
 ```
 Expected: `5 passed`. If `test_rename_changes_identifiers_only` is brittle on the last assertion, replace it with `assert out != SRC` only; the point is that renaming happened.
 
 - [ ] **Step 5: Run the planted pipeline on the real repos**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m fp.mutate <home>/fasting-app/src <home>/fasting-app/app <home>/fasting-app/components <home>/strongspan/src <home>/food-data-platform/apps <home>/food-data-platform/packages 100 data/candidates_planted.jsonl data/planted.jsonl
+cd spike/fingerprint && .venv/Scripts/python -m fp.mutate <fastlift>/src <fastlift>/app <fastlift>/components <strongspan>/src <food-data-platform>/apps <food-data-platform>/packages 100 data/candidates_planted.jsonl data/planted.jsonl
 ```
 Expected: `functions=NNNN planted=100`. Append the line to the README run log.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/mutate.py spike/fingerprint/tests/test_mutate.py spike/fingerprint/README.md && git commit -m "spike: planted near-duplicates for recall measurement"
+cd . && git add spike/fingerprint/fp/mutate.py spike/fingerprint/tests/test_mutate.py spike/fingerprint/README.md && git commit -m "spike: planted near-duplicates for recall measurement"
 ```
 
 ---
@@ -1365,14 +1365,14 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run a five-pair dry run to prove the loop works**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m fp.label data/candidates.jsonl data/labels_dryrun.jsonl 5
+cd spike/fingerprint && .venv/Scripts/python -m fp.label data/candidates.jsonl data/labels_dryrun.jsonl 5
 ```
 Answer `u` to each. Expected: `labels now: 5`. Then delete `data/labels_dryrun.jsonl`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/label.py && git commit -m "spike: labelling loop"
+cd . && git add spike/fingerprint/fp/label.py && git commit -m "spike: labelling loop"
 ```
 
 ---
@@ -1443,7 +1443,7 @@ def test_sweep_and_choose():
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest tests/test_evaluate.py -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest tests/test_evaluate.py -q
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'fp.evaluate'`.
 
@@ -1577,14 +1577,14 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m pytest -q
+cd spike/fingerprint && .venv/Scripts/python -m pytest -q
 ```
 Expected: all tests pass (smoke 1, extract 3, normalize 4, minhash 3, signature 3, index 3, mutate 5, evaluate 3 = `25 passed`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd <repo> && git add spike/fingerprint/fp/evaluate.py spike/fingerprint/tests/test_evaluate.py && git commit -m "spike: evaluator, threshold sweep and report"
+cd . && git add spike/fingerprint/fp/evaluate.py spike/fingerprint/tests/test_evaluate.py && git commit -m "spike: evaluator, threshold sweep and report"
 ```
 
 ---
@@ -1603,14 +1603,14 @@ cd <repo> && git add spike/fingerprint/fp/evaluate.py spike/fingerprint/tests/te
 - [ ] **Step 1: Label at least 200 real candidate pairs**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m fp.label data/candidates.jsonl data/labels.jsonl 240
+cd spike/fingerprint && .venv/Scripts/python -m fp.label data/candidates.jsonl data/labels.jsonl 240
 ```
 Labelling rule, applied the same way to every pair: `dup` means a maintainer would reasonably replace one with a call to the other or a shared helper; `not` means they do different jobs even if they look alike (for example two React components with the same shape but different content); `unsure` when the labeller cannot decide in thirty seconds. Give a reason of at least three words for every `dup` and `not`. If Claude labels, it writes the reason; the founder then re-labels a random 50 with the labels hidden, and if agreement is below 90 percent, all 240 are relabelled by the founder before the number is reported.
 
 - [ ] **Step 2: Generate the report**
 
 ```bash
-cd <repo>/spike/fingerprint && .venv/Scripts/python -m fp.evaluate data/candidates.jsonl data/candidates_planted.jsonl data/planted.jsonl data/labels.jsonl REPORT.md
+cd spike/fingerprint && .venv/Scripts/python -m fp.evaluate data/candidates.jsonl data/candidates_planted.jsonl data/planted.jsonl data/labels.jsonl REPORT.md
 ```
 Expected: the headline block printed, `REPORT.md` written with a PASS or FAIL verdict.
 
@@ -1625,7 +1625,7 @@ In `docs/superpowers/specs/2026-09-05-agent-native-quality-gate-design.md`, sect
 - [ ] **Step 5: Commit and open the pull request**
 
 ```bash
-cd <repo> && git add spike/fingerprint/REPORT.md spike/fingerprint/README.md docs/superpowers/specs/2026-09-05-agent-native-quality-gate-design.md && git commit -m "spike: fingerprinting result and spec thresholds"
+cd . && git add spike/fingerprint/REPORT.md spike/fingerprint/README.md docs/superpowers/specs/2026-09-05-agent-native-quality-gate-design.md && git commit -m "spike: fingerprinting result and spec thresholds"
 ```
 The repo has no remote yet. Creating one on GitHub is a founder action (private repo, same account as kcalbase). Once the remote exists: `git push -u origin spike/fingerprint` and open a pull request titled "Fingerprinting spike: result and thresholds" whose body is the headline block from `REPORT.md`. Until then the branch stays local and the founder reads `REPORT.md` directly.
 

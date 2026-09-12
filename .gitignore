@@ -4,6 +4,8 @@ node_modules/
 .superpowers/
 spike/fingerprint/.venv/
 spike/fingerprint/data/
+spike/fingerprint/labels-2026-09-05/
+spike/fingerprint/SPOTCHECK-50.md
 __pycache__/
 .pytest_cache/
 placeholders/pypi/dist/

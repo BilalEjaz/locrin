@@ -1,6 +1,6 @@
 # Locrin engine: import graph and five rules (plan 2 part A) precision check
 
-Spec 4.1 gate, measured against the FastLift checkout at `<home>/fasting-app`
+Spec 4.1 gate, measured against the FastLift checkout
 as the corpus substitute. Release binary, fresh `LOCRIN_CACHE_DIR`, no `locrin.toml`
 in the target repository, so this measures out-of-the-box precision with default
 entry points and no configured boundaries.
