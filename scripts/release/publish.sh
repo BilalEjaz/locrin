@@ -5,8 +5,13 @@
 # platform packages, npm entry, PyPI wheels, crates in dependency order, the
 # Homebrew tap. A failure stops the script; the caller leaves the release marked
 # pre-release, and re-running after a fix completes it (every step is idempotent
-# for an already-published version except crates.io, which is skipped when the
-# version exists).
+# for an already-published version except crates.io, which is skipped when
+# cargo info finds the version on the crates-io registry; the query must name the
+# registry, because inside the workspace a bare cargo info matches the local
+# member and would skip every crate). Live mode publishes each crate with cargo's
+# packaged-build verification on, so the four dependent crates are verified only
+# on the live path: cargo waits for each crate to reach the index before the next
+# publish, which is what lets their path dependencies resolve.
 set -euo pipefail
 assets="$1"; mode="$2"
 cd "$(dirname "$0")/../.."
@@ -62,8 +67,8 @@ if [[ "$mode" == "live" ]]; then python -m twine upload --skip-existing "$work"/
 echo "== crates $version"
 for c in locrin-core locrin-rules locrin-reporters locrin-mcp locrin; do
   if [[ "$mode" == "live" ]]; then
-    if cargo info "$c@$version" >/dev/null 2>&1; then echo "$c $version exists, skipping"; continue; fi
-    cargo publish -p "$c" --no-verify
+    if cargo info "$c@$version" --registry crates-io >/dev/null 2>&1; then echo "$c $version exists, skipping"; continue; fi
+    cargo publish -p "$c"
   elif [[ "$c" == "locrin-core" ]]; then
     cargo publish -p "$c" --dry-run
   else
