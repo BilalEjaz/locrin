@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.0
+
+0.5.0 is the first public release. The repository is open under MIT, and the
+binary installs from npm (`locrin`), PyPI (`locrin`), Homebrew
+(`BilalEjaz/locrin/locrin`), crates.io (`locrin`), or the installer scripts
+at the repository root. Every channel carries the same binary from the same
+release, verified against `SHA256SUMS`. The `locrin-cli` crate is renamed
+`locrin` so `cargo install locrin` works.
+
+### What changes without opting in
+
+Nothing in the verdicts. Rule ids, finding ids and exit codes are unchanged
+from 0.4.0. The GitHub Action no longer needs a download token.
+
 PyPI and Packagist findings name a version to move to. Those registries publish
 their advisory ranges as `ECOSYSTEM`, which 0.4.0 counted rather than read, so
 every such finding pointed at the advisory and no further. The engine now orders
