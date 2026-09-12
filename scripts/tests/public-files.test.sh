@@ -9,3 +9,8 @@ grep -q 'Raxbi Ltd' LICENSE || { echo "LICENSE holder"; exit 1; }
 grep -q 'Report a vulnerability' SECURITY.md || { echo "SECURITY.md must point at private reporting"; exit 1; }
 grep -q 'cargo test --workspace' CONTRIBUTING.md || { echo "CONTRIBUTING.md must give the test command"; exit 1; }
 [[ ! -d placeholders ]] || { echo "placeholders must be gone"; exit 1; }
+# Issue forms: a comma inside an unquoted flow-mapping scalar splits the value
+# and invents a key GitHub rejects, so every such scalar must be quoted.
+if grep -nE '\{[^}"]*,[^}"]*\}' .github/ISSUE_TEMPLATE/*.yml; then
+  echo "issue template has an unquoted comma inside a flow mapping"; exit 1
+fi
