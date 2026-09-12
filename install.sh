@@ -28,7 +28,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$BASE_URL/$VERSION/$asset" -o "$tmp/$asset"
 curl -fsSL "$BASE_URL/$VERSION/SHA256SUMS" -o "$tmp/SHA256SUMS"
 
-expected=$(grep " $asset\$" "$tmp/SHA256SUMS" | awk '{print $1}')
+expected=$(awk -v a="$asset" '$2==a || $2=="*"a {print $1}' "$tmp/SHA256SUMS")
 [[ -n "$expected" ]] || { echo "locrin: $asset is not listed in SHA256SUMS" >&2; exit 2; }
 if command -v sha256sum >/dev/null; then actual=$(sha256sum "$tmp/$asset" | awk '{print $1}'); else actual=$(shasum -a 256 "$tmp/$asset" | awk '{print $1}'); fi
 [[ "$actual" == "$expected" ]] || { echo "locrin: checksum mismatch for $asset" >&2; exit 2; }

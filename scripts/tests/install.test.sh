@@ -16,7 +16,7 @@ bash scripts/package.sh "$target" v9.9.9 "$tmp/bin" "$rel" >/dev/null
 LOCRIN_BASE_URL="file://$tmp/releases" LOCRIN_INSTALL_DIR="$tmp/out" bash install.sh v9.9.9
 [[ "$("$tmp/out/locrin" --version)" == "locrin 9.9.9" ]] || { echo "installed binary wrong"; exit 1; }
 
-sed -i.bak 's/^./0/' "$rel/SHA256SUMS"
+sed -i.bak 's/^./x/' "$rel/SHA256SUMS"
 if LOCRIN_BASE_URL="file://$tmp/releases" LOCRIN_INSTALL_DIR="$tmp/out2" bash install.sh v9.9.9 2>"$tmp/err"; then echo "mismatch must fail"; exit 1; fi
 grep -q 'checksum mismatch' "$tmp/err" || { cat "$tmp/err"; exit 1; }
 [[ ! -e "$tmp/out2/locrin" ]] || { echo "must not install on mismatch"; exit 1; }

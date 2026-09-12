@@ -8,15 +8,27 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $repo = "BilalEjaz/locrin"
-function Fail($msg) { [Console]::Error.WriteLine("locrin: $msg"); exit 2 }
+$tmp = $null
+# Exits 2 when run as a file (the -File contract the tests assert); throws when the script was
+# piped into iex, so the one-liner reports the error without closing the user's terminal.
+function Fail($msg) {
+  [Console]::Error.WriteLine("locrin: $msg")
+  if ($tmp -and (Test-Path $tmp)) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+  if ($PSCommandPath) { exit 2 }
+  throw $msg
+}
 
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") { Fail "no prebuilt binary for $env:PROCESSOR_ARCHITECTURE; see https://github.com/$repo/releases" }
 $target = "x86_64-pc-windows-msvc"
 
 if ($Version -eq "latest") {
+  # On PowerShell 5.1 -ErrorAction SilentlyContinue makes the blocked redirect return the response
+  # object, so the Location header is readable. A DNS or HTTP error still throws, hence the catch.
   $location = $null
-  try { Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -MaximumRedirection 0 -UseBasicParsing | Out-Null }
-  catch { if ($_.Exception.Response) { $location = $_.Exception.Response.Headers["Location"] } }
+  try {
+    $probe = Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -MaximumRedirection 0 -UseBasicParsing -ErrorAction SilentlyContinue
+    if ($probe) { $location = $probe.Headers["Location"] }
+  } catch { $location = $null }
   if (-not $location) { Fail "could not resolve the latest release" }
   $Version = $location.Split("/")[-1]
 }

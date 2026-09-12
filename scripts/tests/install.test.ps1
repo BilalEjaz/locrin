@@ -15,10 +15,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version v9.9.
 if ($LASTEXITCODE -ne 0) { throw "install failed with $LASTEXITCODE" }
 if (-not (Test-Path (Join-Path $out "locrin.exe"))) { throw "binary not installed" }
 
-Set-Content -Path (Join-Path $rel "SHA256SUMS") -Value ("0" + $hash.Substring(1) + "  locrin-v9.9.9-x86_64-pc-windows-msvc.zip") -Encoding ascii
+Set-Content -Path (Join-Path $rel "SHA256SUMS") -Value ("x" + $hash.Substring(1) + "  locrin-v9.9.9-x86_64-pc-windows-msvc.zip") -Encoding ascii
 $out2 = Join-Path $tmp "out2"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version v9.9.9 -BaseUrl (Join-Path $tmp "releases") -InstallDir $out2
 if ($LASTEXITCODE -ne 2) { throw "mismatch must exit 2, got $LASTEXITCODE" }
 if (Test-Path (Join-Path $out2 "locrin.exe")) { throw "must not install on mismatch" }
+
+Set-Content -Path (Join-Path $rel "SHA256SUMS") -Value "" -Encoding ascii
+$out3 = Join-Path $tmp "out3"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version v9.9.9 -BaseUrl (Join-Path $tmp "releases") -InstallDir $out3
+if ($LASTEXITCODE -ne 2) { throw "missing line must exit 2, got $LASTEXITCODE" }
+if (Test-Path (Join-Path $out3 "locrin.exe")) { throw "must not install when not listed" }
 Remove-Item -Recurse -Force $tmp
 Write-Output "ok   scripts/tests/install.test.ps1"
