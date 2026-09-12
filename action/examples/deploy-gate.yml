@@ -1,5 +1,3 @@
-# While BilalEjaz/locrin is private, this needs its Actions setting "Access:
-# accessible from repositories owned by the user" and a download-token secret.
 name: deploy gate
 on:
   push:
