@@ -10,3 +10,4 @@ __pycache__/
 .pytest_cache/
 .locrin-cache/
 locrin-baseline.json.tmp
+npm/platforms/*/bin/
