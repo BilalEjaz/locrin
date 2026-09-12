@@ -4,11 +4,11 @@ Locrin is a deterministic quality gate for code written by people and by
 agents. It answers one question about a change, pass, advisory or block, the
 same way every time, in under a second, with no model in the loop.
 
-It reads TypeScript, JavaScript, PHP and Python with tree-sitter, keeps a
-SQLite index of the repository outside the working tree, and runs 21 rules
-whose precision is measured before they ship. The same binary serves a person
-on the command line, a git pre-commit hook, Claude Code's hooks, an MCP client
-and a GitHub Action.
+It reads TypeScript and JavaScript, and PHP and Python behind a one-line
+opt-in, with tree-sitter, keeps a SQLite index of the repository outside the
+working tree, and ships 21 rules whose precision is measured before they ship.
+The same binary serves a person on the command line, a git pre-commit hook,
+Claude Code's hooks, an MCP client and a GitHub Action.
 
 ## Install
 
@@ -29,9 +29,10 @@ Windows x86_64 are prebuilt; anything else builds from source with cargo.
     locrin check         # verdict on the repository; exit 1 blocks, 2 is an engine error
 
 With Claude Code, `init` also wires the post-edit hook, so an agent hears about
-a blocking finding before it moves on, and the stop hook, so a session cannot
-end with a block outstanding. Without an agent, the pre-commit hook and the
-GitHub Action give the same verdict.
+a blocking finding before it moves on, and the stop hook, which sends the agent
+back, up to three times, rather than letting the session end with a block
+outstanding. Without an agent, the pre-commit hook and the GitHub Action give
+the same verdict.
 
 ## Free and paid
 
@@ -40,10 +41,10 @@ rules including the ten security rules, the hooks, the MCP server and the
 Action. Nothing here needs an account or touches the network except the
 dependency advisory lookup, which `--offline` turns off.
 
-Paid, later and separate: a security pack with framework-specific checks and
-compliance reports, unlocked offline by licence key, and a hosted layer for
-history across runs and people. Neither will take back anything that shipped
-free.
+Paid, later and separate: a security pack with further framework-specific
+checks and compliance reports, unlocked offline by licence key, and a hosted
+layer for history across runs and people. Neither will take back anything that
+shipped free.
 
 ## Benchmark
 
