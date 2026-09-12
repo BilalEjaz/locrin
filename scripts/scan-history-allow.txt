@@ -2,9 +2,14 @@
 # test material, so a hit there is the detector finding its own corpus and not a
 # credential that was ever live.
 #
-# One repository-relative path prefix per line. A finding whose file path starts
-# with one of these prefixes is reported as allowlisted instead of failing the
-# scan. Blank lines and lines starting with # are ignored.
+# One repository-relative path per line. A finding whose file path is covered by
+# an entry is reported as allowlisted instead of failing the scan. Blank lines
+# and lines starting with # are ignored.
+#
+# An entry ending in "/" is a directory prefix and covers every path under it.
+# An entry that does not end in "/" is one exact file path and covers nothing
+# else: "crates/rules/src/secrets/jwt.rs" does not cover "jwt.rs.bak" or
+# "jwt.rsx". Widening an entry to a whole directory means adding the "/".
 #
 # Nothing is added here without a hit from scripts/scan-history.sh and a reason.
 

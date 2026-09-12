@@ -3,9 +3,11 @@
 # into a temporary directory and run through locrin's secret-exposed rule, then
 # gitleaks (pinned, checksum-verified) scans the whole history in one pass.
 #
-# Findings whose file path starts with a prefix in the allowlist are counted and
-# summarised rather than treated as failures: that file holds the secret rule's
-# own synthetic test material. Everything else fails the scan.
+# Findings whose file path is covered by the allowlist are counted and summarised
+# rather than treated as failures: that file holds the secret rule's own
+# synthetic test material. Everything else fails the scan. An allowlist entry
+# ending in "/" covers every path under it; any other entry covers that one file
+# and nothing else, so "a/b.rs" never covers "a/b.rs.bak".
 #
 # Usage: scripts/scan-history.sh [repo]   (default: this repository)
 # Env:   SCAN_HISTORY_ALLOW   path to the allowlist file
@@ -59,6 +61,9 @@ with open(sys.argv[1],encoding="utf-8") as fh:
     for line in fh:
         line=line.strip()
         if line and not line.startswith("#"): pre.append(line)
+# An entry ending in "/" is a directory prefix; anything else is one exact path.
+def ok(f):
+    return any(f.startswith(x) if x.endswith("/") else f==x for x in pre)
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(1)
 for run in d.get("runs",[]):
@@ -67,7 +72,7 @@ for run in d.get("runs",[]):
         p=(r.get("locations") or [{}])[0].get("physicalLocation",{})
         f=urllib.parse.unquote(p.get("artifactLocation",{}).get("uri") or "").replace("\\","/")
         while f.startswith("./"): f=f[2:]
-        tag="a" if any(f.startswith(x) for x in pre) else "x"
+        tag="a" if ok(f) else "x"
         print(tag,f,p.get("region",{}).get("startLine"))
 ' "$allow"); then
     echo "scan-history: locrin produced no readable report for commit $commit" >&2; status=1
@@ -110,10 +115,37 @@ fi
 # The findings go to a JSON report so the allowlist can be applied to them.
 # --exit-code 1 means "leaks found", which is not by itself fatal here; what
 # matters is whether any of them sits outside the allowlist. --redact keeps the
-# values themselves out of both the report and the terminal.
+# values themselves out of both the report and the terminal. --no-color keeps the
+# log lines greppable below. gitleaks logs to stderr, which is captured so the
+# verdict can be checked and then replayed so the run still has its record.
 report="$tmp/gitleaks.json"
+gl_err="$tmp/gitleaks.err"
 gl_rc=0
-"$bin" git --no-banner --redact --exit-code 1 --report-format json --report-path "$report" "$repo" || gl_rc=$?
+"$bin" git --no-banner --no-color --redact --exit-code 1 \
+  --report-format json --report-path "$report" "$repo" 2>"$gl_err" || gl_rc=$?
+cat "$gl_err" >&2
+# gitleaks 8.30.1 exit codes, verified against the pinned binary:
+#   0    the scan completed and found nothing
+#   1    the scan completed and found leaks, OR the scan itself failed
+#   126  cobra rejected the invocation, and nothing was scanned at all
+# A failed scan still writes its report, so the report alone cannot tell the two
+# meanings of 1 apart. Three checks separate them, and every one of them is fatal.
+if [[ $gl_rc -ne 0 && $gl_rc -ne 1 ]]; then
+  echo "scan-history: gitleaks exited $gl_rc, which is neither a clean scan nor leaks found" >&2
+  exit 2
+fi
+# A scan that aborted part way logs "partial scan completed in ..." and then
+# "N leaks found in partial scan" or "no leaks found in partial scan".
+if grep -q 'partial scan' "$gl_err"; then
+  echo "scan-history: gitleaks reported a partial scan (exit $gl_rc), so its verdict means nothing" >&2
+  exit 2
+fi
+# 8.30.1 also logs an ERR or FTL line and still exits 0 when git itself fails and
+# nothing gets scanned, which would otherwise read as a clean history.
+if grep -qE '(^|[[:space:]])(ERR|FTL)[[:space:]]' "$gl_err"; then
+  echo "scan-history: gitleaks logged a scan error (exit $gl_rc), so its verdict means nothing" >&2
+  exit 2
+fi
 [[ -f "$report" ]] || { echo "scan-history: gitleaks wrote no report (exit $gl_rc)" >&2; exit 2; }
 if ! gl_out=$("$py" -c '
 import json,sys
@@ -122,23 +154,34 @@ with open(sys.argv[2],encoding="utf-8") as fh:
     for line in fh:
         line=line.strip()
         if line and not line.startswith("#"): pre.append(line)
+# An entry ending in "/" is a directory prefix; anything else is one exact path.
+def ok(f):
+    return any(f.startswith(x) if x.endswith("/") else f==x for x in pre)
 try:
     with open(sys.argv[1],encoding="utf-8") as fh: d=json.load(fh)
 except Exception: sys.exit(1)
-allowed=0; bad=[]
+allowed=0; total=0; bad=[]
 for f in (d or []):
+    total+=1
     p=(f.get("File") or "").replace("\\","/")
-    if any(p.startswith(x) for x in pre): allowed+=1
+    if ok(p): allowed+=1
     else: bad.append("  {} {}:{} {} ({})".format(
         (f.get("Commit") or "")[:12], p, f.get("StartLine"),
         f.get("RuleID"), f.get("Description")))
-print("allowlisted",allowed)
+print("counts",total,allowed)
 for b in bad: print(b)
 ' "$report" "$allow"); then
   echo "scan-history: gitleaks report could not be read (exit $gl_rc)" >&2; exit 2
 fi
-gl_allowed=$(printf '%s\n' "$gl_out" | sed -n '1s/^allowlisted //p')
+gl_total=$(printf '%s\n' "$gl_out" | sed -n '1s/^counts \([0-9][0-9]*\) [0-9][0-9]*$/\1/p')
+gl_allowed=$(printf '%s\n' "$gl_out" | sed -n '1s/^counts [0-9][0-9]* \([0-9][0-9]*\)$/\1/p')
 gl_bad=$(printf '%s\n' "$gl_out" | tail -n +2)
+# Exit 1 is "leaks found" only when there are leaks. Exit 1 with an empty report
+# is the other meaning of 1: the scan failed before it could reach a verdict.
+if [[ $gl_rc -eq 1 && "${gl_total:-0}" -eq 0 ]]; then
+  echo "scan-history: gitleaks exited 1 with no findings, so the scan failed rather than passed" >&2
+  exit 2
+fi
 echo "gitleaks: allowlisted: ${gl_allowed:-0} hits under fixture paths"
 if [[ -n "$gl_bad" ]]; then
   echo "gitleaks findings outside the allowlist:" >&2

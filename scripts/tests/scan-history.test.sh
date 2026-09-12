@@ -48,3 +48,65 @@ if SCAN_HISTORY_ALLOW="$tmp/allow.txt" bash scripts/scan-history.sh "$tmp/elsewh
   cat "$tmp/elsewhere-out"; echo "a path outside the allowlist must fail"; exit 1
 fi
 grep -q 'src/keys.ts' "$tmp/elsewhere-out" || { cat "$tmp/elsewhere-out"; echo "report must name the file"; exit 1; }
+
+# An allowlist entry with no trailing slash is one exact file, not a prefix.
+printf '# one exact file, no trailing slash\nsrc/keys.ts\n' > "$tmp/exact.txt"
+
+# The file the entry names: allowlisted, so the scan passes.
+if ! SCAN_HISTORY_ALLOW="$tmp/exact.txt" bash scripts/scan-history.sh "$tmp/elsewhere" >"$tmp/exact-out" 2>&1; then
+  cat "$tmp/exact-out"; echo "an exact allowlist entry must cover the file it names"; exit 1
+fi
+
+# A sibling the entry only shares a prefix with: not allowlisted, so it fails.
+git init -q "$tmp/bak"; echo 'export const a = 1;' > "$tmp/bak/a.ts"; mk "$tmp/bak" add a.ts; mk "$tmp/bak" commit -qm one
+mkdir -p "$tmp/bak/src"; plant "$tmp/bak/src/keys.ts.bak"
+mk "$tmp/bak" add "src/keys.ts.bak"; mk "$tmp/bak" commit -qm two
+if SCAN_HISTORY_ALLOW="$tmp/exact.txt" bash scripts/scan-history.sh "$tmp/bak" >"$tmp/bak-out" 2>&1; then
+  cat "$tmp/bak-out"; echo "src/keys.ts must not allowlist src/keys.ts.bak"; exit 1
+fi
+grep -q 'src/keys\.ts\.bak' "$tmp/bak-out" || { cat "$tmp/bak-out"; echo "report must name the file"; exit 1; }
+
+# A gitleaks that errors must never read as a clean history. The double stands in
+# for the pinned binary through GITLEAKS_CACHE; FAKE_RC, FAKE_REPORT and
+# FAKE_STDERR drive it. The script resolves gitleaks.exe on Windows, so both
+# names are written.
+mkdir -p "$tmp/fakebin"
+cat > "$tmp/fakebin/gitleaks" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+rp=""; prev=""
+for a in "$@"; do
+  if [[ "$prev" == "--report-path" ]]; then rp="$a"; fi
+  prev="$a"
+done
+if [[ -n "${FAKE_STDERR:-}" ]]; then printf '%s\n' "$FAKE_STDERR" >&2; fi
+if [[ -n "${FAKE_REPORT:-}" && -n "$rp" ]]; then printf '%s' "$FAKE_REPORT" > "$rp"; fi
+exit "${FAKE_RC:-0}"
+FAKE
+cp "$tmp/fakebin/gitleaks" "$tmp/fakebin/gitleaks.exe"
+chmod +x "$tmp/fakebin/gitleaks" "$tmp/fakebin/gitleaks.exe"
+
+# Control: the double wired up as a clean scan still passes, so the three cases
+# below fail for the reason they name and not because the double is broken.
+if ! FAKE_RC=0 FAKE_REPORT='[]' GITLEAKS_CACHE="$tmp/fakebin" \
+  bash scripts/scan-history.sh "$tmp/clean" >"$tmp/fake-ok" 2>&1; then
+  cat "$tmp/fake-ok"; echo "a clean gitleaks run must still pass"; exit 1
+fi
+
+# $1 label, $2 FAKE_RC, $3 FAKE_REPORT, $4 FAKE_STDERR.
+fake_must_fail() {
+  local rc=0
+  FAKE_RC="$2" FAKE_REPORT="$3" FAKE_STDERR="$4" GITLEAKS_CACHE="$tmp/fakebin" \
+    bash scripts/scan-history.sh "$tmp/clean" >"$tmp/fake-out" 2>&1 || rc=$?
+  [[ $rc -eq 2 ]] || { cat "$tmp/fake-out"; echo "$1: expected exit 2, got $rc"; exit 1; }
+  grep -q 'gitleaks' "$tmp/fake-out" || { cat "$tmp/fake-out"; echo "$1: the failure must name gitleaks"; exit 1; }
+}
+
+# A rejected invocation: exit 126, no report at all.
+fake_must_fail "gitleaks exit 126" 126 '' ''
+# Exit 1 with an empty report: the other meaning of 1, a scan that failed.
+fake_must_fail "gitleaks exit 1 with no findings" 1 '[]' ''
+# Exit 1 with findings, but a partial scan, so the count cannot be trusted.
+fake_must_fail "gitleaks partial scan" 1 \
+  '[{"File":"src/a.ts","StartLine":1,"Commit":"deadbeef","RuleID":"r","Description":"d"}]' \
+  '3:00PM WRN 1 leaks found in partial scan'
