@@ -7,9 +7,10 @@
 0.5.0 is the first public release. The repository is open under MIT, and the
 binary installs from npm (`locrin`), PyPI (`locrin`), Homebrew
 (`BilalEjaz/locrin/locrin`), crates.io (`locrin`), or the installer scripts
-at the repository root. Every channel carries the same binary from the same
-release, verified against `SHA256SUMS`. The `locrin-cli` crate is renamed
-`locrin` so `cargo install locrin` works.
+at the repository root. The npm and PyPI packages carry the release binaries;
+the installer scripts, the Homebrew formula and the GitHub Action download them
+and verify against `SHA256SUMS`; `cargo install` builds from source. The
+`locrin-cli` crate is renamed `locrin` so `cargo install locrin` works.
 
 ### What changes without opting in
 
