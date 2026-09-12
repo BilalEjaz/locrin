@@ -1,18 +1,22 @@
 [package]
-name = "locrin-cli"
+name = "locrin"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Locrin: the deterministic quality gate for code written by people and agents"
+readme = "../../README.md"
 
 [[bin]]
 name = "locrin"
 path = "src/main.rs"
 
 [dependencies]
-locrin-core = { path = "../core" }
-locrin-rules = { path = "../rules" }
-locrin-reporters = { path = "../reporters" }
-locrin-mcp = { path = "../mcp" }
+locrin-core = { path = "../core", version = "0.4.0" }
+locrin-rules = { path = "../rules", version = "0.4.0" }
+locrin-reporters = { path = "../reporters", version = "0.4.0" }
+locrin-mcp = { path = "../mcp", version = "0.4.0" }
 anyhow.workspace = true
 clap.workspace = true
 serde = { workspace = true }

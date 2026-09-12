@@ -3,6 +3,9 @@ name = "locrin-core"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Locrin engine: tree-sitter parsing, SQLite index, findings and verdicts"
 
 [lib]
 name = "locrin_core"

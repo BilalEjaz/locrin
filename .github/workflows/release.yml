@@ -52,7 +52,7 @@ jobs:
             tag="$tag-dryrun"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - run: cargo build --release -p locrin-cli --target ${{ matrix.target }}
+      - run: cargo build --release -p locrin --target ${{ matrix.target }}
       - name: Package
         id: pkg
         shell: bash

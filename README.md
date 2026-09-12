@@ -538,7 +538,7 @@ scan:
 | Startup (`--help`) | under 50 ms | 21 ms |
 | Cold index, PHP (BookStack, 2152 files, 1773 of them PHP) | recorded, not gated | 6.56 s |
 
-Run them with `cargo test --release -p locrin-cli -- --ignored --nocapture`;
+Run them with `cargo test --release -p locrin -- --ignored --nocapture`;
 the PHP one needs `LOCRIN_PHP_BENCH_REPO` pointed at a checkout whose
 `locrin.toml` enables PHP, and says so and measures nothing without it.
 

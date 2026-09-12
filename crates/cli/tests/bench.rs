@@ -1,5 +1,5 @@
 //! Spec section 3.4 targets, and spec 5.2's hook budget. Run:
-//! cargo test --release -p locrin-cli -- --ignored --nocapture
+//! cargo test --release -p locrin -- --ignored --nocapture
 //! Requires the founder's FastLift checkout at <home>/fasting-app (override with LOCRIN_BENCH_REPO).
 //!
 //! Every run here passes `--offline`. These are engine targets, and since
