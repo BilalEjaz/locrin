@@ -23,7 +23,7 @@ false finding.
 | Corpus | Language | Source | Commit | Indexed files |
 | --- | --- | --- | --- | --- |
 | BookStack | PHP | `github.com/BookStackApp/BookStack`, tag `v26.05.4` (latest release, 2026-08-24), `git clone --depth 1` | `cec78b1b` | 2152 (1773 `.php`, 389 JavaScript and TypeScript, 2 excluded for parse errors) |
-| FastSpot | Python | the FastSpot checkout (the founder's Kraken paper-trading bot) | working tree, copied 2026-09-11 | 96 (all `.py`) |
+| FastSpot | Python | the FastSpot checkout (a private Python service) | working tree, copied 2026-09-11 | 96 (all `.py`) |
 
 Both were measured on a copy in the session scratchpad and not on the
 original: FastSpot was copied with `.venv`, `venv`, `node_modules`, `.git` and

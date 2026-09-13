@@ -518,7 +518,7 @@ rounds, written up in
 
 | Round | PHP corpus | Python corpus |
 | --- | --- | --- |
-| One | BookStack `v26.05.4`, 2152 files | FastSpot (a private bot), 96 files |
+| One | BookStack `v26.05.4`, 2152 files | FastSpot (a private Python service), 96 files |
 | Two | Monica `v4.1.2`, 1800 files | Poetry `2.4.3`, 438 files |
 | Three | Monica again, after the fixes | Poetry again, after the fixes |
 

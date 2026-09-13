@@ -2023,3 +2023,22 @@ Mark the draft ready and fill the body: what changed per task, the pre-flight hi
 6. Tag: `git tag v0.5.0 && git push origin v0.5.0`. Watch the release run; every channel must publish; then verify from a clean machine or container: `npx locrin@0.5.0 --version`, `pipx run locrin --version`, `brew install BilalEjaz/locrin/locrin`, `cargo install locrin`, the two installer one-liners.
 7. FastLift: open a pull request on BilalEjaz/fastlift replacing `.github/workflows/locrin.yml` with the new example pinned to v0.5.0 (no download token). After it is green and merged, the founder deletes the `LOCRIN_TOKEN` secret and the personal access token.
 8. Benchmark CI publishes results for 0.5.0 (plan B).
+
+## Pre-flight record: history rewrite (2026-09-13)
+
+The pre-flight scan on the original history was clean for secrets, but the private-reference sweep found three spike files quoting the founder's other repositories, and earlier plan revisions carrying the founder's local user path, still reachable in history. The founder chose to rewrite.
+
+Commands run on the private repository (a mirror backup was taken first):
+
+```bash
+git filter-repo --force --invert-paths \
+  --path spike/fingerprint/SPOTCHECK-50.md \
+  --path spike/fingerprint/labels-2026-09-05 \
+  --replace-text replace.txt   # user paths become <repo>, <home>, <local-appdata>
+git push --force origin main
+git push --force origin v0.3.0 v0.4.0
+```
+
+Result: 335 commits (was 336; the labels-only commit became empty and was dropped), main tree unchanged, zero matches for the private-reference patterns in any blob of any ref, all merged branches deleted from GitHub so only `main` remains. `scripts/scan-history.sh` re-run on the rewritten repository: exit 0 (308 commits by gitleaks, every hit an allowlisted fixture). `scripts/check-private-refs.sh`: exit 0.
+
+Known residual: GitHub keeps commits reachable by SHA through cached views and the 24 closed pull requests until GitHub Support dereferences them or the repository is recreated. First changed commit reported by the rewrite: `13c3d82` (old) became `6da6c98` (new).
