@@ -51,8 +51,9 @@ shipped free.
 
 ## Benchmark
 
-Precision and recall per rule, measured on a public corpus anyone can rerun:
-https://github.com/BilalEjaz/locrin-benchmark
+Precision and recall per rule are measured on a fixed corpus. The benchmark
+repository is being prepared for public release and will be linked here once
+anyone can rerun it.
 
 ## Limits worth knowing first
 
@@ -547,9 +548,9 @@ BookStack test helper, which is accurate and is not something a maintainer
 acts on; a fixture key under `tests/` is accepted into the baseline with a
 reason, like any other locked finding.
 
-The public numbers, precision and recall per rule on a corpus anyone can
-rerun, live in their own repository:
-https://github.com/BilalEjaz/locrin-benchmark
+The precision and recall numbers per rule live in a separate benchmark
+repository that is being prepared for public release. This README will link
+it once it is public.
 
 ### Speed
 
