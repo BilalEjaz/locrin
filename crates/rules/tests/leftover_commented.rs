@@ -1,13 +1,13 @@
 mod common;
 
-use common::{fixture, run_on, run_on_langs, run_unfiltered};
+use common::{fixture, rule_on, run_on, run_on_langs, run_unfiltered};
 use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_commented::LeftoverCommented;
 
 #[test]
 fn flags_line_runs_and_block_comments_that_look_like_code() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "flag"), &Config::default());
+    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "flag"), &rule_on("leftover-commented-code"));
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2, 8]);
     assert!(out.iter().all(|f| f.severity == Severity::Medium && f.confidence == Confidence::Medium));
@@ -17,13 +17,13 @@ fn flags_line_runs_and_block_comments_that_look_like_code() {
 
 #[test]
 fn ignores_prose_jsdoc_and_license_headers() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "clean"), &Config::default());
+    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "clean"), &rule_on("leftover-commented-code"));
     assert!(out.is_empty(), "got {:?}", out);
 }
 
 #[test]
 fn two_lines_is_not_a_run() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "edge"), &Config::default());
+    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "edge"), &rule_on("leftover-commented-code"));
     assert!(out.is_empty());
 }
 
@@ -36,7 +36,7 @@ fn two_lines_is_not_a_run() {
 /// reason, so the run asserts it saw all five.
 #[test]
 fn prose_blocks_are_not_commented_out_code() {
-    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let config = Config { languages: Languages { php: true, python: false }, ..rule_on("leftover-commented-code") };
     let root = fixture("leftover_commented", "prose");
     assert_eq!(common::parse_dir_langs(&root, config.languages).len(), 5);
     let out = run_on_langs(Box::new(LeftoverCommented), &root, &config);
@@ -48,7 +48,7 @@ fn prose_blocks_are_not_commented_out_code() {
 /// looks like code. One prose line does not buy a block its way out.
 #[test]
 fn a_commented_out_block_under_one_sentence_is_still_reported() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "mixed"), &Config::default());
+    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "mixed"), &rule_on("leftover-commented-code"));
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2], "{out:?}");
     assert_eq!(out[0].evidence, "The old path summed the rows twice, so it is parked here for now.");
@@ -58,7 +58,7 @@ fn a_commented_out_block_under_one_sentence_is_still_reported() {
 /// both make a run; a `/* */` block is read whole, as it is in TypeScript.
 #[test]
 fn flags_php_line_runs_hash_runs_and_block_comments() {
-    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let config = Config { languages: Languages { php: true, python: false }, ..rule_on("leftover-commented-code") };
     let out = run_on_langs(Box::new(LeftoverCommented), &fixture("leftover_commented", "php/flag"), &config);
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![4, 13, 18], "{out:?}");
@@ -69,7 +69,7 @@ fn flags_php_line_runs_hash_runs_and_block_comments() {
 /// Prose, a licence header and a docblock are not commented-out PHP.
 #[test]
 fn ignores_php_prose_docblocks_and_license_headers() {
-    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let config = Config { languages: Languages { php: true, python: false }, ..rule_on("leftover-commented-code") };
     let out = run_on_langs(Box::new(LeftoverCommented), &fixture("leftover_commented", "php/clean"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }
@@ -80,7 +80,7 @@ fn ignores_php_prose_docblocks_and_license_headers() {
 /// `run_rules` would drop what the vocabulary finds.
 #[test]
 fn flags_python_hash_runs() {
-    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let config = Config { languages: Languages { php: false, python: true }, ..rule_on("leftover-commented-code") };
     let out = run_unfiltered(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/flag"), &config);
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2], "{out:?}");
@@ -91,7 +91,7 @@ fn flags_python_hash_runs() {
 /// 14 on Poetry, so the same fixture produces nothing through `run_rules`.
 #[test]
 fn python_is_off_by_default_after_the_precision_gate() {
-    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let config = Config { languages: Languages { php: false, python: true }, ..rule_on("leftover-commented-code") };
     let out = run_on_langs(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/flag"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }
@@ -103,7 +103,7 @@ fn python_is_off_by_default_after_the_precision_gate() {
 /// pair's default is.
 #[test]
 fn python_prose_headers_ending_in_a_colon_are_not_code() {
-    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let config = Config { languages: Languages { php: false, python: true }, ..rule_on("leftover-commented-code") };
     let out = run_unfiltered(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/clean"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }
@@ -113,7 +113,7 @@ fn python_prose_headers_ending_in_a_colon_are_not_code() {
 /// lines the flag fixture is reported for, and none of them is a finding here.
 #[test]
 fn python_docstrings_prose_and_license_headers_are_not_scanned() {
-    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let config = Config { languages: Languages { php: false, python: true }, ..rule_on("leftover-commented-code") };
     let out = run_on_langs(Box::new(LeftoverCommented), &fixture("leftover_commented", "py/clean"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }

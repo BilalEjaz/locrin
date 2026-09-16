@@ -415,7 +415,7 @@ may not.
 | Rule | Category | Severity | Confidence | On by default |
 | --- | --- | --- | --- | --- |
 | `leftover-debug` | erosion | high | high | yes |
-| `leftover-commented-code` | erosion | medium | medium | yes; off on Python |
+| `leftover-commented-code` | erosion | medium | medium | no |
 | `leftover-agent-marker` | erosion | low | medium | yes |
 | `unused-import` | erosion | low | high | yes |
 | `unreachable` | erosion | medium | high | yes |
@@ -441,11 +441,15 @@ rule are measured nightly on public agent-written diffs, and the numbers behind
 every default in the table are there:
 https://github.com/BilalEjaz/locrin-benchmark
 
-Two rules ship off: `dead-file` and `injection-sink`. Both were measured against
-real repositories and did not clear the precision bar the spec sets, for a
-reason that is answerable per repository and not in general: `dead-file` needs
-that repository's entry points curated, and `injection-sink` needs its fixtures
-baselined. Turn either on with `rules.<id>.enabled = true`. `swallowed-error`
+Three rules ship off: `dead-file`, `injection-sink` and
+`leftover-commented-code`. Each was measured against real repositories and did
+not clear the precision bar the spec sets. For the first two the reason is
+answerable per repository and not in general: `dead-file` needs that
+repository's entry points curated, and `injection-sink` needs its fixtures
+baselined. `leftover-commented-code` has yet to produce a true finding on any
+measured code (0 of 5 on the public benchmark, 0 of 8 on a large application
+after 0.6.0's prose veto); it stays a review aid until a measurement clears the
+bar. Turn any of them on with `rules.<id>.enabled = true`. `swallowed-error`
 was the third until 0.6.0, when the benchmark scored it 92 percent precision
 above the spec's bar of 85; a repository that would rather not have it turns it
 off the same way, with `rules.swallowed-error.enabled = false`.
@@ -453,9 +457,10 @@ off the same way, with `rules.swallowed-error.enabled = false`.
 and `express-route-without-auth` is on but silent until you name an auth
 middleware.
 
-One rule is on everywhere but one language, which the table says in its column:
-`leftover-commented-code` is off on Python. See "Per-language defaults" below
-for that measurement and for what overrides it.
+One rule carries a per-language default on top of its own: a repository that
+turns `leftover-commented-code` on still gets nothing from it on Python, on that
+pair's own measurement. See "Per-language defaults" below for the measurement
+and for what overrides it.
 
 ## Languages
 

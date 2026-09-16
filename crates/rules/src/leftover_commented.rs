@@ -363,6 +363,29 @@ impl Rule for LeftoverCommented {
     fn languages(&self) -> &'static [Language] {
         ALL
     }
+    /// Off by default from 0.6.0. The rule has never produced a true finding on
+    /// code that was measured: the public benchmark of 2026-09-16
+    /// (github.com/BilalEjaz/locrin-benchmark, 217 agent-written diffs, two
+    /// models labelling) scored 0 true of 5, every one a prose comment block,
+    /// and the FastLift repository held 99 findings under 0.5.0, all prose, and
+    /// still 8 after the prose veto above, all prose again: long design headers
+    /// where more than half the lines close on a bracket or a comma. The spec
+    /// 10.2 gate is 85 percent precision, and 0 of anything is not a number to
+    /// ship on. `dead-file` and `injection-sink` are off for the same reason.
+    /// The rule stays a review aid a repository turns on with
+    ///
+    /// ```toml
+    /// [rules.leftover-commented-code]
+    /// enabled = true
+    /// ```
+    ///
+    /// and it comes back on by default when a measurement clears the gate. The
+    /// per-language default below still applies to a repository that turns it
+    /// on: the Python pair stays off on its own measurement.
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
+
     /// Off for Python: the precision gate's second round
     /// (`docs/superpowers/plans/2026-09-11-php-and-python-precision.md`, round
     /// two, Poetry 2.4.3) scored 0 true of 14. Every finding was a prose

@@ -1388,6 +1388,7 @@ mod tests {
         assert!(default_of("swallowed-error"), "92 percent precision clears the gate");
         assert!(!default_of("dead-file"), "0 of 16 true");
         assert!(!default_of("injection-sink"), "0 of 17 true");
+        assert!(!default_of("leftover-commented-code"), "0 of 5 true in public, 0 of 99 and then 0 of 8 on FastLift");
     }
 
     /// A locked rule, the way `secret-exposed` is locked (spec 4.3). Nothing but
