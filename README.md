@@ -422,7 +422,7 @@ may not.
 | `dead-export` | erosion | low | medium | yes |
 | `dead-file` | erosion | medium | medium | no |
 | `boundary-violation` | erosion | high | high | yes |
-| `swallowed-error` | erosion | medium | high | no |
+| `swallowed-error` | erosion | medium | high | yes |
 | `test-no-assert` | erosion | low | medium | yes |
 | `test-newly-skipped` | erosion | medium | high | yes |
 | `secret-exposed` | security | high | high | yes (locked) |
@@ -436,12 +436,19 @@ may not.
 | `express-cors-wildcard-on-authenticated` | security | high | high | yes |
 | `express-cookie-insecure` | security | high | high | yes |
 
-Three rules ship off: `dead-file`, `swallowed-error` and `injection-sink`. Each
-was measured against real repositories and did not clear the precision bar the
-spec sets, for a reason that is answerable per repository and not in general:
-`dead-file` needs that repository's entry points curated, `injection-sink` needs
-its fixtures baselined, and `swallowed-error` is a review aid rather than a
-gate. Turn any of them on with `rules.<id>.enabled = true`.
+The last column is a measurement, not a preference. Precision and recall per
+rule are measured nightly on public agent-written diffs, and the numbers behind
+every default in the table are there:
+https://github.com/BilalEjaz/locrin-benchmark
+
+Two rules ship off: `dead-file` and `injection-sink`. Both were measured against
+real repositories and did not clear the precision bar the spec sets, for a
+reason that is answerable per repository and not in general: `dead-file` needs
+that repository's entry points curated, and `injection-sink` needs its fixtures
+baselined. Turn either on with `rules.<id>.enabled = true`. `swallowed-error`
+was the third until 0.6.0, when the benchmark scored it 92 percent precision
+above the spec's bar of 85; a repository that would rather not have it turns it
+off the same way, with `rules.swallowed-error.enabled = false`.
 `boundary-violation` is on but silent until you write a `[[boundaries]]` entry,
 and `express-route-without-auth` is on but silent until you name an auth
 middleware.
