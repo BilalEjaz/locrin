@@ -7,7 +7,11 @@ use locrin_rules::leftover_commented::LeftoverCommented;
 
 #[test]
 fn flags_line_runs_and_block_comments_that_look_like_code() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "flag"), &rule_on("leftover-commented-code"));
+    let out = run_on(
+        Box::new(LeftoverCommented),
+        &fixture("leftover_commented", "flag"),
+        &rule_on("leftover-commented-code"),
+    );
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2, 8]);
     assert!(out.iter().all(|f| f.severity == Severity::Medium && f.confidence == Confidence::Medium));
@@ -17,13 +21,21 @@ fn flags_line_runs_and_block_comments_that_look_like_code() {
 
 #[test]
 fn ignores_prose_jsdoc_and_license_headers() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "clean"), &rule_on("leftover-commented-code"));
+    let out = run_on(
+        Box::new(LeftoverCommented),
+        &fixture("leftover_commented", "clean"),
+        &rule_on("leftover-commented-code"),
+    );
     assert!(out.is_empty(), "got {:?}", out);
 }
 
 #[test]
 fn two_lines_is_not_a_run() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "edge"), &rule_on("leftover-commented-code"));
+    let out = run_on(
+        Box::new(LeftoverCommented),
+        &fixture("leftover_commented", "edge"),
+        &rule_on("leftover-commented-code"),
+    );
     assert!(out.is_empty());
 }
 
@@ -48,7 +60,11 @@ fn prose_blocks_are_not_commented_out_code() {
 /// looks like code. One prose line does not buy a block its way out.
 #[test]
 fn a_commented_out_block_under_one_sentence_is_still_reported() {
-    let out = run_on(Box::new(LeftoverCommented), &fixture("leftover_commented", "mixed"), &rule_on("leftover-commented-code"));
+    let out = run_on(
+        Box::new(LeftoverCommented),
+        &fixture("leftover_commented", "mixed"),
+        &rule_on("leftover-commented-code"),
+    );
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![2], "{out:?}");
     assert_eq!(out[0].evidence, "The old path summed the rows twice, so it is parked here for now.");
