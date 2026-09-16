@@ -1,0 +1,7 @@
+{
+  "name": "root",
+  "scripts": {
+    "test": "node test/run.mjs && node --test test/other.mjs",
+    "dev": "tsx src/dev.ts"
+  }
+}

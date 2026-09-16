@@ -4,6 +4,21 @@
 
 ### What changes without opting in
 
+`leftover-debug` no longer reports on a JavaScript or TypeScript file that is a
+script. A file is a script when its first line starts with `#!`, or when a
+package.json in the repository runs it directly, meaning a `scripts` value holds
+`node <path>`, `node --<flag> <path>`, `tsx <path>` or `ts-node <path>` naming
+it, resolved against that package.json's own directory. Printing is how a
+standalone script speaks and there is no logger in it to route the line
+through, so every `console.log` in one used to be a false positive. PHP and
+Python files are unchanged.
+
+`leftover-debug` also no longer reports on a JavaScript or TypeScript file
+holding twenty or more flagged `console` calls. A module that logs that much
+through `console` and imports no logger has adopted `console` as its logger, and
+reporting it one line at a time says nothing a reader can act on. A file below
+that count is reported on exactly as before.
+
 `leftover-commented-code` reports a block only when most of it looks like code,
 and a sentence never counts as code however it opens or closes. A statement
 keyword now opens a statement only with the shape of one on the same line, so a

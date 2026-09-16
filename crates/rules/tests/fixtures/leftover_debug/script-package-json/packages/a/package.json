@@ -1,0 +1,6 @@
+{
+  "name": "@x/a",
+  "scripts": {
+    "go": "node tasks/go.js"
+  }
+}

@@ -123,6 +123,53 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
     assert_eq!(out[0].file, "scripts/build.ts");
 }
 
+/// A standalone script says so on its first line, and its `console.log` is how
+/// it speaks rather than a leftover. The exemption is the file's own: the
+/// second file in the fixture has no shebang and keeps its finding.
+#[test]
+fn a_shebang_exempts_that_file_alone() {
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "script-shebang"), &Config::default());
+    assert_eq!(hits(&out), vec![("plain.ts".to_string(), 2)], "{out:?}");
+}
+
+/// The other way a file says it is a script: a package.json runs it directly.
+/// `node test/run.mjs`, `node --test test/other.mjs` and `tsx src/dev.ts` name
+/// three of the fixture's files, and the module `src/app.ts` that nothing runs
+/// keeps its finding.
+///
+/// The path is resolved against the package.json's own directory, not matched
+/// by name: `packages/a/package.json` runs `tasks/go.js`, which exempts
+/// `packages/a/tasks/go.js` and leaves the `tasks/go.js` at the root, which no
+/// package.json names, a finding.
+///
+/// The nested package's directory is `tasks` rather than `scripts` on purpose.
+/// `**/scripts/**` is one of the default `debug_allowed` globs, so a fixture
+/// file under a `scripts` directory is exempt before this rule is asked
+/// anything and would prove nothing about resolution. Anyone renaming it back
+/// is deleting the test.
+#[test]
+fn a_file_a_package_json_runs_with_node_is_a_script() {
+    let out = run_on(
+        Box::new(LeftoverDebug::default()),
+        &fixture("leftover_debug", "script-package-json"),
+        &Config::default(),
+    );
+    assert_eq!(hits(&out), vec![("src/app.ts".to_string(), 2), ("tasks/go.js".to_string(), 1)], "{out:?}");
+}
+
+/// A module holding twenty or more `console` calls and no logger has adopted
+/// `console` as its logger, and reporting every line of it is noise. One below
+/// the threshold is still a file with debug lines left in it.
+#[test]
+fn a_file_that_uses_console_as_its_logger_is_exempt() {
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "console-logger"), &Config::default());
+    let files: Vec<&str> = out.iter().map(|f| f.file.as_str()).collect();
+    assert!(files.iter().all(|f| *f == "nearly.ts"), "the twenty-call file is exempt: {files:?}");
+    assert_eq!(out.len(), 19, "the nineteen-call file keeps every one of them: {out:?}");
+}
+
 /// PHP's debug sinks are ordinary function calls, so the rule matches them by
 /// the called name rather than by a `console` member expression. Every sink the
 /// rule knows sits on its own line in the fixture, and line 11 is the spelling a
