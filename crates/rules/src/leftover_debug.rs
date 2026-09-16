@@ -8,6 +8,29 @@
 //! `globalThis.console.log(...)` are not flagged, because matching them would
 //! cost more false positives than the miss is worth.
 //!
+//! Two kinds of JavaScript or TypeScript file are exempt outright, both of them
+//! from the public benchmark of 0.5.0, where this rule reported on 217
+//! agent-written diffs and scored 24 percent precision.
+//!
+//! A script is exempt. All 16 agreed false positives were `console.log` pass
+//! messages on the main path of a standalone node test script, files such as
+//! `test/gate-matrix-test.mjs` and `spike/test/durable-object.mjs`: printing is
+//! the whole output of a file like that, and there is no logger to route it
+//! through. A file is a script when its first line starts with `#!`, or when a
+//! package.json in the repository runs it directly, meaning a `scripts` value
+//! holds `node <path>`, `node --<flag> <path>`, `tsx <path>` or
+//! `ts-node <path>` whose path, resolved against that package.json's own
+//! directory, is this file. PHP and Python are unaffected: Python's `print(` is
+//! already never a sink, and PHP's sinks are the dump functions, which are
+//! leftovers in a script as much as anywhere else.
+//!
+//! A file that has adopted `console` as its logger is exempt, meaning one
+//! holding `CONSOLE_LOGGER_THRESHOLD` or more flagged `console` calls. Seven
+//! of the disputed findings were status lines in one 3,000 line module of
+//! huizongsong/deepchat that holds 39 `console.log` calls tagged
+//! `[ThreadPresenter]` and imports no logger: console is that module's logger,
+//! and reporting a line of it at a time says nothing a reader can act on.
+//!
 //! PHP: the dump family (`var_dump`, `print_r`, `var_export`, `dd`, `dump`,
 //! `debug_zval_dump`) and `xdebug_break()`. `error_log`, `echo` and `printf`
 //! are how PHP writes output on purpose and are never flagged. `print_r` and
@@ -22,13 +45,17 @@
 //! fail the precision gate on the first repository holding a management
 //! command.
 
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use locrin_core::finding::{Category, Confidence, Finding, Severity};
+use locrin_core::parse::ParsedFile;
+use serde_json::Value;
 use tree_sitter::Node;
 
-use crate::{clean_files, finding, line_text, Language, Rule, RuleContext, Scope, ALL};
+use crate::{clean_files, finding, line_text, Language, Rule, RuleContext, Scope, ALL, JS_FAMILY};
 
 #[derive(Default)]
 pub struct LeftoverDebug {
@@ -42,9 +69,39 @@ pub struct LeftoverDebug {
     /// different config compiles that config's set rather than serving the
     /// first one's.
     allowed: OnceLock<(Vec<String>, GlobSet)>,
+    /// The files each package.json runs with node, read once per directory and
+    /// kept for the rest of the run, beside the root they were read under.
+    ///
+    /// A map behind a lock rather than one set behind a `OnceLock`, because the
+    /// whole set cannot be computed from a context: the file pass hands each
+    /// file a context holding only itself, so `ctx.files` is one file and not
+    /// the tree. What a file does need is small and knowable from its own path,
+    /// since a `scripts` entry names a path relative to its package.json, so
+    /// only the directories above the file can name it. Each of those is read
+    /// at most once per run however many files ask about it, and a run over a
+    /// different root clears what the last one kept.
+    scripts: Mutex<(PathBuf, HashMap<String, HashSet<String>>)>,
 }
 
 const FLAGGED: &[&str] = &["log", "debug", "trace", "dir", "table"];
+
+/// How many flagged `console` calls make a file's console its logger.
+///
+/// Twenty, from the benchmark module described at the top of this file: 39
+/// calls across 3,000 lines with no logger imported. The number is a constant
+/// rather than a config key because the config has no per-rule options today
+/// (`RuleOverride` carries `enabled`, `severity` and `languages` and refuses
+/// anything else), and one exemption does not earn a new config surface.
+const CONSOLE_LOGGER_THRESHOLD: usize = 20;
+
+/// The commands that run a JavaScript or TypeScript file directly. Whatever
+/// follows one of these in a `scripts` value, past any flags, is a path to a
+/// file the project executes.
+const NODE_RUNNERS: &[&str] = &["node", "tsx", "ts-node"];
+
+/// The shell tokens that end a command, so a runner with nothing after it does
+/// not swallow the next command's name as its path.
+const COMMAND_BREAKS: &[&str] = &["&&", "||", ";", "|", "&"];
 
 /// The PHP functions that exist to print a value at a developer and nothing
 /// else. `error_log` is missing on purpose: it writes to the configured log and
@@ -67,6 +124,97 @@ fn allowed_set(globs: &[String]) -> GlobSet {
         }
     }
     b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+}
+
+/// The directories whose package.json is asked about this file: the repository
+/// root and every directory above the file, root first. A `scripts` value names
+/// a path relative to its own package.json, so a package.json beside or below
+/// the file cannot name it and is never read on its account.
+///
+/// One spelling escapes this and is left escaping it: a value that climbs out
+/// of its own package with `..`, as `packages/a` running `node ../../tools/x.mjs`
+/// does. Answering that would mean reading every package.json in the repository
+/// for every file, and the miss costs a finding the rule already reported
+/// before this change rather than a new false positive.
+fn package_dirs(rel: &str) -> Vec<String> {
+    let segments: Vec<&str> = rel.split('/').collect();
+    let mut dirs = vec![String::new()];
+    for i in 1..segments.len() {
+        dirs.push(segments[..i].join("/"));
+    }
+    dirs
+}
+
+/// The paths a `scripts` value runs directly, as written in it. A runner's path
+/// is its first argument that is neither a flag nor the end of the command, so
+/// `node --test test/other.mjs` names the same file `node test/other.mjs` does,
+/// and one value holding two commands names both.
+fn runner_paths(script: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut tokens = script.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if !NODE_RUNNERS.contains(&token) {
+            continue;
+        }
+        for arg in tokens.by_ref() {
+            if COMMAND_BREAKS.contains(&arg) {
+                break;
+            }
+            if arg.starts_with('-') {
+                continue;
+            }
+            out.push(arg);
+            break;
+        }
+    }
+    out
+}
+
+/// A path out of a script, resolved against the directory of the package.json
+/// that wrote it and spelled the way a parsed file's `rel` is: forward slashes,
+/// no `.` or `..` segments, no leading `./`. An absolute path, or one climbing
+/// out of the repository, is nobody's file here and is dropped.
+fn resolve(dir: &str, path: &str) -> Option<String> {
+    let path = path.trim_matches(|c| c == '"' || c == '\'');
+    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') {
+        return None;
+    }
+    let mut parts: Vec<&str> = if dir.is_empty() { Vec::new() } else { dir.split('/').collect() };
+    for segment in path.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Every file the package.json in `dir` runs with node, as repo-relative paths.
+///
+/// Read leniently, the way every other project file this engine reads is: a
+/// directory with no package.json, one that cannot be read, and one that is not
+/// JSON each contribute nothing rather than failing the run. The metadata call
+/// does not follow links, so a `package.json` that is a symlink to somewhere
+/// outside the repository is not read.
+fn script_targets(root: &Path, dir: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let path = if dir.is_empty() { root.join("package.json") } else { root.join(dir).join("package.json") };
+    if !std::fs::symlink_metadata(&path).map(|m| m.is_file()).unwrap_or(false) {
+        return out;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else { return out };
+    // Editors on Windows write a byte order mark into JSON and no parser takes
+    // it, the same reason `project::read_project_file` strips one.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let Ok(package) = serde_json::from_str::<Value>(text) else { return out };
+    let Some(scripts) = package.get("scripts").and_then(Value::as_object) else { return out };
+    for script in scripts.values().filter_map(Value::as_str) {
+        out.extend(runner_paths(script).into_iter().filter_map(|p| resolve(dir, p)));
+    }
+    out
 }
 
 fn is_debug_call(node: Node, src: &str) -> bool {
@@ -196,10 +344,19 @@ fn is_py_debug_import(node: Node, src: &str) -> bool {
     }
 }
 
-fn walk(node: Node, src: &str, language: Language, hits: &mut Vec<u32>) {
+/// Collects the lines to report, and counts the `console` calls among them as
+/// it goes: the console count is what decides whether the file has adopted
+/// console as its logger, and counting it here is one walk of the tree rather
+/// than a second one for the files that would have been reported on.
+fn walk(node: Node, src: &str, language: Language, hits: &mut Vec<u32>, console_calls: &mut usize) {
     let hit = match language {
         Language::TypeScript | Language::Tsx | Language::JavaScript => {
-            node.kind() == "debugger_statement" || is_debug_call(node, src)
+            if is_debug_call(node, src) {
+                *console_calls += 1;
+                true
+            } else {
+                node.kind() == "debugger_statement"
+            }
         }
         Language::Php => is_php_sink(node, src),
         Language::Python => is_py_sink(node, src) || is_py_debug_import(node, src),
@@ -210,7 +367,30 @@ fn walk(node: Node, src: &str, language: Language, hits: &mut Vec<u32>) {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        walk(child, src, language, hits);
+        walk(child, src, language, hits, console_calls);
+    }
+}
+
+impl LeftoverDebug {
+    /// Whether this file is a script: one that says so on its first line, or
+    /// one a package.json above it runs directly. Asked only of JavaScript and
+    /// TypeScript files, because a shebang on a PHP or Python file says how to
+    /// run it and says nothing about a dump call left inside it.
+    fn is_script(&self, root: &Path, file: &ParsedFile) -> bool {
+        if !JS_FAMILY.contains(&file.language) {
+            return false;
+        }
+        if file.source.strip_prefix('\u{feff}').unwrap_or(&file.source).starts_with("#!") {
+            return true;
+        }
+        let mut memo = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
+        if memo.0 != root {
+            memo.0 = root.to_path_buf();
+            memo.1.clear();
+        }
+        package_dirs(&file.rel)
+            .into_iter()
+            .any(|dir| memo.1.entry(dir.clone()).or_insert_with(|| script_targets(root, &dir)).contains(&file.rel))
     }
 }
 
@@ -255,8 +435,18 @@ impl Rule for LeftoverDebug {
             if allowed.is_match(&file.rel) {
                 continue;
             }
+            if self.is_script(ctx.root, file) {
+                continue;
+            }
             let mut hits = Vec::new();
-            walk(file.tree.root_node(), &file.source, file.language, &mut hits);
+            let mut console_calls = 0;
+            walk(file.tree.root_node(), &file.source, file.language, &mut hits, &mut console_calls);
+            // A file whose console is its logger reports nothing at all, rather
+            // than the lines above the threshold: what is left in it is one
+            // decision about the module and not a debug line per finding.
+            if console_calls >= CONSOLE_LOGGER_THRESHOLD {
+                continue;
+            }
             hits.sort_unstable();
             hits.dedup();
             for line in hits {
