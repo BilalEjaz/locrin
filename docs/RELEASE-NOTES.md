@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### What changes without opting in
+
+`leftover-commented-code` reports a block only when most of it looks like code,
+and a sentence never counts as code however it opens or closes. A statement
+keyword now opens a statement only with the shape of one on the same line, so a
+paragraph beginning `let the table carry the advice` or `$config is the host`
+is prose rather than a disabled assignment. A commented-out function under one
+line of explanation is still reported. Prose blocks that 0.5.0 reported
+disappear; no block that is genuinely code stops being reported.
+
 ## 0.5.0
 
 0.5.0 is the first public release. The repository is open under MIT, and the
