@@ -1471,13 +1471,19 @@ fn files_of_rule(v: &serde_json::Value, rule: &str) -> Vec<String> {
 
 /// A per-language default is the engine's own measurement over a corpus, and
 /// `[rules.<id>] languages` is how a repository that has measured it for itself
-/// overrules it. `leftover-commented-code` ships off on Python; naming Python
-/// among the rule's languages turns that one pair on, and the Python fixture
-/// holds a commented-out block for it to find.
+/// overrules it. `leftover-commented-code` ships off on Python even for a
+/// repository that turns the rule on (it ships off everywhere from 0.6.0, so
+/// the configs here enable it); naming Python among the rule's languages turns
+/// that one pair on, and the Python fixture holds a commented-out block for it
+/// to find.
 #[test]
 fn a_rule_language_override_turns_a_per_language_default_on() {
     let dir = copy_named_fixture("multilang");
-    std::fs::write(dir.path().join("locrin.toml"), "[languages]\npython = true\n").unwrap();
+    std::fs::write(
+        dir.path().join("locrin.toml"),
+        "[languages]\npython = true\n\n[rules.leftover-commented-code]\nenabled = true\n",
+    )
+    .unwrap();
     let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let commented = files_of_rule(&v, "leftover-commented-code");
@@ -1486,7 +1492,7 @@ fn a_rule_language_override_turns_a_per_language_default_on() {
     let dir = copy_named_fixture("multilang");
     std::fs::write(
         dir.path().join("locrin.toml"),
-        "[languages]\npython = true\n\n[rules.leftover-commented-code]\n\
+        "[languages]\npython = true\n\n[rules.leftover-commented-code]\nenabled = true\n\
          languages = [\"typescript\", \"tsx\", \"javascript\", \"python\"]\n",
     )
     .unwrap();

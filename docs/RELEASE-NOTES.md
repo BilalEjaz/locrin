@@ -2,11 +2,21 @@
 
 ## Unreleased
 
-### Version
-
-0.6.0.
+## 0.6.0
 
 ### What changes without opting in
+
+`leftover-commented-code` is off. It has yet to produce a true finding on any
+measured code: 0 of 5 on the public benchmark, every one a prose comment block,
+and on a large application 0 of 99 under 0.5.0 and still 0 of 8 after this
+release's prose veto. A repository that wants it as a review aid writes
+
+```toml
+[rules.leftover-commented-code]
+enabled = true
+```
+
+and it comes back on by default when a measurement clears the spec's bar.
 
 `swallowed-error` is on. It shipped off on an older measurement over five
 private repositories; the public benchmark
