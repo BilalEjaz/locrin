@@ -1373,6 +1373,23 @@ mod tests {
         );
     }
 
+    /// The three rules whose default is a measurement and not a preference, in
+    /// one test so a flip has a single place to argue with. The public
+    /// benchmark (github.com/BilalEjaz/locrin-benchmark, 217 agent-written
+    /// diffs, two-model labels) scored `swallowed-error` at 92 percent
+    /// precision, above the spec 10.2 gate of 85, so it ships on from 0.6.0;
+    /// `dead-file` (0 of 16 true) and `injection-sink` (0 of 17) stay off. Each
+    /// rule's own doc carries the reason.
+    #[test]
+    fn the_measured_defaults_are_what_the_benchmark_scored() {
+        let default_of = |id: &str| {
+            all_rules().into_iter().find(|r| r.id() == id).expect("rule is in the registry").enabled_by_default()
+        };
+        assert!(default_of("swallowed-error"), "92 percent precision clears the gate");
+        assert!(!default_of("dead-file"), "0 of 16 true");
+        assert!(!default_of("injection-sink"), "0 of 17 true");
+    }
+
     /// A locked rule, the way `secret-exposed` is locked (spec 4.3). Nothing but
     /// `locked` separates it from `Always`, so the test measures the locking and
     /// nothing else.

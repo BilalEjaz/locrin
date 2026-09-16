@@ -308,31 +308,32 @@ impl Rule for SwallowedError {
         Confidence::High
     }
 
-    /// Off by default after three measurements on the five corpus repositories
-    /// (see
-    /// `docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
-    /// 100 findings with 0 of 20 sampled worth acting on, then 11 with 0 of 11,
-    /// then 5 with 0 of 5. Two of the three forms now find nothing at all on 2674
-    /// indexed files: no catch there is empty of everything, and no caller uses a
-    /// log-only function's result in a way that reads a value back. What is left
-    /// is form 3, and all five are the same React effect: an `async function
-    /// load()` whose whole body is one try/catch, called as a statement, so the
-    /// promise nobody holds is a promise that cannot reject. Seeing that needs the
-    /// callee's body read as well as its call site, which this rule does not do
-    /// and which is not a contained fix the way the first two were. Nothing the
-    /// rule has said on 2674 real files was worth acting on, so it stays opt-in.
-    /// A repository that wants the rule as a review aid
-    /// turns it on with
+    /// On by default from 0.6.0, on the public benchmark of 2026-09-16
+    /// (github.com/BilalEjaz/locrin-benchmark): 217 agent-written diffs from
+    /// public repositories, every finding labelled by two models, and this rule
+    /// scored 92 percent precision and 100 percent recall (11 true, 1 false, 2
+    /// disputed and excluded). The spec 10.2 gate is 85 percent, so the rule
+    /// clears it on the corpus the gate is about.
+    ///
+    /// It shipped off until then on an older measurement: three passes over five
+    /// private repositories found nothing worth acting on
+    /// (`docs/superpowers/plans/2026-09-09-error-test-and-security-precision.md`).
+    /// That was one body of code under an earlier definition of the three forms,
+    /// and the benchmark is the wider and the newer of the two, so it decides.
+    /// The blind spots in the module doc are unchanged: what the rule cannot see
+    /// it still does not guess at.
+    ///
+    /// A repository that does not want the rule turns it off with
     ///
     /// ```toml
     /// [rules.swallowed-error]
-    /// enabled = true
+    /// enabled = false
     /// ```
     ///
-    /// and baselines what it means to keep, or marks those catches
-    /// `locrin:allow` one at a time.
+    /// and one that wants it for everything but a few catches marks those
+    /// `locrin:allow` one at a time, or baselines what it means to keep.
     fn enabled_by_default(&self) -> bool {
-        false
+        true
     }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
