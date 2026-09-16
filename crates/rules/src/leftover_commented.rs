@@ -3,10 +3,22 @@
 //! The heuristic is deliberately asymmetric. A comma or a closing parenthesis
 //! at the end of a line is common in ordinary prose, so those count only as
 //! supporting signals: a run is reported only when at least one line carries a
-//! strong signal (a `;`, `{` or `}` ending, or a statement keyword opening) and
-//! at least two lines look like code at all. Trailing comments are never part
-//! of a run, because a column of unit annotations beside real code is not a
-//! commented-out block.
+//! strong signal (a `;`, `{` or `}` ending, or a statement keyword opening with
+//! code on the same line) and at least half of the run's lines look like code
+//! at all. Trailing comments are never part of a run, because a column of unit
+//! annotations beside real code is not a commented-out block.
+//!
+//! Three tests keep prose out, each of them paid for by a false positive on the
+//! public benchmark. A statement keyword is an ordinary word before it is a
+//! keyword, so it opens a statement only with the shape of one on its line: an
+//! assignment, a call, or a code ending. `let x = 1` is code and `let the table
+//! carry the advice` is a sentence about one. A line that ends a sentence, a
+//! full stop or a question or exclamation mark behind four or more words, is
+//! prose whatever it opens or closes with; that is what a paragraph ending
+//! `(NeedsFocus).` or `... which is this connection's own host.` is. And a
+//! block is code only when most of it is: one sentence over a disabled
+//! function is still a disabled function, while one `$` line inside five lines
+//! of French commentary is a sentence that happens to name a variable.
 //!
 //! The run detection is the same in every language; only the vocabulary the run
 //! is tested against changes, because what a statement looks like is what the
@@ -129,40 +141,86 @@ fn vocabulary(language: Language) -> &'static Vocabulary {
 }
 
 /// Whether a trimmed line opens with something that can only open a statement.
-/// One test for both predicates: an opening that is too weak to qualify a run
-/// is too weak to support one either, or a page of prose about a `for` loop
-/// would be two supporting signals away from a finding.
+/// The opening alone is never the verdict: [`opens_a_statement`] is what both
+/// predicates ask, and it is one test for both of them, because an opening too
+/// weak to qualify a run is too weak to support one either, or a page of prose
+/// about a `for` loop would be two supporting signals away from a finding.
 fn starts_a_statement(trimmed: &str, v: &Vocabulary) -> bool {
-    v.starts.iter().any(|s| trimmed.starts_with(s))
-        || v.qualified_starts.iter().any(|(prefix, needs)| trimmed.starts_with(prefix) && needs.met(trimmed))
+    v.starts.iter().any(|s| trimmed.starts_with(s)) || starts_a_qualified_statement(trimmed, v)
 }
 
-/// A line carrying at least a supporting signal of being code.
+/// The half of [`starts_a_statement`] that already reads the rest of the line.
+/// A qualified opening carries the shape of a statement in what qualifies it
+/// (the colon that closes a Python block header, the ` import ` behind
+/// `from `), so [`opens_a_statement`] asks nothing further of it.
+fn starts_a_qualified_statement(trimmed: &str, v: &Vocabulary) -> bool {
+    v.qualified_starts.iter().any(|(prefix, needs)| trimmed.starts_with(prefix) && needs.met(trimmed))
+}
+
+/// An opening plus the shape of a statement on the same line.
+///
+/// Every bare opening in the vocabulary is also an ordinary word or sigil:
+/// `let SUGGESTS carry the advice`, `return to the records first`, `$config is
+/// this connection's own host`. The prefix alone therefore says nothing, and
+/// the line has to carry code as well: an assignment, a call, a PHP arrow, or
+/// one of the endings a statement closes with.
+fn opens_a_statement(trimmed: &str, v: &Vocabulary) -> bool {
+    starts_a_statement(trimmed, v) && (starts_a_qualified_statement(trimmed, v) || has_code_shape(trimmed, v))
+}
+
+/// Code somewhere on the line rather than at its start: an assignment, a call,
+/// a PHP member access, or an ending only a statement produces. `==` is not an
+/// assignment, but every other `=` shape (`=`, `+=`, `=>`) is close enough to
+/// code that prose does not write it.
+fn has_code_shape(trimmed: &str, v: &Vocabulary) -> bool {
+    trimmed.contains('(')
+        || trimmed.contains("->")
+        || trimmed.ends_with(v.endings)
+        || trimmed
+            .match_indices('=')
+            .any(|(i, _)| trimmed.as_bytes().get(i + 1) != Some(&b'=') && (i == 0 || trimmed.as_bytes()[i - 1] != b'='))
+}
+
+/// A finished sentence: four or more words closing on a full stop, a question
+/// mark or an exclamation mark, with a trailing quote or bracket stripped
+/// first so `(NeedsFocus).` and `carry the advice (it already holds it).` read
+/// as the sentence endings they are. The word count is what keeps `print("done
+/// .")` and other one-token lines out of it.
+fn is_sentence(trimmed: &str) -> bool {
+    let t = trimmed.trim_end_matches([')', ']', '"', '\'', '`']);
+    t.ends_with(['.', '?', '!']) && trimmed.split_whitespace().count() >= 4
+}
+
+/// A line carrying at least a supporting signal of being code, and not a
+/// sentence: a sentence is prose whatever it opens or closes with.
 fn looks_like_code(line: &str, language: Language) -> bool {
     let v = vocabulary(language);
     let t = line.trim();
-    if t.is_empty() {
+    if t.is_empty() || is_sentence(t) {
         return false;
     }
-    t.ends_with(v.endings) || starts_a_statement(t, v)
+    t.ends_with(v.endings) || opens_a_statement(t, v)
 }
 
 /// A signal prose rarely produces: a statement terminator, a brace, a colon
-/// opening a block, or a keyword that can only open a statement.
+/// opening a block, or a keyword opening a statement it goes on to write.
 fn is_strong_code(line: &str, language: Language) -> bool {
     let v = vocabulary(language);
     let t = line.trim();
-    if t.is_empty() {
+    if t.is_empty() || is_sentence(t) {
         return false;
     }
-    t.ends_with(v.strong_endings) || starts_a_statement(t, v)
+    t.ends_with(v.strong_endings) || opens_a_statement(t, v)
 }
 
-/// The qualifying test for a run: one strong signal at minimum, and two lines
-/// that look like code in total.
+/// The qualifying test for a run: one strong signal at minimum, and most of the
+/// run looking like code. "Most" is half, so a single sentence explaining a
+/// disabled function leaves the block a finding, while a block that is mostly
+/// sentences is prose however much of a statement one of its lines opens with.
 fn is_commented_code(lines: &[&str], language: Language) -> bool {
-    lines.iter().any(|l| is_strong_code(l, language))
-        && lines.iter().filter(|l| looks_like_code(l, language)).count() >= 2
+    let body: Vec<&&str> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    body.iter().any(|l| is_strong_code(l, language))
+        && body.iter().filter(|l| looks_like_code(l, language)).count() * 2 >= body.len()
 }
 
 fn is_license_or_doc(lines: &[&str]) -> bool {
