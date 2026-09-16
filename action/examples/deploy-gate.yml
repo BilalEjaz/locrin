@@ -13,9 +13,9 @@ jobs:
           fetch-depth: 0
       - id: last
         run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD | head -n 1)" >> "$GITHUB_OUTPUT"
-      - uses: BilalEjaz/locrin/action@v0.5.0
+      - uses: BilalEjaz/locrin/action@v0.6.0
         with:
-          version: v0.5.0
+          version: v0.6.0
           since: ${{ steps.last.outputs.tag }}
           comment: "false"
       # deploy steps follow; they never run when the gate blocks

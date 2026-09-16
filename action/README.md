@@ -7,9 +7,9 @@ uploads SARIF to code scanning, and fails the job on a BLOCK verdict.
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
-- uses: BilalEjaz/locrin/action@v0.5.0
+- uses: BilalEjaz/locrin/action@v0.6.0
   with:
-    version: v0.5.0
+    version: v0.6.0
 ```
 
 The default pull-request path (`--base`) diffs against the merge base, so the
@@ -20,7 +20,7 @@ shallow checkout has none and the check exits 2.
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | Release tag (`v0.5.0`), `latest`, or `local` for a `locrin` already on PATH. `latest` follows the newest release, so pin it to the action ref as the examples do |
+| `version` | `latest` | Release tag (`v0.6.0`), `latest`, or `local` for a `locrin` already on PATH. `latest` follows the newest release, so pin it to the action ref as the examples do |
 | `path` | `.` | Repository-relative directory to check |
 | `base` | `${{ github.event.pull_request.base.sha }}` | Base ref for the pull-request view (files that differ from the merge base). Set it to `""` to check every file under `path` |
 | `since` | `""` | Ref for the deployment gate (files changed by `REF..HEAD`); overrides `base` |

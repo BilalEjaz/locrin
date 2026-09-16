@@ -2,7 +2,32 @@
 
 ## Unreleased
 
+### Version
+
+0.6.0.
+
 ### What changes without opting in
+
+`swallowed-error` is on. It shipped off on an older measurement over five
+private repositories; the public benchmark
+(https://github.com/BilalEjaz/locrin-benchmark, 217 agent-written diffs from
+public repositories, every finding labelled by two models) scored it 92 percent
+precision and 100 percent recall on 2026-09-16, above the spec's bar of 85, so
+it now runs where the config says nothing about it. A repository that would
+rather not have it writes
+
+```toml
+[rules.swallowed-error]
+enabled = false
+```
+
+or marks the individual catches it means to keep with `locrin:allow`.
+`dead-file` and `injection-sink` scored nothing true on the same corpus and stay
+off.
+
+The findings cache is keyed by the version, so the first run after the upgrade
+rebuilds it and pays for one cold pass rather than serving rows written by
+0.5.0.
 
 `leftover-debug` no longer reports on a JavaScript or TypeScript file that is a
 script. A file is a script when its first line starts with `#!`, or when a
@@ -26,6 +51,7 @@ paragraph beginning `let the table carry the advice` or `$config is the host`
 is prose rather than a disabled assignment. A commented-out function under one
 line of explanation is still reported. Prose blocks that 0.5.0 reported
 disappear; no block that is genuinely code stops being reported.
+
 
 ## 0.5.0
 

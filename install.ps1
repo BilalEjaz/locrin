@@ -1,6 +1,6 @@
 # Installs the locrin binary on Windows from a GitHub release.
 #   irm https://raw.githubusercontent.com/BilalEjaz/locrin/main/install.ps1 | iex
-#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.5.0
+#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.6.0
 param(
   [string]$Version = "latest",
   [string]$InstallDir = "$env:LOCALAPPDATA\locrin\bin",
