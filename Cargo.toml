@@ -4,7 +4,7 @@ members = ["crates/core", "crates/rules", "crates/reporters", "crates/mcp", "cra
 
 [workspace.package]
 edition = "2021"
-version = "0.5.0"
+version = "0.6.0"
 license = "MIT"
 repository = "https://github.com/BilalEjaz/locrin"
 homepage = "https://locrin.com"

@@ -12,6 +12,6 @@ name = "locrin_reporters"
 path = "src/lib.rs"
 
 [dependencies]
-locrin-core = { path = "../core", version = "0.5.0" }
+locrin-core = { path = "../core", version = "0.6.0" }
 serde.workspace = true
 serde_json.workspace = true

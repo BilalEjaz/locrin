@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the locrin binary for this machine from a GitHub release.
 #   curl -fsSL https://raw.githubusercontent.com/BilalEjaz/locrin/main/install.sh | bash
-#   ... | bash -s v0.5.0            pin a version (default: latest)
+#   ... | bash -s v0.6.0            pin a version (default: latest)
 # LOCRIN_INSTALL_DIR  where the binary goes (default: ~/.local/bin)
 # LOCRIN_BASE_URL     asset base (default: the GitHub release download URL)
 set -euo pipefail

@@ -4,7 +4,7 @@ labels: [bug]
 body:
   - type: input
     id: version
-    attributes: { label: "Locrin version and platform", placeholder: "locrin 0.5.0, macOS arm64" }
+    attributes: { label: "Locrin version and platform", placeholder: "locrin 0.6.0, macOS arm64" }
     validations: { required: true }
   - type: textarea
     id: steps
