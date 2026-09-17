@@ -24,6 +24,18 @@
 //! already never a sink, and PHP's sinks are the dump functions, which are
 //! leftovers in a script as much as anywhere else.
 //!
+//! A test file is a script in the same sense. On the 0.6.0 benchmark every
+//! remaining false positive of this rule, four of the seven findings, was a
+//! pass or fail line at the end of `test/scope-prop-test.mjs`: no shebang, and
+//! run by a `test/run.mjs` that finds its siblings with `readdirSync` and a
+//! dynamic import, so neither of the signals above can see it. What names it
+//! is the file itself. A file is a test when its name ends in `.test`, `.spec`,
+//! `-test` or `_test` before the extension, or when a directory on its path is
+//! exactly `test`, `tests`, `__tests__` or `spec`. The three true findings on
+//! that benchmark were in API routes and a component, none of them a test.
+//! The match is exact: `latest.ts`, `contest.ts` and `src/testing/` are not
+//! tests and keep their findings.
+//!
 //! A file that has adopted `console` as its logger is exempt, meaning one
 //! holding `CONSOLE_LOGGER_THRESHOLD` or more flagged `console` calls. Seven
 //! of the disputed findings were status lines in one 3,000 line module of
@@ -124,6 +136,30 @@ fn allowed_set(globs: &[String]) -> GlobSet {
         }
     }
     b.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+}
+
+/// The directory names that hold tests by convention, matched as a whole path
+/// segment: `src/testing/` is not one of them.
+const TEST_DIRS: &[&str] = &["test", "tests", "__tests__", "spec"];
+
+/// The endings that mark a file as a test, checked against its name with the
+/// last extension removed, so `foo.test.ts` is read as `foo.test` and
+/// `scope-prop-test.mjs` as `scope-prop-test`. Each ending carries its own
+/// separator, which is what keeps `latest.ts` a module.
+const TEST_SUFFIXES: &[&str] = &[".test", ".spec", "-test", "_test"];
+
+/// Whether a repo-relative path names a test file: by a directory on its path
+/// or by its own name. Pure on the path, so it needs no file read and no memo.
+fn is_test_file(rel: &str) -> bool {
+    let (dirs, name) = match rel.rsplit_once('/') {
+        Some((dirs, name)) => (dirs, name),
+        None => ("", rel),
+    };
+    if dirs.split('/').any(|d| TEST_DIRS.contains(&d)) {
+        return true;
+    }
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+    TEST_SUFFIXES.iter().any(|s| stem.ends_with(s))
 }
 
 /// The directories whose package.json is asked about this file: the repository
@@ -372,15 +408,20 @@ fn walk(node: Node, src: &str, language: Language, hits: &mut Vec<u32>, console_
 }
 
 impl LeftoverDebug {
-    /// Whether this file is a script: one that says so on its first line, or
-    /// one a package.json above it runs directly. Asked only of JavaScript and
-    /// TypeScript files, because a shebang on a PHP or Python file says how to
-    /// run it and says nothing about a dump call left inside it.
+    /// Whether this file is a script: one that says so on its first line, one
+    /// that is a test by its path, or one a package.json above it runs
+    /// directly. Asked only of JavaScript and TypeScript files, because a
+    /// shebang on a PHP or Python file says how to run it and says nothing
+    /// about a dump call left inside it, and a `breakpoint()` in a Python test
+    /// is as much a leftover as one anywhere else.
     fn is_script(&self, root: &Path, file: &ParsedFile) -> bool {
         if !JS_FAMILY.contains(&file.language) {
             return false;
         }
         if file.source.strip_prefix('\u{feff}').unwrap_or(&file.source).starts_with("#!") {
+            return true;
+        }
+        if is_test_file(&file.rel) {
             return true;
         }
         let mut memo = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
