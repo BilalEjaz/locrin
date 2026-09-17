@@ -2,7 +2,7 @@
 "use strict";
 // Stamps the version into every package.json under npm/ and copies binaries into
 // the platform packages. Usage:
-//   node npm/scripts/stage.js --version 0.6.0 --binary <path> --platform linux-x64 [--binary ... --platform ...]
+//   node npm/scripts/stage.js --version 0.6.1 --binary <path> --platform linux-x64 [--binary ... --platform ...]
 const fs = require("node:fs");
 const path = require("node:path");
 

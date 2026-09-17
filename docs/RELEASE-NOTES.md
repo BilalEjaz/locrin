@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.1
+
 ### What changes without opting in
 
 `leftover-debug` no longer reports on a JavaScript or TypeScript test file. A

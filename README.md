@@ -251,9 +251,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: BilalEjaz/locrin/action@v0.6.0
+      - uses: BilalEjaz/locrin/action@v0.6.1
         with:
-          version: v0.6.0
+          version: v0.6.1
 ```
 
 The action downloads the release binary for the runner, verifies it against the
@@ -297,7 +297,7 @@ Tag each deploy, and the ref is the last tag:
 ```yaml
 - id: last
   run: echo "tag=$(git describe --tags --match 'deploy-*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD | head -n 1)" >> "$GITHUB_OUTPUT"
-- uses: BilalEjaz/locrin/action@v0.6.0
+- uses: BilalEjaz/locrin/action@v0.6.1
   with:
     since: ${{ steps.last.outputs.tag }}
     comment: "false"
