@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### What changes without opting in
+
+`leftover-debug` no longer reports on a JavaScript or TypeScript test file. A
+file is a test when its name ends in `.test`, `.spec`, `-test` or `_test`
+before the extension, or when a directory on its path is exactly `test`,
+`tests`, `__tests__` or `spec`. A test's `console.log` is its report, the pass
+and fail lines a runner prints, and there is no logger in it to route them
+through: on the public benchmark every remaining false positive of this rule,
+four of its seven findings, was such a line at the end of
+`test/scope-prop-test.mjs`, a file with no shebang that a runner finds with
+`readdirSync` rather than a package.json naming it. The three true findings
+were in API routes and a component and are still reported. The match is
+exact, so `latest.ts`, `contest.ts` and a `src/testing/` directory are not
+tests. A `debugger` statement in a test file is exempt with the rest of it;
+PHP and Python test files are unchanged, because a `breakpoint()` left in one
+is a leftover wherever it sits.
+
 ## 0.6.0
 
 ### What changes without opting in

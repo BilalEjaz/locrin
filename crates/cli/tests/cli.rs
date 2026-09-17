@@ -963,17 +963,19 @@ const ACTIVE_TEST: &str =
     "describe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
 const SKIPPED_TEST: &str =
     "describe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
-/// Still skipped, edited again, and now carrying a `console.log`. The debug call
-/// is the positive control for every leg that asserts no newly-skipped finding:
+/// Still skipped, edited again, and now carrying a `TODO` marker. The marker is
+/// the positive control for every leg that asserts no newly-skipped finding:
 /// "no finding" is also what an empty scope produces, so a leg that only asserts
 /// the absence would pass if the file had silently dropped out of the run. The
-/// `leftover-debug` finding proves the file was in scope and the rule stayed
-/// quiet on purpose.
-const SKIPPED_TEST_EDITED: &str = "// still skipped, and now edited again\nconsole.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
-/// The same two versions carrying the `console.log` from the start, for a leg
+/// `leftover-agent-marker` finding proves the file was in scope and the rule
+/// stayed quiet on purpose. A marker rather than a `console.log` because the
+/// file is a test, and `leftover-debug` exempts a test file outright.
+const SKIPPED_TEST_EDITED: &str = "// still skipped, and now edited again\n// TODO: noise\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+/// The same two versions carrying the marker from the start, for a leg
 /// whose every run needs the positive control rather than only its last one.
-const ACTIVE_TEST_WITH_DEBUG: &str = "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
-const SKIPPED_TEST_WITH_DEBUG: &str = "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const ACTIVE_TEST_WITH_MARKER: &str =
+    "// TODO: noise\ndescribe(\"rows\", () => {\n  it(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+const SKIPPED_TEST_WITH_MARKER: &str = "// TODO: noise\ndescribe(\"rows\", () => {\n  it.skip(\"renders a row\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
 
 /// Every `test-newly-skipped` finding in a `--json` payload, as (file, evidence).
 fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
@@ -986,10 +988,10 @@ fn newly_skipped(v: &serde_json::Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Whether the payload reports the planted `console.log` in `rel`. See
+/// Whether the payload reports the planted marker in `rel`. See
 /// [`SKIPPED_TEST_EDITED`].
-fn debug_reported(v: &serde_json::Value, rel: &str) -> bool {
-    v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "leftover-debug" && f["file"] == rel)
+fn marker_reported(v: &serde_json::Value, rel: &str) -> bool {
+    v["findings"].as_array().unwrap().iter().any(|f| f["rule"] == "leftover-agent-marker" && f["file"] == rel)
 }
 
 /// The index is the source of "previous" for an ordinary run: what it remembered
@@ -1020,7 +1022,7 @@ fn changed_reports_a_test_this_edit_skipped_and_not_one_the_index_already_knew()
     std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
     let out = locrin(dir.path()).args(["check", "--changed", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
+    assert!(marker_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
     assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
 }
 
@@ -1035,7 +1037,7 @@ fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
     let test_file = dir.path().join("src/a.test.ts");
     std::fs::write(
         &test_file,
-        "console.log(\"noise\");\ndescribe(\"rows\", () => {\n  it.skip(\"legacy\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
+        "// TODO: noise\ndescribe(\"rows\", () => {\n  it.skip(\"legacy\", () => {\n    expect(1).toBe(1);\n  });\n});\n",
     )
     .unwrap();
     // The whole-repository run that records the skip. It reports it once (the
@@ -1047,10 +1049,10 @@ fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
     for run in 1..=2 {
         let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        // The planted `console.log` is the positive control: "no newly-skipped
+        // The planted marker is the positive control: "no newly-skipped
         // finding" is also what an empty scope produces, so without it this leg
         // would pass if the named path had never reached the file at all.
-        assert!(debug_reported(&v, "src/a.test.ts"), "named-path run {run} did not reach the file: {v}");
+        assert!(marker_reported(&v, "src/a.test.ts"), "named-path run {run} did not reach the file: {v}");
         assert!(newly_skipped(&v).is_empty(), "named-path run {run} reported a skip the index knew: {v}");
     }
 }
@@ -1069,12 +1071,12 @@ fn a_named_path_does_not_report_a_skip_the_index_already_knew() {
 fn a_newly_skipped_finding_is_served_from_the_cache_until_the_file_is_parsed_again() {
     let dir = copy_fixture();
     let test_file = dir.path().join("src/a.test.ts");
-    std::fs::write(&test_file, ACTIVE_TEST_WITH_DEBUG).unwrap();
+    std::fs::write(&test_file, ACTIVE_TEST_WITH_MARKER).unwrap();
     // The run that makes the active version the "previous" the next one compares
     // against.
     locrin(dir.path()).arg("check").output().unwrap();
 
-    std::fs::write(&test_file, SKIPPED_TEST_WITH_DEBUG).unwrap();
+    std::fs::write(&test_file, SKIPPED_TEST_WITH_MARKER).unwrap();
     let out = locrin(dir.path()).arg("check").args(["--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
@@ -1087,14 +1089,14 @@ fn a_newly_skipped_finding_is_served_from_the_cache_until_the_file_is_parsed_aga
     // now, so it is no longer new and the rows this run caches say so.
     let out = locrin(dir.path()).args(["check", "src/a.test.ts", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(debug_reported(&v, "src/a.test.ts"), "the named path has to reach the file: {v}");
+    assert!(marker_reported(&v, "src/a.test.ts"), "the named path has to reach the file: {v}");
     assert!(newly_skipped(&v).is_empty(), "a skip the index already knew is not new: {v}");
 
     // And the whole-repository run after it serves those rows rather than the
     // ones the reporting run wrote, so the finding does not come back.
     let out = locrin(dir.path()).arg("check").args(["--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(debug_reported(&v, "src/a.test.ts"), "the file has to be answered for: {v}");
+    assert!(marker_reported(&v, "src/a.test.ts"), "the file has to be answered for: {v}");
     assert!(newly_skipped(&v).is_empty(), "the finding outlived the parse that retired it: {v}");
 }
 
@@ -1135,7 +1137,7 @@ fn base_reports_a_test_skipped_since_the_base_commit_and_not_one_the_base_alread
     std::fs::write(&test_file, SKIPPED_TEST_EDITED).unwrap();
     let out = locrin(dir.path()).args(["check", "--base", "HEAD", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(debug_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
+    assert!(marker_reported(&v, "src/a.test.ts"), "the leg has to prove the file was in scope: {v}");
     assert!(newly_skipped(&v).is_empty(), "the base commit already skipped it: {v}");
 }
 

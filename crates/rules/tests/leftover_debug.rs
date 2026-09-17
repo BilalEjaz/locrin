@@ -134,9 +134,11 @@ fn a_shebang_exempts_that_file_alone() {
 }
 
 /// The other way a file says it is a script: a package.json runs it directly.
-/// `node test/run.mjs`, `node --test test/other.mjs` and `tsx src/dev.ts` name
-/// three of the fixture's files, and the module `src/app.ts` that nothing runs
-/// keeps its finding.
+/// `node tools/run.mjs`, `node --test tools/other.mjs` and `tsx src/dev.ts`
+/// name three of the fixture's files, and the module `src/app.ts` that nothing
+/// runs keeps its finding. The runners live under `tools` rather than `test`
+/// because a `test` directory is exempt on its own account, and a file there
+/// would prove nothing about the package.json.
 ///
 /// The path is resolved against the package.json's own directory, not matched
 /// by name: `packages/a/package.json` runs `tasks/go.js`, which exempts
@@ -156,6 +158,31 @@ fn a_file_a_package_json_runs_with_node_is_a_script() {
         &Config::default(),
     );
     assert_eq!(hits(&out), vec![("src/app.ts".to_string(), 2), ("tasks/go.js".to_string(), 1)], "{out:?}");
+}
+
+/// The third way: the file is a test. A test's `console.log` is its report,
+/// the pass and fail lines a runner prints and nothing else, and there is no
+/// logger in it to route them through. A file is a test when its name ends in
+/// `.test`, `.spec`, `-test` or `_test` before the extension, or when a
+/// directory on its path is exactly `test`, `tests`, `__tests__` or `spec`.
+///
+/// The match is exact so that a name merely containing the word stays a
+/// finding: `latest.ts` ends in the letters `test` with no separator,
+/// `contest.ts` holds them, and `src/testing/` is a directory that is not
+/// `test`. All three keep their debug lines.
+#[test]
+fn a_test_file_is_a_script() {
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "script-test-file"), &Config::default());
+    assert_eq!(
+        hits(&out),
+        vec![
+            ("src/contest.ts".to_string(), 2),
+            ("src/latest.ts".to_string(), 2),
+            ("src/testing/util.ts".to_string(), 2),
+        ],
+        "{out:?}"
+    );
 }
 
 /// A module holding twenty or more `console` calls and no logger has adopted
