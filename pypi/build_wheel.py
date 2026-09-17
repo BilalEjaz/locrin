@@ -1,6 +1,6 @@
 """Build a platform wheel that carries the locrin binary.
 
-Usage: python pypi/build_wheel.py --version 0.6.0 --binary path/to/locrin --platform-tag manylinux_2_35_x86_64 --out dist
+Usage: python pypi/build_wheel.py --version 0.6.1 --binary path/to/locrin --platform-tag manylinux_2_35_x86_64 --out dist
 
 No setuptools: a wheel is a zip with a dist-info directory, and writing it
 directly keeps the build deterministic and dependency-free.

@@ -11,7 +11,7 @@ body:
     attributes: { label: "Finding id", description: "From `locrin check --json`." }
   - type: input
     id: version
-    attributes: { label: "Locrin version", placeholder: "locrin 0.6.0" }
+    attributes: { label: "Locrin version", placeholder: "locrin 0.6.1" }
     validations: { required: true }
   - type: textarea
     id: snippet
