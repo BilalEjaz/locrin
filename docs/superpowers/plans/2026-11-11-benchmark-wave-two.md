@@ -32,12 +32,11 @@ A signal must be a superset of what its rule can flag: it selects diffs where th
 
 ### The budget (fixed, one pass)
 
-At most 120 new diffs, TypeScript and JavaScript only (half of wave one's files are PHP and Python, where 16 of the 21 rules do not run). Quotas, rarest first, which is also the order a diff matching several signals is assigned in:
+At most 110 new diffs, TypeScript and JavaScript only (half of wave one's files are PHP and Python, where 16 of the 21 rules do not run). Quotas, rarest first, which is also the order a diff matching several signals is assigned in:
 
 | Signal | Feeds rule | Quota |
 | --- | --- | --- |
 | `weak-crypto` | `weak-crypto` | 20 |
-| `express-cors` | `express-cors-wildcard-on-authenticated` | 10 |
 | `express-cookie` | `express-cookie-insecure` | 10 |
 | `supabase-service-role` | `supabase-service-role-in-client` | 9 |
 | `test-skip` | `test-newly-skipped` | 12 |
@@ -51,11 +50,19 @@ Three builder runs, each stopped by the operator at three hours if it has not en
 ### Rules wave two does not target, and the reason the table will give
 
 - `secret-exposed`: a public corpus must not redistribute live credentials.
+- `express-cors-wildcard-on-authenticated`: it fires only where a repository's own `locrin.toml` names its auth middleware, and the harness writes one config for every repository, so no diff could move its number. Found while executing Task 1; the rule joins the ones marked not benchmarked.
 - `supabase-table-without-rls`: reads SQL migrations, which the corpus does not store (`sql` is in the sparse-checkout skip list).
 - `unreachable`: no text signal is cheaper than the rule itself; scored only if the new diffs happen to supply it.
 - `unused-import`: 1 reported finding in 71 import-adding diffs; every new diff adds imports, so it accrues without a quota.
 - `leftover-commented-code`: ships off.
 - `boundary-violation`, `vulnerable-dependency`, `express-route-without-auth`: already marked not benchmarked.
+
+### Rulings made during execution
+
+- The `express-cors` signal and its quota of 10 were dropped, for the reason above. The budget is 110, not 120.
+- The `supabase-service-role` signal matches the name of the key and never a pasted key. A diff chosen for holding one would put a live credential in a public corpus. It is the one place a signal is knowingly not a superset, and the README says so.
+- Task 1 Step 5 found two real holes, both closed and pinned by tests: `createDecipheriv` under `weak-crypto` and `it.skip.each` under `test-skip`.
+- macOS 14 runners were retired by GitHub after 0.6.1; the engine's CI and release workflows moved to `macos-15` in their own pull request, without which no release could build.
 
 ### What happens to a rule that scores badly
 
@@ -94,8 +101,8 @@ Each is pinned by a named test in Task 1 or Task 2.
 
 **Interfaces:**
 - Produces:
-  - `SIGNALS: dict[str, Signal]`, insertion-ordered rarest first: `weak-crypto`, `express-cors`, `express-cookie`, `supabase-service-role`, `test-skip`, `html-sink`, `test-case`, `marker`, `console`.
-  - `WAVE_TWO_TARGETS: dict[str, int]`, the quota table above (sums to 120).
+  - `SIGNALS: dict[str, Signal]`, insertion-ordered rarest first: `weak-crypto`, `express-cookie`, `supabase-service-role`, `test-skip`, `html-sink`, `test-case`, `marker`, `console`.
+  - `WAVE_TWO_TARGETS: dict[str, int]`, the quota table above (sums to 110).
   - `added_lines(patch: str | None) -> list[str]`
   - `is_test_file(path: str) -> bool`
   - `matched(files: list[dict]) -> list[str]`, signal names in `SIGNALS` order.
@@ -113,9 +120,9 @@ def f(name, *added, removed=()):
 
 
 def test_the_signals_are_ordered_rarest_first_and_the_quotas_sum_to_the_budget():
-    assert list(SIGNALS) == ["weak-crypto", "express-cors", "express-cookie", "supabase-service-role",
+    assert list(SIGNALS) == ["weak-crypto", "express-cookie", "supabase-service-role",
                              "test-skip", "html-sink", "test-case", "marker", "console"]
-    assert set(WAVE_TWO_TARGETS) == set(SIGNALS) and sum(WAVE_TWO_TARGETS.values()) == 120
+    assert set(WAVE_TWO_TARGETS) == set(SIGNALS) and sum(WAVE_TWO_TARGETS.values()) == 110
 
 
 def test_added_lines_keeps_only_added_lines_without_their_marker():
@@ -136,7 +143,6 @@ def test_a_signal_on_a_removed_or_context_line_is_not_a_match():
 def test_each_signal_matches_its_subject():
     cases = {
         "weak-crypto": 'const h = createHash("md5").update(pw).digest("hex");',
-        "express-cors": "app.use(cors());",
         "express-cookie": 'res.cookie("sid", id);',
         "supabase-service-role": "const key = process.env.SUPABASE_SERVICE_ROLE_KEY;",
         "html-sink": "el.innerHTML = body;",
@@ -171,8 +177,8 @@ def test_only_the_javascript_family_is_read():
 
 
 def test_several_signals_come_back_in_signal_order():
-    got = matched([f("src/a.ts", "console.log(1);", "// FIXME"), f("src/b.ts", "app.use(cors());")])
-    assert got == ["express-cors", "marker", "console"]
+    got = matched([f("src/a.ts", "console.log(1);", "// FIXME"), f("src/b.ts", 'res.cookie("sid", id);')])
+    assert got == ["express-cookie", "marker", "console"]
 
 
 def test_is_test_file_is_the_engine_definition():
@@ -203,11 +209,10 @@ Expected: an import error for `bench.signals`.
 
 | Signal | Pattern on an added line | File filter |
 | --- | --- | --- |
-| `weak-crypto` | `createHash\(`, `createHmac\(`, `createCipher(iv)?\(`, `Math\.random\(`, or the word `md5` or `sha1` in any case | any |
-| `express-cors` | `\bcors\(` | any |
+| `weak-crypto` | `createHash\(`, `createHmac\(`, `create(De)?cipher(iv)?\(`, `Math\.random\(`, or the word `md5` or `sha1` in any case | any |
 | `express-cookie` | `\.cookie\(` | any |
 | `supabase-service-role` | `service_role` or `serviceRole`, any case | any |
-| `test-skip` | `\.skip\(`, `\.todo\(`, `\bxit\(`, `\bxtest\(`, `\bxdescribe\(` | any |
+| `test-skip` | `\.(skip|todo)\b`, `\bxit\(`, `\bxtest\(`, `\bxdescribe\(` | any |
 | `html-sink` | `dangerouslySetInnerHTML`, `\.innerHTML\b`, `\.outerHTML\b`, `insertAdjacentHTML`, `document\.write\(`, `\.html\(` | any |
 | `test-case` | `\b(it|test)\(` | `is_test_file` |
 | `marker` | `\b(TODO|FIXME|HACK|XXX)\b` | any |
@@ -302,12 +307,12 @@ Tasks 1 and 2 are one pull request, `bench/signals`, merged on green. Merging it
 Each run is detached with its stderr in a log and a watchdog armed, and is stopped at three hours if it has not ended. A stopped run keeps what it wrote.
 
 ```bash
-python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 334 --language typescript --language javascript --signals --topic express --topic expressjs
-python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 334 --language typescript --language javascript --signals --topic supabase
-python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 334 --language typescript --language javascript --signals
+python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 324 --language typescript --language javascript --signals --topic express --topic expressjs
+python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 324 --language typescript --language javascript --signals --topic supabase
+python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 324 --language typescript --language javascript --signals
 ```
 
-`--target 334` is the 214 records held plus the 120 budget.
+`--target 324` is the 214 records held plus the 110 budget.
 
 - [ ] **Step 2: Check what was built**
 
