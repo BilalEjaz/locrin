@@ -222,7 +222,7 @@ Expected: all pass.
 
 - [ ] **Step 5: Prove each signal is a superset of its rule, against the engine's own fixtures**
 
-This is a one-off check, not a committed test, because the fixtures live in the other repository. For each rule in the quota table, run the engine (`locrin check --json`) over that rule's `flag` fixture directory under `C:/Users/chars/code-quality-platform/crates/rules/tests/fixtures/`, and for every finding of that rule assert that `SIGNALS[<signal>].pattern` matches the finding's line or a line of the same statement in that file. Expected: zero unmatched findings. A finding the signal cannot see is a hole in the superset: widen the pattern, add a case for it to `test_each_signal_matches_its_subject`, and run again. Put the per-rule counts (findings, matched) in the pull request body.
+This is a one-off check, not a committed test, because the fixtures live in the other repository. For each rule in the quota table, run the engine (`locrin check --json`) over that rule's `flag` fixture directory under `crates/rules/tests/fixtures/` in the engine repository, and for every finding of that rule assert that `SIGNALS[<signal>].pattern` matches the finding's line or a line of the same statement in that file. Expected: zero unmatched findings. A finding the signal cannot see is a hole in the superset: widen the pattern, add a case for it to `test_each_signal_matches_its_subject`, and run again. Put the per-rule counts (findings, matched) in the pull request body.
 
 - [ ] **Step 6: Commit**
 
