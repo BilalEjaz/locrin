@@ -36,14 +36,16 @@ At most 110 new diffs, TypeScript and JavaScript only (half of wave one's files 
 
 | Signal | Feeds rule | Quota |
 | --- | --- | --- |
-| `weak-crypto` | `weak-crypto` | 20 |
-| `express-cookie` | `express-cookie-insecure` | 10 |
 | `supabase-service-role` | `supabase-service-role-in-client` | 9 |
+| `cipher-iv` | `weak-crypto` | 6 |
+| `express-cookie` | `express-cookie-insecure` | 10 |
+| `weak-hash` | `weak-crypto` | 8 |
 | `test-skip` | `test-newly-skipped` | 12 |
-| `html-sink` | `html-injection` | 12 |
-| `test-case` | `test-no-assert` | 20 |
 | `marker` | `leftover-agent-marker` | 12 |
+| `weak-random` | `weak-crypto` | 6 |
+| `html-sink` | `html-injection` | 12 |
 | `console` | `leftover-debug` | 15 |
+| `test-case` | `test-no-assert` | 20 |
 
 Three builder runs, each stopped by the operator at three hours if it has not ended. A quota that is not full after the three runs stays short: the rule is reported with what it has. There is no wave three.
 
@@ -62,6 +64,9 @@ Three builder runs, each stopped by the operator at three hours if it has not en
 - The `express-cors` signal and its quota of 10 were dropped, for the reason above. The budget is 110, not 120.
 - The `supabase-service-role` signal matches the name of the key and never a pasted key. A diff chosen for holding one would put a live credential in a public corpus. It is the one place a signal is knowingly not a superset, and the README says so.
 - Task 1 Step 5 found two real holes, both closed and pinned by tests: `createDecipheriv` under `weak-crypto` and `it.skip.each` under `test-skip`.
+- An independent review of Tasks 1 and 2, run before Task 3 because the long builds and the labelling spend rest on that code, found the signals would have spent the budget badly in three places. All fixed test first: the test signals read the files the test rules open (`*.test.*`, `*.spec.*`, `__tests__`) and match a test callee, not a word; `weak-crypto` is three signals, one per shape the rule reads, with `weak-hash` narrowed to `md5` and `sha1`; the service-role signal is spelled as the rule spells it and skips the default server paths; `console` matches an optional-chained call. The order is rarest first as re-measured on wave one with the final patterns, which is the table above. `--signals` searches TypeScript and JavaScript only and, without `--target`, is bounded by its quotas.
+- The base rates under "Why a signal filter" were measured with rough patterns over every language. With the final signals on TypeScript and JavaScript files, six of the ten appear in none of wave one's 214 diffs, `weak-random` in 0.9 percent, `console` and `html-sink` in 2.3 percent each and `test-case` in 15.0 percent.
+- Task 1's and Task 2's code blocks below are as first written. The signal names, patterns and tests that shipped are the ones in `bench/signals.py` and `tests/test_signals.py` on the benchmark's `main`.
 - macOS 14 runners were retired by GitHub after 0.6.1; the engine's CI and release workflows moved to `macos-15` in their own pull request, without which no release could build.
 
 ### What happens to a rule that scores badly
@@ -307,12 +312,12 @@ Tasks 1 and 2 are one pull request, `bench/signals`, merged on green. Merging it
 Each run is detached with its stderr in a log and a watchdog armed, and is stopped at three hours if it has not ended. A stopped run keeps what it wrote.
 
 ```bash
-python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 324 --language typescript --language javascript --signals --topic express --topic expressjs
-python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 324 --language typescript --language javascript --signals --topic supabase
-python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --target 324 --language typescript --language javascript --signals
+python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --language typescript --language javascript --signals --topic express --topic expressjs
+python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --language typescript --language javascript --signals --topic supabase
+python -m bench.build_corpus --via-repos --since 2026-09-01 --out corpus --language typescript --language javascript --signals
 ```
 
-`--target 324` is the 214 records held plus the 110 budget.
+No `--target`: under `--signals` a build stops at what the corpus holds plus every signal's quota. The first run turns every signal off but `express-cookie` and the second every one but `supabase-service-role` (`--signal-target NAME=0`), so a rare stack's repositories are searched for that stack's subject only and the third run fills the rest from repositories at large.
 
 - [ ] **Step 2: Check what was built**
 
