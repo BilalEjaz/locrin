@@ -76,7 +76,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             npm: linux-x64
             pypi: manylinux_2_35_x86_64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             npm: darwin-arm64
             pypi: macosx_11_0_arm64
