@@ -437,7 +437,7 @@ may not.
 | `express-cookie-insecure` | security | high | high | yes |
 
 The last column is a measurement, not a preference. Precision and recall per
-rule are measured nightly on public agent-written diffs, and the numbers behind
+rule are measured for each release on public agent-written diffs, and the numbers behind
 every default in the table are there:
 https://github.com/BilalEjaz/locrin-benchmark
 
