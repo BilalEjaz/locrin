@@ -352,6 +352,20 @@ impl Rule for HtmlInjection {
     fn confidence(&self) -> Confidence {
         Confidence::Medium
     }
+    /// Off from 1.0.0. On the public benchmark's second wave one of its eight
+    /// findings was true. Five of the others interpolated a constant or a static
+    /// string, one escaped its value and one wrote into an inert `<template>`:
+    /// telling those from a hostile value takes following the value to where it
+    /// came from, which this rule does not do (see the module doc). A repository
+    /// that wants every such sink listed for review turns it on:
+    ///
+    /// ```toml
+    /// [rules.html-injection]
+    /// enabled = true
+    /// ```
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         Ok(clean_files(ctx).flat_map(|file| scan(self, file)).collect())

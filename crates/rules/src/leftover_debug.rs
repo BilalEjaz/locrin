@@ -454,6 +454,23 @@ impl Rule for LeftoverDebug {
     fn confidence(&self) -> Confidence {
         Confidence::High
     }
+    /// Off from 1.0.0. The public benchmark's second wave gave the rule 47
+    /// findings in eleven repositories and none of them was a leftover: command
+    /// line tools and scripts whose output is their purpose (a package.json
+    /// script run with `bun`, a `bin` target, a smoke runner), a server's
+    /// start-up line, a Worker's structured `console.log(JSON.stringify(..))`.
+    /// The exemptions 0.5.0 to 0.6.1 added each removed one of those shapes and
+    /// the next repository had another. Whether a `console.log` is a leftover is
+    /// a fact about the project's logging, which the syntax does not carry, so a
+    /// project that has a logger and wants the call sites found turns the rule on:
+    ///
+    /// ```toml
+    /// [rules.leftover-debug]
+    /// enabled = true
+    /// ```
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
     /// Every language: each one has its own sinks and its own node kinds, and
     /// `walk` dispatches on the file's language rather than matching one
     /// grammar's shapes against another's tree.

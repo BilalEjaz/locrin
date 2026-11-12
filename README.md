@@ -414,7 +414,7 @@ may not.
 
 | Rule | Category | Severity | Confidence | On by default |
 | --- | --- | --- | --- | --- |
-| `leftover-debug` | erosion | high | high | yes |
+| `leftover-debug` | erosion | high | high | no |
 | `leftover-commented-code` | erosion | medium | medium | no |
 | `leftover-agent-marker` | erosion | low | medium | yes |
 | `unused-import` | erosion | low | high | yes |
@@ -428,9 +428,9 @@ may not.
 | `secret-exposed` | security | high | high | yes (locked) |
 | `weak-crypto` | security | high | high | yes |
 | `injection-sink` | security | high | high | no |
-| `html-injection` | security | high | medium | yes |
+| `html-injection` | security | high | medium | no |
 | `vulnerable-dependency` | security | high | medium | yes |
-| `supabase-service-role-in-client` | security | high | high | yes |
+| `supabase-service-role-in-client` | security | high | high | no |
 | `supabase-table-without-rls` | security | high | high | yes |
 | `express-route-without-auth` | security | high | high | yes |
 | `express-cors-wildcard-on-authenticated` | security | high | high | yes |
@@ -441,15 +441,28 @@ rule are measured nightly on public agent-written diffs, and the numbers behind
 every default in the table are there:
 https://github.com/BilalEjaz/locrin-benchmark
 
-Three rules ship off: `dead-file`, `injection-sink` and
-`leftover-commented-code`. Each was measured against real repositories and did
-not clear the precision bar the spec sets. For the first two the reason is
-answerable per repository and not in general: `dead-file` needs that
-repository's entry points curated, and `injection-sink` needs its fixtures
-baselined. `leftover-commented-code` has yet to produce a true finding on any
-measured code (0 of 5 on the public benchmark, 0 of 8 on a large application
-after 0.6.0's prose veto); it stays a review aid until a measurement clears the
-bar. Turn any of them on with `rules.<id>.enabled = true`. `swallowed-error`
+Six rules ship off: `dead-file`, `injection-sink`, `leftover-commented-code`,
+`leftover-debug`, `html-injection` and `supabase-service-role-in-client`. Each
+was measured against real repositories and did not clear the precision bar the
+spec sets. For the first two the reason is answerable per repository and not
+in general: `dead-file` needs that repository's entry points curated, and
+`injection-sink` needs its fixtures baselined. `leftover-commented-code` has
+yet to produce a true finding on any measured code (0 of 5 on the public
+benchmark, 0 of 8 on a large application after 0.6.0's prose veto); it stays a
+review aid until a measurement clears the bar.
+
+The last three went off in 1.0.0, on the benchmark's second wave (302 diffs).
+`leftover-debug` had 47 findings and none was a leftover: a command line
+tool's output, a server's start-up line, a Worker's structured log. Whether a
+`console.log` is a leftover is a fact about the project's logging that the
+syntax does not carry, so the rule is for a project that has a logger and
+wants the stray call sites found. `html-injection` had one true finding in
+eight; the rest interpolated constants, and telling the two apart takes data
+flow the rule does not have. `supabase-service-role-in-client` had none true
+in 21: it reads "not under a server path" as "ships to a client", which holds
+only where a repository keeps its server code under `framework.server_paths`.
+
+Turn any of them on with `rules.<id>.enabled = true`. `swallowed-error`
 was the third until 0.6.0, when the benchmark scored it 92 percent precision
 above the spec's bar of 85; a repository that would rather not have it turns it
 off the same way, with `rules.swallowed-error.enabled = false`.
@@ -481,8 +494,8 @@ flag, once per language, rather than silently skipping them.
 
 ### What runs on them
 
-Five rules: `leftover-debug` (PHP's dump family and `xdebug_break`; Python's
-`breakpoint()`, `pdb` and its relatives, never `print`),
+Five rules: `leftover-debug` once you turn it on (PHP's dump family and
+`xdebug_break`; Python's `breakpoint()`, `pdb` and its relatives, never `print`),
 `leftover-commented-code`, `leftover-agent-marker`, `secret-exposed` and
 `vulnerable-dependency` (`composer.lock` against Packagist; `requirements.txt`
 and `poetry.lock` against PyPI).
@@ -514,7 +527,9 @@ pairs of the ten were decided that way:
 | `leftover-commented-code` on Python | **off** | 0 true of 14 on Poetry in round two, every one a prose comment whose header ends in a colon. A colon now counts only behind a suite keyword, which removed thirteen; one prose `with ... :` header remains, and one false positive is still a fail |
 | `leftover-agent-marker` on PHP | **on** (was off in round two) | One `XXX` inside `avatars/XXX.jpg` on Monica. A marker word inside a path or a file name no longer counts, and the re-measure is 4 true of 4 |
 
-The other eight pairs ship on. A per-language off is not something
+The other eight pairs follow their rule's own default: six ship on, and the two
+`leftover-debug` pairs are off with the rule since 1.0.0 (turning the rule on
+turns them on). A per-language off is not something
 `rules.<id>.enabled = true` overrides: that key says whether the rule runs at
 all, and the languages a rule failed on are the engine's measurement rather
 than the repository's choice. The knob for that is `rules.<id>.languages`: name

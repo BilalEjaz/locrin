@@ -1389,6 +1389,14 @@ mod tests {
         assert!(!default_of("dead-file"), "0 of 16 true");
         assert!(!default_of("injection-sink"), "0 of 17 true");
         assert!(!default_of("leftover-commented-code"), "0 of 5 true in public, 0 of 99 and then 0 of 8 on FastLift");
+        // The second wave (302 diffs, results/v0.6.1) put three more rules far under the gate.
+        assert!(!default_of("leftover-debug"), "0 of 47 true");
+        assert!(!default_of("supabase-service-role-in-client"), "0 of 21 true");
+        assert!(!default_of("html-injection"), "1 of 8 true");
+        // And it scored these above it, or left them with too few findings to move.
+        for id in ["dead-export", "unused-import", "leftover-agent-marker", "secret-exposed"] {
+            assert!(default_of(id), "{id} stays on");
+        }
     }
 
     /// A locked rule, the way `secret-exposed` is locked (spec 4.3). Nothing but

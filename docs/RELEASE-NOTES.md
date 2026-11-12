@@ -4,6 +4,30 @@
 
 ### What changes without opting in
 
+Three rules are off by default: `leftover-debug`, `html-injection` and
+`supabase-service-role-in-client`. The public benchmark's second wave (302
+agent-written diffs, labelled by two models) measured each of them far under
+the 85 percent precision a rule needs to ship on:
+
+| Rule | Findings | True | Why the rest were not |
+| --- | --- | --- | --- |
+| `leftover-debug` | 47 | 0 | A command line tool or script whose output is its purpose, a server's start-up line, a Worker's structured `console.log(JSON.stringify(..))` |
+| `supabase-service-role-in-client` | 21 | 0 | Server code outside the default `framework.server_paths` (a root `server.ts`, an MCP server, a Playwright config, a `"use server"` file), and the Postgres role name inside SQL text |
+| `html-injection` | 8 | 1 | A constant or a static string interpolated, an escaped value, an inert `<template>` |
+
+`leftover-debug` blocked, so this is the change most likely to be noticed: a
+`console.log` no longer stops a check. Nothing is removed. A project that
+wants a rule back writes
+
+```toml
+[rules.leftover-debug]
+enabled = true
+```
+
+and a project that already has such an entry, or a `severity` override with
+`enabled = true` beside it, is unchanged. A baseline entry for one of these
+rules is left alone and matches again if the rule is turned back on.
+
 `dead-export` reports more, because a file with a parse error no longer counts
 as using everything in every module it imports. Such a file is excluded from
 the rules, and until now each of its imports was also widened to the whole
