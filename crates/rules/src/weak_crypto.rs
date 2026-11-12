@@ -10,11 +10,13 @@
 //!   over a cache key are a performance choice; over a password they are the
 //!   whole vulnerability. Nothing in a syntax tree says which, so the rule reads
 //!   the names around the call: the enclosing top-level symbol and every
-//!   identifier in the enclosing statement. A credential-shaped name is High
-//!   confidence, anything else is Medium and still reported, because a weak
-//!   digest is worth a look even when the reviewer decides it is a cache key.
-//!   The cost is that `createHash("md5")` over a variable named `input` inside a
-//!   function named `hash` reads as Medium however sensitive `input` really is.
+//!   identifier in the enclosing statement. A credential-shaped name is a
+//!   finding and anything else is not. Until 1.0.0 the rest were reported at
+//!   Medium, as worth a look; the public benchmark looked, and all five were a
+//!   protocol or a fingerprint (the RFC 6455 accept key, an S3 ETag, a hash of
+//!   syntax-tree shingles), which is what MD5 and SHA-1 are still for. The cost
+//!   is that `createHash("md5")` over a variable named `input` inside a function
+//!   named `hash` is not reported however sensitive `input` really is.
 //! - **`Math.random()` is flagged by the name of what it fills, never by the
 //!   call.** The call itself is unremarkable: jitter, a shuffle, a sampled log
 //!   line, and a placeholder colour all use it correctly, and they are the
@@ -315,7 +317,6 @@ struct Form {
     evidence: String,
     fix: &'static str,
     cwe: &'static str,
-    confidence: Confidence,
 }
 
 fn weak_hash(call: Node, src: &str, file: &ParsedFile, at: u32) -> Option<Form> {
@@ -326,22 +327,16 @@ fn weak_hash(call: Node, src: &str, file: &ParsedFile, at: u32) -> Option<Form> 
     if !alg.eq_ignore_ascii_case("md5") && !alg.eq_ignore_ascii_case("sha1") {
         return None;
     }
-    // The name that decides confidence is also the name the evidence prints, so
-    // a High finding reads as the credential it found and a Medium one as the
-    // symbol it could not judge.
-    let symbol = locrin_core::symbols::enclosing_symbol(file, at);
+    // The name that makes this a finding is also the name the evidence prints.
     // The identifier is preferred over the symbol because it is the thing being
     // hashed rather than the function doing it: `md5 used to hash password`
-    // says more than `md5 used to hash hashPassword`.
+    // says more than `md5 used to hash hashPassword`. With no such name in
+    // reach there is no finding: see the module doc.
     let credential = statement_identifiers(call, src)
         .into_iter()
         .find(|i| names_a_credential(i))
-        .or_else(|| symbol.as_deref().filter(|s| names_a_credential(s)).map(|s| s.to_string()));
-    let (context, confidence) = match credential {
-        Some(name) => (name, Confidence::High),
-        None => (symbol.unwrap_or_else(|| "a value".to_string()), Confidence::Medium),
-    };
-    Some(Form { evidence: format!("{alg} used to hash {context}"), fix: HASH_FIX, cwe: "CWE-327", confidence })
+        .or_else(|| locrin_core::symbols::enclosing_symbol(file, at).filter(|symbol| names_a_credential(symbol)))?;
+    Some(Form { evidence: format!("{alg} used to hash {credential}"), fix: HASH_FIX, cwe: "CWE-327" })
 }
 
 fn weak_random(call: Node, src: &str, file: &ParsedFile, at: u32) -> Option<Form> {
@@ -356,12 +351,7 @@ fn weak_random(call: Node, src: &str, file: &ParsedFile, at: u32) -> Option<Form
         locrin_core::symbols::enclosing_symbol(file, at),
     ];
     let name = candidates.into_iter().flatten().find(|n| names_a_secret(n) || names_an_id(n))?;
-    Some(Form {
-        evidence: format!("Math.random() generates {name}"),
-        fix: RANDOM_FIX,
-        cwe: "CWE-338",
-        confidence: Confidence::High,
-    })
+    Some(Form { evidence: format!("Math.random() generates {name}"), fix: RANDOM_FIX, cwe: "CWE-338" })
 }
 
 fn fixed_iv(call: Node, src: &str) -> Option<Form> {
@@ -372,12 +362,7 @@ fn fixed_iv(call: Node, src: &str) -> Option<Form> {
     if !static_iv(*args(call).get(2)?, src) {
         return None;
     }
-    Some(Form {
-        evidence: format!("static IV passed to {callee}"),
-        fix: IV_FIX,
-        cwe: "CWE-327",
-        confidence: Confidence::High,
-    })
+    Some(Form { evidence: format!("static IV passed to {callee}"), fix: IV_FIX, cwe: "CWE-327" })
 }
 
 fn scan(rule: &WeakCrypto, file: &ParsedFile) -> Vec<Finding> {
@@ -398,7 +383,6 @@ fn scan(rule: &WeakCrypto, file: &ParsedFile) -> Vec<Finding> {
         // halves are names, so neither moves when a line above the call does.
         let anchor = format!("{}\x1f{}", anchor_for(file, at), form.evidence);
         let mut finding = finding_at(rule, &file.rel, line_span(file, at), &anchor, &form.evidence, form.fix);
-        finding.confidence = form.confidence;
         finding.owasp = Some("A02:2021".to_string());
         finding.cwe = Some(form.cwe.to_string());
         out.push(finding);
@@ -423,10 +407,9 @@ impl Rule for WeakCrypto {
     fn default_severity(&self) -> Severity {
         Severity::High
     }
-    /// High is the rule's own answer, which the random and IV forms keep: both
-    /// read a fixed shape at the call site. The weak-hash form lowers a finding
-    /// to Medium after construction when no name around the call says a
-    /// credential is being hashed. See the module doc.
+    /// High, for all three forms: the random and IV forms read a fixed shape at
+    /// the call site, and the weak-hash form speaks only when a name around the
+    /// call says a credential is being hashed. See the module doc.
     fn confidence(&self) -> Confidence {
         Confidence::High
     }
