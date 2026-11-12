@@ -65,6 +65,9 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
             return;
         }
         let args = named_args(node);
+        if is_skip_guard(callee, &args, src) {
+            return;
+        }
         let assertions = match case_body(&args).or_else(|| wrapped_body(&args)) {
             Some(body) => count_assertions(body, src, &helpers),
             None => u32::from(names_assertion_helper(&args, src, &helpers)),
@@ -88,6 +91,30 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
 /// case written `it(() => {})` has no name and no body worth counting.
 fn case_body<'a>(args: &[Node<'a>]) -> Option<Node<'a>> {
     args.iter().skip(1).rev().find(|a| matches!(a.kind(), "arrow_function" | "function_expression")).copied()
+}
+
+/// Whether a `skip` call is a guard and not a case: `test.skip(condition, reason)`.
+///
+/// Playwright's `test.skip` has two lives. With a title and a callback it
+/// declares a skipped test. With a condition first, inside a test or a hook or
+/// at the top of a file, it skips whatever is running when the condition holds
+/// (`test.skip(browserName === "webkit", "no WebKit on Linux")`), and the test
+/// runs everywhere else. The second is not a test and nobody marked it skipped.
+///
+/// What tells them apart is in the arguments: a case has a title, or failing
+/// that a body after its first argument (`test.skip(title, fn)`, where the
+/// title is a variable). A guard has neither: its first argument is the
+/// condition, as an expression or as a function of the fixtures, and what
+/// follows is at most the reason.
+fn is_skip_guard(callee: Node, args: &[Node], src: &str) -> bool {
+    if callee.kind() != "member_expression" || !matches!(object_and_property(callee, src), Some((_, "skip"))) {
+        return false;
+    }
+    let Some(first) = args.first() else { return false };
+    if matches!(first.kind(), "string" | "template_string") {
+        return false;
+    }
+    !args.iter().skip(1).any(|a| matches!(a.kind(), "arrow_function" | "function_expression" | "call_expression"))
 }
 
 /// The body of a case whose callback is made by a wrapper:
@@ -753,6 +780,45 @@ test("uses the fixture", async ({ page }) => {
 "#;
         let names: Vec<String> = extract(&parsed(fixtures)).into_iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["uses the fixture"]);
+    }
+
+    /// Playwright's `test.skip(condition, reason)` inside a test or a hook skips
+    /// the running test where the condition holds and nowhere else: it is a
+    /// guard worked out at run time, not a test somebody marked skipped. It has
+    /// no title and no body, which is what tells it from `test.skip("name", fn)`.
+    /// All seven findings the public benchmark's second wave gave
+    /// `test-newly-skipped` were this call, and none was a skipped test.
+    #[test]
+    fn a_conditional_skip_call_is_a_guard_and_not_a_case() {
+        let src = r#"import { test, expect } from "@playwright/test";
+test.beforeEach(async ({ browserName }) => {
+  test.skip(browserName === "webkit" && process.platform === "linux", "no WebKit on Linux");
+});
+test("phone layout", async ({ page }) => {
+  test.skip((page.viewportSize()?.width ?? 1000) >= 768, "a phone layout check");
+  expect(await page.title()).toBe("x");
+});
+test.skip(({ browserName }) => browserName !== "chromium", "Chromium only");
+test.skip(!streams(info), "Safari cannot stream to disk");
+test.skip("marked by hand", async () => {
+  expect(1).toBe(1);
+});
+test.skip(title, async () => {
+  expect(1).toBe(1);
+});
+"#;
+        let file = parsed(src);
+        assert!(!file.has_error, "fixture must parse cleanly");
+        let view: Vec<(String, bool)> = extract(&file).into_iter().map(|c| (c.name, c.skipped)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("phone layout".to_string(), false),
+                ("marked by hand".to_string(), true),
+                ("<unnamed>".to_string(), true),
+            ]
+        );
+        assert_eq!(skipped_names(&file), vec!["marked by hand", "<unnamed>"]);
     }
 
     #[test]
