@@ -275,6 +275,21 @@ impl Rule for SupabaseServiceRoleInClient {
     fn confidence(&self) -> Confidence {
         Confidence::High
     }
+    /// Off from 1.0.0. The rule reads "not under a server path" as "ships to a
+    /// client", and on the public benchmark's second wave that was wrong for all
+    /// 21 of its findings in seven repositories: a `server.ts` at the root, a
+    /// Node MCP server, a Playwright config, a `"use server"` file, a test
+    /// helper, and the Postgres role name inside SQL text and error strings. A
+    /// repository whose server code all sits under `framework.server_paths`
+    /// gets what the rule promises and turns it on:
+    ///
+    /// ```toml
+    /// [rules.supabase-service-role-in-client]
+    /// enabled = true
+    /// ```
+    fn enabled_by_default(&self) -> bool {
+        false
+    }
 
     fn run(&self, ctx: &RuleContext) -> anyhow::Result<Vec<Finding>> {
         let server = server_set(&ctx.config.framework.server_paths);

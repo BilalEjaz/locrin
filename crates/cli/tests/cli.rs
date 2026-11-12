@@ -462,6 +462,45 @@ export const t = table;
     assert!(on_lib_or_deep.is_empty(), "{on_lib_or_deep:?}");
 }
 
+/// The three rules the benchmark's second wave put far under the precision gate
+/// say nothing in a default install, and each one speaks once a config turns it
+/// on: off is a default, not a removal.
+#[test]
+fn the_rules_the_benchmark_put_under_the_gate_are_silent_until_enabled() {
+    const OFF: [&str; 3] = ["leftover-debug", "html-injection", "supabase-service-role-in-client"];
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/app.ts"),
+        "export function render(el: HTMLElement, name: string): void {\n  console.log(\"rendering\", name);\n  el.innerHTML = \"<b>\" + name + \"</b>\";\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/client.ts"),
+        "import { createClient } from \"@supabase/supabase-js\";\nexport const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);\n",
+    )
+    .unwrap();
+    let reported = |dir: &std::path::Path| -> Vec<String> {
+        let out = locrin(dir).args(["check", "--sarif", "--offline"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut ids: Vec<String> = v["runs"][0]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["ruleId"].as_str().unwrap().to_string())
+            .filter(|id| OFF.contains(&id.as_str()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    assert!(reported(dir.path()).is_empty(), "a default install reports none of them");
+
+    let on: String = OFF.iter().map(|id| format!("[rules.{id}]\nenabled = true\n")).collect();
+    std::fs::write(dir.path().join("locrin.toml"), on).unwrap();
+    assert_eq!(reported(dir.path()), vec!["html-injection", "leftover-debug", "supabase-service-role-in-client"]);
+}
+
 #[test]
 fn unused_import_blocks_and_names_the_binding() {
     let dir = copy_fixture();
@@ -746,7 +785,8 @@ fn full_check_serves_unchanged_files_from_the_cache() {
 fn config_change_invalidates_the_cache() {
     let dir = copy_fixture();
     locrin(dir.path()).arg("check").output().unwrap();
-    std::fs::write(dir.path().join("locrin.toml"), "[rules.leftover-debug]\nseverity = \"low\"\n").unwrap();
+    std::fs::write(dir.path().join("locrin.toml"), "[rules.leftover-debug]\nenabled = true\nseverity = \"low\"\n")
+        .unwrap();
     let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let debug = v["findings"].as_array().unwrap().iter().find(|f| f["rule"] == "leftover-debug").unwrap();
@@ -1585,7 +1625,10 @@ fn a_skipped_language_is_reported_once_per_run() {
 #[test]
 fn enabled_languages_are_reported_on() {
     let dir = copy_named_fixture("multilang");
-    std::fs::write(dir.path().join("locrin.toml"), "[languages]\nphp = true\npython = true\n").unwrap();
+    // The fixture's PHP and Python findings are debug calls, and `leftover-debug`
+    // ships off, so the config that enables the languages enables the rule too.
+    let config = "[languages]\nphp = true\npython = true\n\n[rules.leftover-debug]\nenabled = true\n";
+    std::fs::write(dir.path().join("locrin.toml"), config).unwrap();
     let out = locrin(dir.path()).args(["check", "--json", "--offline"]).output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let files: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["file"].as_str().unwrap()).collect();

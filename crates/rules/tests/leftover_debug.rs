@@ -1,6 +1,6 @@
 mod common;
 
-use common::{fixture, hits, parse_dir, run_on, run_on_langs};
+use common::{fixture, hits, parse_dir, rule_on, run_on, run_on_langs};
 use locrin_core::config::{Config, Languages};
 use locrin_core::finding::{Confidence, Severity};
 use locrin_rules::leftover_debug::LeftoverDebug;
@@ -8,7 +8,8 @@ use locrin_rules::line_text;
 
 #[test]
 fn flags_console_log_debug_and_debugger() {
-    let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "flag"), &Config::default());
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "flag"), &rule_on("leftover-debug"));
     assert_eq!(
         hits(&out),
         vec![
@@ -29,7 +30,8 @@ fn flags_console_log_debug_and_debugger() {
 /// either into a baseline would silently accept the other.
 #[test]
 fn two_identical_debug_lines_in_one_function_get_two_ids() {
-    let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "flag"), &Config::default());
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "flag"), &rule_on("leftover-debug"));
     let twice: Vec<&str> = out.iter().filter(|f| f.file == "twice.ts").map(|f| f.id.as_str()).collect();
     assert_eq!(twice.len(), 2, "the fixture holds the line twice: {:?}", hits(&out));
     assert_ne!(twice[0], twice[1], "identical lines, separate findings");
@@ -60,7 +62,7 @@ fn a_nul_in_a_template_literal_does_not_exclude_the_file() {
     // Readers still see the file as written; only the parser got a copy.
     assert!(line_text(file, 2).contains('\0'), "line 2 keeps its NUL: {:?}", line_text(file, 2));
 
-    let out = run_on(Box::new(LeftoverDebug::default()), &root, &Config::default());
+    let out = run_on(Box::new(LeftoverDebug::default()), &root, &rule_on("leftover-debug"));
     assert_eq!(hits(&out), vec![("key.ts".to_string(), 3)]);
     assert_eq!(out[0].evidence, "console.log(\"key\", k);");
 }
@@ -80,20 +82,22 @@ fn a_bare_ampersand_in_jsx_text_does_not_exclude_the_file() {
     // The text is kept as written; only the verdict on the refusal changed.
     assert_eq!(line_text(file, 3), "return <Text>BODY & NUTRITION</Text>;");
 
-    let out = run_on(Box::new(LeftoverDebug::default()), &root, &Config::default());
+    let out = run_on(Box::new(LeftoverDebug::default()), &root, &rule_on("leftover-debug"));
     assert_eq!(hits(&out), vec![("Label.tsx".to_string(), 2)]);
     assert_eq!(out[0].evidence, "console.log(\"rendering\", id);");
 }
 
 #[test]
 fn ignores_error_warn_and_allowed_paths() {
-    let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "clean"), &Config::default());
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "clean"), &rule_on("leftover-debug"));
     assert!(out.is_empty(), "got {:?}", out);
 }
 
 #[test]
 fn allow_comment_suppresses_and_shadowed_console_is_still_flagged() {
-    let out = run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "edge"), &Config::default());
+    let out =
+        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "edge"), &rule_on("leftover-debug"));
     let lines: Vec<u32> = out.iter().map(|f| f.span.start_line).collect();
     assert_eq!(lines, vec![4]);
 }
@@ -111,12 +115,12 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
     let files = parse_dir(&root);
     let rule = LeftoverDebug::default();
 
-    let allowed = Config::default();
+    let allowed = rule_on("leftover-debug");
     let (ix, entries) = index_dir(&root, &files, &allowed);
     let ctx = ctx_for(&files, &allowed, &ix, &entries, &root);
     assert!(rule.run(&ctx).unwrap().is_empty(), "the default config allows **/scripts/**");
 
-    let nothing_allowed = Config { debug_allowed: vec![], ..Config::default() };
+    let nothing_allowed = Config { debug_allowed: vec![], ..rule_on("leftover-debug") };
     let ctx = ctx_for(&files, &nothing_allowed, &ix, &entries, &root);
     let out = rule.run(&ctx).unwrap();
     assert_eq!(out.len(), 1, "with no allow list the script's debug line is a finding: {out:?}");
@@ -128,8 +132,11 @@ fn a_reused_instance_recompiles_the_allow_list_when_the_config_changes() {
 /// second file in the fixture has no shebang and keeps its finding.
 #[test]
 fn a_shebang_exempts_that_file_alone() {
-    let out =
-        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "script-shebang"), &Config::default());
+    let out = run_on(
+        Box::new(LeftoverDebug::default()),
+        &fixture("leftover_debug", "script-shebang"),
+        &rule_on("leftover-debug"),
+    );
     assert_eq!(hits(&out), vec![("plain.ts".to_string(), 2)], "{out:?}");
 }
 
@@ -155,7 +162,7 @@ fn a_file_a_package_json_runs_with_node_is_a_script() {
     let out = run_on(
         Box::new(LeftoverDebug::default()),
         &fixture("leftover_debug", "script-package-json"),
-        &Config::default(),
+        &rule_on("leftover-debug"),
     );
     assert_eq!(hits(&out), vec![("src/app.ts".to_string(), 2), ("tasks/go.js".to_string(), 1)], "{out:?}");
 }
@@ -172,8 +179,11 @@ fn a_file_a_package_json_runs_with_node_is_a_script() {
 /// `test`. All three keep their debug lines.
 #[test]
 fn a_test_file_is_a_script() {
-    let out =
-        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "script-test-file"), &Config::default());
+    let out = run_on(
+        Box::new(LeftoverDebug::default()),
+        &fixture("leftover_debug", "script-test-file"),
+        &rule_on("leftover-debug"),
+    );
     assert_eq!(
         hits(&out),
         vec![
@@ -190,8 +200,11 @@ fn a_test_file_is_a_script() {
 /// the threshold is still a file with debug lines left in it.
 #[test]
 fn a_file_that_uses_console_as_its_logger_is_exempt() {
-    let out =
-        run_on(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "console-logger"), &Config::default());
+    let out = run_on(
+        Box::new(LeftoverDebug::default()),
+        &fixture("leftover_debug", "console-logger"),
+        &rule_on("leftover-debug"),
+    );
     let files: Vec<&str> = out.iter().map(|f| f.file.as_str()).collect();
     assert!(files.iter().all(|f| *f == "nearly.ts"), "the twenty-call file is exempt: {files:?}");
     assert_eq!(out.len(), 19, "the nineteen-call file keeps every one of them: {out:?}");
@@ -205,7 +218,7 @@ fn a_file_that_uses_console_as_its_logger_is_exempt() {
 /// the literal `true`, so they still print and are still sinks.
 #[test]
 fn flags_php_debug_sinks() {
-    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let config = Config { languages: Languages { php: true, python: false }, ..rule_on("leftover-debug") };
     let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "php/flag"), &config);
     assert_eq!(
         hits(&out),
@@ -236,7 +249,7 @@ fn flags_php_debug_sinks() {
 /// legitimate way to render a value into a message.
 #[test]
 fn ignores_php_logging_and_output() {
-    let config = Config { languages: Languages { php: true, python: false }, ..Config::default() };
+    let config = Config { languages: Languages { php: true, python: false }, ..rule_on("leftover-debug") };
     let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "php/clean"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }
@@ -247,7 +260,7 @@ fn ignores_php_logging_and_output() {
 /// `import pdb as p`, which names the same module.
 #[test]
 fn flags_python_breakpoints_and_debugger_imports() {
-    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let config = Config { languages: Languages { php: false, python: true }, ..rule_on("leftover-debug") };
     let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "py/flag"), &config);
     assert_eq!(
         hits(&out),
@@ -274,7 +287,7 @@ fn flags_python_breakpoints_and_debugger_imports() {
 /// debugger's name.
 #[test]
 fn print_and_logging_are_not_python_sinks() {
-    let config = Config { languages: Languages { php: false, python: true }, ..Config::default() };
+    let config = Config { languages: Languages { php: false, python: true }, ..rule_on("leftover-debug") };
     let out = run_on_langs(Box::new(LeftoverDebug::default()), &fixture("leftover_debug", "py/clean"), &config);
     assert!(out.is_empty(), "got {out:?}");
 }

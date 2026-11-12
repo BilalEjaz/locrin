@@ -1,0 +1,5 @@
+# The fixture is the engine tests' repository, and `src/dirty.ts` holds the finding
+# they block on. `leftover-debug` ships off from 1.0.0, so the fixture turns it on
+# the way a project that wants it does.
+[rules.leftover-debug]
+enabled = true

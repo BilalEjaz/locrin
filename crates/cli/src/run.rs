@@ -1002,6 +1002,10 @@ pub fn baseline_accept_as(
 mod tests {
     use super::*;
 
+    /// `leftover-debug` ships off, and the repositories these tests build block
+    /// on a `console.log`, so they turn the rule on as a project would.
+    const DEBUG_ON: &str = "[rules.leftover-debug]\nenabled = true\n";
+
     // The tests here set `LOCRIN_CACHE_DIR`, which is process-wide, so they
     // take turns on the lock the whole binary's tests share rather than one of
     // their own: a lock per module would not stop this module racing another.
@@ -1129,6 +1133,7 @@ mod tests {
             std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
             let root = canonical_root(dir.path());
             std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("locrin.toml"), DEBUG_ON).unwrap();
             std::fs::write(
                 root.join("src/dirty.ts"),
                 "export function bad(): number {\n  console.log(\"x\");\n  return 2;\n}\n",
@@ -1215,6 +1220,7 @@ mod tests {
         std::env::set_var("LOCRIN_CACHE_DIR", dir.path().join(".cache"));
         let root = canonical_root(dir.path());
         std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("locrin.toml"), DEBUG_ON).unwrap();
         std::fs::write(
             root.join("src/dirty.ts"),
             "export function bad(): number {\n  console.log(\"x\");\n  return 2;\n}\n",

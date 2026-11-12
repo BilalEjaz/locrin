@@ -1,6 +1,6 @@
 mod common;
 
-use common::{fixture, hits, run_on};
+use common::{fixture, hits, rule_on, run_on};
 use locrin_core::config::{Config, Framework};
 use locrin_core::finding::{Category, Confidence, Severity};
 use locrin_rules::supabase::rls::SupabaseTableWithoutRls;
@@ -13,12 +13,16 @@ const CLIENT_FIX: &str = "Move this call behind a server (edge function, API rou
 /// them, which is what makes the second half of `an_overridden_server_paths_list_replaces_the_defaults` true.
 fn server_paths(globs: &[&str]) -> Config {
     let framework = Framework { server_paths: globs.iter().map(|g| g.to_string()).collect(), ..Framework::default() };
-    Config { framework, ..Config::default() }
+    Config { framework, ..rule_on("supabase-service-role-in-client") }
 }
 
 #[test]
 fn a_client_file_holding_the_service_role_key_is_flagged_once_per_line() {
-    let out = run_on(Box::new(SupabaseServiceRoleInClient), &fixture("supabase", "flag"), &Config::default());
+    let out = run_on(
+        Box::new(SupabaseServiceRoleInClient),
+        &fixture("supabase", "flag"),
+        &rule_on("supabase-service-role-in-client"),
+    );
     assert_eq!(hits(&out), vec![("app/(tabs)/home.tsx".to_string(), 5), ("app/(tabs)/home.tsx".to_string(), 11)]);
     let evidence: Vec<&str> = out.iter().map(|f| f.evidence.as_str()).collect();
     assert_eq!(
@@ -38,7 +42,11 @@ fn a_client_file_holding_the_service_role_key_is_flagged_once_per_line() {
 /// Spec 7.1 metadata, from the plan's global constraints.
 #[test]
 fn every_service_role_finding_carries_the_security_metadata() {
-    let out = run_on(Box::new(SupabaseServiceRoleInClient), &fixture("supabase", "flag"), &Config::default());
+    let out = run_on(
+        Box::new(SupabaseServiceRoleInClient),
+        &fixture("supabase", "flag"),
+        &rule_on("supabase-service-role-in-client"),
+    );
     assert!(!out.is_empty());
     assert!(
         out.iter().all(|f| f.category == Category::Security
@@ -53,7 +61,11 @@ fn every_service_role_finding_carries_the_security_metadata() {
 
 #[test]
 fn server_code_the_anon_key_and_a_comment_are_not_client_exposure() {
-    let out = run_on(Box::new(SupabaseServiceRoleInClient), &fixture("supabase", "clean"), &Config::default());
+    let out = run_on(
+        Box::new(SupabaseServiceRoleInClient),
+        &fixture("supabase", "clean"),
+        &rule_on("supabase-service-role-in-client"),
+    );
     assert!(out.is_empty(), "{out:?}");
 }
 
@@ -68,7 +80,7 @@ fn server_code_the_anon_key_and_a_comment_are_not_client_exposure() {
 #[test]
 fn an_overridden_server_paths_list_replaces_the_defaults() {
     let root = fixture("supabase", "edge");
-    let default = run_on(Box::new(SupabaseServiceRoleInClient), &root, &Config::default());
+    let default = run_on(Box::new(SupabaseServiceRoleInClient), &root, &rule_on("supabase-service-role-in-client"));
     assert_eq!(hits(&default), vec![("tools/seed.ts".to_string(), 5)], "{default:?}");
 
     let overridden = run_on(Box::new(SupabaseServiceRoleInClient), &root, &server_paths(&["tools/**"]));

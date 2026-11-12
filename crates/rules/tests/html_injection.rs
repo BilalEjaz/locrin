@@ -1,7 +1,6 @@
 mod common;
 
-use common::{fixture, hits, run_on};
-use locrin_core::config::Config;
+use common::{fixture, hits, rule_on, run_on};
 use locrin_core::finding::{Category, Confidence, Severity};
 use locrin_rules::html_injection::HtmlInjection;
 
@@ -10,7 +9,7 @@ const FIX: &str =
 
 #[test]
 fn every_sink_flags_its_line_in_the_fixture() {
-    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "flag"), &Config::default());
+    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "flag"), &rule_on("html-injection"));
     assert_eq!(
         hits(&out),
         vec![
@@ -44,7 +43,7 @@ fn every_sink_flags_its_line_in_the_fixture() {
 /// constraints.
 #[test]
 fn every_finding_carries_the_security_metadata() {
-    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "flag"), &Config::default());
+    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "flag"), &rule_on("html-injection"));
     assert!(
         out.iter().all(|f| f.severity == Severity::High
             && f.category == Category::Security
@@ -60,7 +59,7 @@ fn every_finding_carries_the_security_metadata() {
 /// finding says as well as the symbol it sits in.
 #[test]
 fn findings_have_distinct_ids() {
-    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "flag"), &Config::default());
+    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "flag"), &rule_on("html-injection"));
     let mut ids: Vec<&str> = out.iter().map(|f| f.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -73,7 +72,7 @@ fn findings_have_distinct_ids() {
 /// rather than as markup.
 #[test]
 fn literals_sanitiser_calls_and_text_content_are_left_alone() {
-    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "clean"), &Config::default());
+    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "clean"), &rule_on("html-injection"));
     assert!(out.is_empty(), "{:?}", hits(&out));
 }
 
@@ -83,6 +82,6 @@ fn literals_sanitiser_calls_and_text_content_are_left_alone() {
 /// drops it for the marker on its line.
 #[test]
 fn a_template_without_substitutions_is_a_literal_and_the_marker_is_honoured() {
-    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "edge"), &Config::default());
+    let out = run_on(Box::new(HtmlInjection), &fixture("html_injection", "edge"), &rule_on("html-injection"));
     assert!(out.is_empty(), "{:?}", hits(&out));
 }

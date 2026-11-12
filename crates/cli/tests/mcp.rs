@@ -320,7 +320,7 @@ fn status_reports_the_index_config_and_last_verdict() {
     assert!(v["index"]["files"].as_u64().expect("a file count") >= 2, "{v}");
     assert!(v["index"]["schema"].is_string(), "{v}");
     assert!(v["index"]["path"].as_str().is_some_and(|p| !p.is_empty()), "{v}");
-    assert_eq!(v["config"]["present"], false, "the fixture has no locrin.toml: {v}");
+    assert_eq!(v["config"]["present"], true, "the fixture's locrin.toml turns leftover-debug on: {v}");
     assert_eq!(v["config"]["excludes"], 0, "{v}");
     assert_eq!(v["baseline"]["entries"], 0, "{v}");
     assert_eq!(v["last_verdict"]["status"], "block", "{v}");
