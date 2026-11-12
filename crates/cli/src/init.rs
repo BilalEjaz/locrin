@@ -37,7 +37,7 @@ pub const CONFIG_TEMPLATE: &str = r#"# Locrin configuration. Every key is option
 # Globs the engine never reads (generated code, vendored code).
 # excludes = ["src/generated/**"]
 
-# Files where debug output is allowed (scripts, config files, bin).
+# Files where leftover-debug, once it is turned on below, allows debug output.
 # debug_allowed = ["**/scripts/**", "**/*.config.*", "**/bin/**"]
 
 # Extra entry points for the dead-code rules, beyond package.json main/bin/exports.
@@ -59,7 +59,10 @@ pub const CONFIG_TEMPLATE: &str = r#"# Locrin configuration. Every key is option
 # python = true
 
 # Per-rule overrides. secret-exposed is locked and ignores these.
-# [rules.dead-file]
+# Six rules ship off (leftover-debug, leftover-commented-code, dead-file,
+# injection-sink, html-injection, supabase-service-role-in-client); "Rules" in
+# README.md gives the measurement behind each. Turn one on like this:
+# [rules.leftover-debug]
 # enabled = true
 # [rules.unused-import]
 # severity = "medium"
