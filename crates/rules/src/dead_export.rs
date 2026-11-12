@@ -3,6 +3,16 @@
 //! framework or a runner imports them by convention the graph cannot see. Files
 //! with no incoming edge at all are left to `dead-file`, which says it once.
 //! Medium confidence because an unresolved import anywhere could be the consumer.
+//!
+//! **The gap that leaves.** `dead-file` ships off, so in a default install a new
+//! module nothing imports is reported by neither rule: this one steps aside for
+//! `dead-file`, and `dead-file` is not running. That is deliberate. Whether an
+//! unimported file is dead is a question about entry points, and the public
+//! benchmark measured `dead-file` under 10 percent precision because a framework route, a
+//! script a README runs and a config file all look exactly like one. Reporting
+//! such a file's exports here would bring those false positives in under this
+//! rule's name. A repository that has curated `entry_points` turns `dead-file`
+//! on and the gap closes.
 
 use std::collections::{HashMap, HashSet};
 

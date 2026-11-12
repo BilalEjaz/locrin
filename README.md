@@ -462,6 +462,16 @@ flow the rule does not have. `supabase-service-role-in-client` had none true
 in 21: it reads "not under a server path" as "ships to a client", which holds
 only where a repository keeps its server code under `framework.server_paths`.
 
+One consequence is worth knowing. `dead-export` reports an unused export of a
+file that something imports, and leaves a file nothing imports at all to
+`dead-file`, so that an orphan is said once and not once per export. With
+`dead-file` off, a new module that nothing imports is reported by neither rule
+in a default install. Closing that from the `dead-export` side would bring in
+`dead-file`'s false positives (under 10 percent precision on the benchmark: a framework
+route, a script a README runs and a config file all look like an orphan), so
+the gap is left open on purpose. A repository that lists its `entry_points`
+turns `dead-file` on and gets both.
+
 Turn any of them on with `rules.<id>.enabled = true`. `swallowed-error`
 was the third until 0.6.0, when the benchmark scored it 92 percent precision
 above the spec's bar of 85; a repository that would rather not have it turns it
