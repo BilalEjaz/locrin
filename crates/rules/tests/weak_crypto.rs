@@ -88,22 +88,22 @@ fn strong_algorithms_and_non_credential_randomness_are_left_alone() {
     assert!(out.is_empty(), "{:?}", hits(&out));
 }
 
-/// The two judgement calls. `etagFor` hashes a response body with md5 and names
-/// no credential, so the finding stands at Medium: the algorithm is weak either
-/// way, but nothing here says a credential is at stake. `sessionId` is a
-/// credential-shaped name even though the function around it is `render`, so
-/// the assignment target carries the confidence, not the enclosing symbol. The
-/// class field on line 13 is the third: the context a hash is judged by is the
-/// field it initialises, not every name in the class around it, so the unused
-/// `password` field below it does not raise the etag hash to High.
+/// A weak hash is a finding only where a name says a credential is being
+/// hashed. `etagFor` hashes a response body with md5 and the class field on
+/// line 13 initialises an etag: neither names a credential, and neither is
+/// reported. Until 1.0.0 both were, at Medium, and every finding of that kind
+/// on the public benchmark was a protocol or a fingerprint: the RFC 6455
+/// accept key, an S3 ETag, a hash of syntax-tree shingles. The unused
+/// `password` field below the etag does not make it one either: the context a
+/// hash is judged by is the field it initialises, not every name in the class.
+///
+/// `sessionId` is a credential-shaped name even though the function around it
+/// is `render`, so the assignment target carries the finding, not the
+/// enclosing symbol.
 #[test]
-fn confidence_follows_the_credential_context_not_the_enclosing_function() {
+fn a_weak_hash_with_no_credential_in_reach_is_not_reported() {
     let out = run_on(Box::new(WeakCrypto), &fixture("weak_crypto", "edge"), &Config::default());
-    assert_eq!(hits(&out), vec![("c.ts".to_string(), 4), ("c.ts".to_string(), 8), ("c.ts".to_string(), 13)]);
-    assert_eq!(out[0].confidence, Confidence::Medium, "{}", out[0].evidence);
-    assert_eq!(out[0].evidence, "md5 used to hash etagFor");
-    assert_eq!(out[1].confidence, Confidence::High, "{}", out[1].evidence);
-    assert_eq!(out[1].evidence, "Math.random() generates sessionId");
-    assert_eq!(out[2].confidence, Confidence::Medium, "{}", out[2].evidence);
-    assert_eq!(out[2].evidence, "md5 used to hash ResponseCache");
+    assert_eq!(hits(&out), vec![("c.ts".to_string(), 8)]);
+    assert_eq!(out[0].confidence, Confidence::High, "{}", out[0].evidence);
+    assert_eq!(out[0].evidence, "Math.random() generates sessionId");
 }

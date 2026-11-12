@@ -54,14 +54,21 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
     let src = &file.source;
     let root = file.tree.root_node();
     let helpers = assertion_helpers(root, src);
+    let own = own_runner_names(file);
     let mut out = Vec::new();
     visit(root, &mut |node| {
-        if node.kind() != "call_expression" {
+        if node.kind() != "call_expression" || value_is_used(node) {
             return;
         }
         let Some(callee) = case_callee(node, src) else { return };
+        if callee.kind() == "identifier" && own.contains(text(callee, src)) {
+            return;
+        }
         let args = named_args(node);
-        let assertions = match case_body(&args) {
+        if is_skip_guard(callee, &args, src) {
+            return;
+        }
+        let assertions = match case_body(&args).or_else(|| wrapped_body(&args)) {
             Some(body) => count_assertions(body, src, &helpers),
             None => u32::from(names_assertion_helper(&args, src, &helpers)),
         };
@@ -84,6 +91,96 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
 /// case written `it(() => {})` has no name and no body worth counting.
 fn case_body<'a>(args: &[Node<'a>]) -> Option<Node<'a>> {
     args.iter().skip(1).rev().find(|a| matches!(a.kind(), "arrow_function" | "function_expression")).copied()
+}
+
+/// Whether a `skip` call is a guard and not a case: `test.skip(condition, reason)`.
+///
+/// Playwright's `test.skip` has two lives. With a title and a callback it
+/// declares a skipped test. With a condition first, inside a test or a hook or
+/// at the top of a file, it skips whatever is running when the condition holds
+/// (`test.skip(browserName === "webkit", "no WebKit on Linux")`), and the test
+/// runs everywhere else. The second is not a test and nobody marked it skipped.
+///
+/// What tells them apart is in the arguments: a case has a title, or failing
+/// that a body after its first argument (`test.skip(title, fn)`, where the
+/// title is a variable). A guard has neither: its first argument is the
+/// condition, as an expression or as a function of the fixtures, and what
+/// follows is at most the reason.
+fn is_skip_guard(callee: Node, args: &[Node], src: &str) -> bool {
+    if callee.kind() != "member_expression" || !matches!(object_and_property(callee, src), Some((_, "skip"))) {
+        return false;
+    }
+    let Some(first) = args.first() else { return false };
+    if matches!(first.kind(), "string" | "template_string") {
+        return false;
+    }
+    !args.iter().skip(1).any(|a| matches!(a.kind(), "arrow_function" | "function_expression" | "call_expression"))
+}
+
+/// The body of a case whose callback is made by a wrapper:
+/// `test("name", withCleanRegistry(() => { ... }))`. The runner gets whatever
+/// the wrapper returns, and the checks are in the function the wrapper was
+/// handed, so the wrapper call stands in for the body and everything inside it
+/// is counted. Asked only when no argument is a function itself.
+fn wrapped_body<'a>(args: &[Node<'a>]) -> Option<Node<'a>> {
+    args.iter().skip(1).rev().find(|a| a.kind() == "call_expression").copied()
+}
+
+/// The runner names that are a helper's alone in the test world: Jasmine's and
+/// Jest's focused and excluded cases. `it` and `test` are not here, because a
+/// suite does import those from a module of its own (a Playwright fixtures file
+/// exporting an extended `test`) and they are still the runner's.
+const PREFIXED_CASE_IDENTS: [&str; 4] = ["xit", "xtest", "fit", "ftest"];
+
+/// Which of [`PREFIXED_CASE_IDENTS`] this file binds itself: imports from one of
+/// the repository's own modules (a relative specifier) or declares. `fit` from
+/// `../src/ui/layout.js` fits text to a width; it does not focus a test.
+fn own_runner_names(file: &ParsedFile) -> HashSet<String> {
+    let src = &file.source;
+    let mut own = HashSet::new();
+    if !PREFIXED_CASE_IDENTS.iter().any(|name| src.contains(name)) {
+        return own;
+    }
+    for import in crate::imports::extract(file) {
+        if import.specifier.starts_with('.') {
+            own.extend(
+                import.bindings.into_iter().map(|b| b.local).filter(|l| PREFIXED_CASE_IDENTS.contains(&l.as_str())),
+            );
+        }
+    }
+    visit(file.tree.root_node(), &mut |node| {
+        if !matches!(node.kind(), "function_declaration" | "variable_declarator") {
+            return;
+        }
+        let Some(name) = node.child_by_field_name("name") else { return };
+        if name.kind() == "identifier" && PREFIXED_CASE_IDENTS.contains(&text(name, src)) {
+            own.insert(text(name, src).to_string());
+        }
+    });
+    own
+}
+
+/// Whether the call's value goes somewhere: into another call's arguments, a
+/// binding, an operator. A runner's `it(...)` registers a case
+/// and returns nothing worth keeping, so a call written `expect(fit("a", 8))` or
+/// `const cut = fit("a", 8)` is some other function that shares the name.
+///
+/// A property read is not on the list: Mocha's `it("slow", fn).timeout(5000)`
+/// chains off the case it has just registered.
+fn value_is_used(call: Node) -> bool {
+    let Some(parent) = call.parent() else { return false };
+    matches!(
+        parent.kind(),
+        "arguments"
+            | "variable_declarator"
+            | "assignment_expression"
+            | "binary_expression"
+            | "template_substitution"
+            | "pair"
+            | "array"
+            | "spread_element"
+            | "subscript_expression"
+    )
 }
 
 /// Whether a case with no inline callback names one instead: `it("shape", checkShape)`.
@@ -606,6 +703,122 @@ it("checks nothing at all", () => {
                 ("checks nothing at all", 0),
             ]
         );
+    }
+
+    /// `test("name", withCleanRegistry(() => { ... }))`: the callback the runner
+    /// gets is made by a wrapper, and the assertions sit in the function the
+    /// wrapper is handed. Six of the eight findings the public benchmark's
+    /// second wave gave `test-no-assert` were this shape, every one a case with
+    /// two or three `assert` calls in it. A wrapper handed nothing that asserts
+    /// still yields zero.
+    #[test]
+    fn a_body_handed_to_a_wrapper_is_still_the_body() {
+        let src = r#"import test from "node:test";
+import assert from "node:assert/strict";
+function withCleanRegistry(fn: () => void): () => void {
+  return () => {
+    clear();
+    fn();
+  };
+}
+test("wrapped and asserting", withCleanRegistry(() => {
+  assert.equal(run("back"), false);
+}));
+test("wrapped and empty", withCleanRegistry(() => {
+  run("back");
+}));
+"#;
+        let cases = extract(&parsed(src));
+        let view: Vec<(&str, u32)> = cases.iter().map(|c| (c.name.as_str(), c.assertions)).collect();
+        assert_eq!(view, vec![("wrapped and asserting", 1), ("wrapped and empty", 0)]);
+    }
+
+    /// `fit` is Jasmine's focused `it`, and it is also what a layout module calls
+    /// the function that fits text to a width. A name the file imports from one
+    /// of its own modules, or declares, is that module's function and not the
+    /// runner's; and a call whose value is used, as `expect(fit("a", 8))` uses
+    /// it, registers nothing whatever it is called.
+    #[test]
+    fn a_helper_that_shares_a_runner_name_is_not_a_case() {
+        let imported = r#"import { describe, expect, it } from "vitest";
+import { fit } from "../src/ui/layout.js";
+describe("text fitting", () => {
+  it("truncates names", () => {
+    expect(fit("short", 10)).toBe("short");
+    const cut = fit("a-very-long-name", 8);
+    expect(cut).toBe("a-very-…");
+  });
+});
+"#;
+        let names: Vec<String> = extract(&parsed(imported)).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["truncates names"]);
+
+        let declared = r#"function xit(label: string, width: number): string {
+  return label.slice(0, width);
+}
+xit("label", 3);
+"#;
+        assert!(extract(&parsed(declared)).is_empty());
+
+        // The runner's own `fit` and `xit`, global or imported from a package,
+        // are still cases.
+        let runner = r#"import { fit } from "@jest/globals";
+fit("focused", () => {
+  expect(1).toBe(1);
+});
+xit("excluded", () => {});
+"#;
+        let names: Vec<String> = extract(&parsed(runner)).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["focused", "excluded"]);
+
+        // A relative import does not unmake `test` or `it`: a Playwright suite
+        // imports its extended `test` from a fixtures module of its own.
+        let fixtures = r#"import { test } from "./fixtures";
+test("uses the fixture", async ({ page }) => {
+  expect(await page.title()).toBe("x");
+});
+"#;
+        let names: Vec<String> = extract(&parsed(fixtures)).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["uses the fixture"]);
+    }
+
+    /// Playwright's `test.skip(condition, reason)` inside a test or a hook skips
+    /// the running test where the condition holds and nowhere else: it is a
+    /// guard worked out at run time, not a test somebody marked skipped. It has
+    /// no title and no body, which is what tells it from `test.skip("name", fn)`.
+    /// All seven findings the public benchmark's second wave gave
+    /// `test-newly-skipped` were this call, and none was a skipped test.
+    #[test]
+    fn a_conditional_skip_call_is_a_guard_and_not_a_case() {
+        let src = r#"import { test, expect } from "@playwright/test";
+test.beforeEach(async ({ browserName }) => {
+  test.skip(browserName === "webkit" && process.platform === "linux", "no WebKit on Linux");
+});
+test("phone layout", async ({ page }) => {
+  test.skip((page.viewportSize()?.width ?? 1000) >= 768, "a phone layout check");
+  expect(await page.title()).toBe("x");
+});
+test.skip(({ browserName }) => browserName !== "chromium", "Chromium only");
+test.skip(!streams(info), "Safari cannot stream to disk");
+test.skip("marked by hand", async () => {
+  expect(1).toBe(1);
+});
+test.skip(title, async () => {
+  expect(1).toBe(1);
+});
+"#;
+        let file = parsed(src);
+        assert!(!file.has_error, "fixture must parse cleanly");
+        let view: Vec<(String, bool)> = extract(&file).into_iter().map(|c| (c.name, c.skipped)).collect();
+        assert_eq!(
+            view,
+            vec![
+                ("phone layout".to_string(), false),
+                ("marked by hand".to_string(), true),
+                ("<unnamed>".to_string(), true),
+            ]
+        );
+        assert_eq!(skipped_names(&file), vec!["marked by hand", "<unnamed>"]);
     }
 
     #[test]

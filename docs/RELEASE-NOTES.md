@@ -28,6 +28,30 @@ and a project that already has such an entry, or a `severity` override with
 `enabled = true` beside it, is unchanged. A baseline entry for one of these
 rules is left alone and matches again if the rule is turned back on.
 
+Four rules that stay on report less, each for the one cause the benchmark's
+second wave found behind its false positives:
+
+- `express-cookie-insecure` no longer reports a flag that may be inside a
+  spread. All six of its findings were `res.cookie(name, value, {
+  ...cookieOptions, maxAge })` with both flags set in the object being spread.
+  A flag written `false` after the spread is still reported, and a shorthand
+  `{ httpOnly, secure }` now counts as set.
+- `weak-crypto` reports MD5 or SHA-1 only where a name in reach says a
+  credential is being hashed. The Medium findings it gave every other use are
+  gone: all five were a protocol or a fingerprint (the RFC 6455 accept key, an
+  S3 ETag, a hash of syntax-tree shingles). The `Math.random` and static IV
+  forms are unchanged.
+- `test-no-assert` counts the assertions of a body handed to a wrapper,
+  `test("name", withSetup(() => { ... }))`, and no longer reads a helper that
+  shares a runner's name as a test: a call whose value is used, such as
+  `expect(fit("label", 8))`, and `fit`, `xit`, `ftest` or `xtest` in a file
+  that imports the name from one of its own modules or declares it.
+- `test-newly-skipped` no longer reports Playwright's conditional skip,
+  `test.skip(browserName === "webkit", "reason")`. With a condition first and
+  no title or body the call is a guard worked out at run time, and the test
+  runs wherever the condition does not hold. `test.skip("name", fn)` is still
+  a skipped test.
+
 `dead-export` reports more, because a file with a parse error no longer counts
 as using everything in every module it imports. Such a file is excluded from
 the rules, and until now each of its imports was also widened to the whole

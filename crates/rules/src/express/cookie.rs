@@ -39,7 +39,11 @@
 //! - **Options this file cannot read are left alone.** `res.cookie(n, v, opts)`
 //!   where `opts` is a variable is quiet: the rule reports the options it can
 //!   quote, the same way `express-cors-wildcard-on-authenticated` reports the
-//!   origins it can quote.
+//!   origins it can quote. A spread inside the object is the same thing one
+//!   level down: `{ ...cookieOptions, maxAge }` may carry both flags, so a flag
+//!   the object does not write after the spread is unknown, not missing. Every
+//!   finding the public benchmark gave this rule before 1.0.0 was that shape,
+//!   and all six were false.
 //! - **A flag whose value is neither `true` nor `false` counts as set.**
 //!   `secure: process.env.NODE_ENV === "production"` is how a repository writes
 //!   a cookie that is secure in production and readable over `http://localhost`
@@ -63,7 +67,7 @@ use locrin_core::parse::ParsedFile;
 use locrin_core::tree::{line, text};
 use tree_sitter::Node;
 
-use super::{args, enclosing_registration, imports_express, property, string_value, unwrap, walk};
+use super::{args, enclosing_registration, imports_express, string_value, unwrap, walk};
 use crate::{clean_files, finding_at, line_span, Rule, RuleContext, Scope};
 
 pub struct ExpressCookieInsecure;
@@ -109,23 +113,41 @@ fn cookie_call<'a>(call: Node<'a>, src: &str) -> Option<Vec<Node<'a>>> {
 ///
 /// Absent options miss both: `res.cookie(name, value)` is a cookie with no
 /// flags on it at all.
+///
+/// The object is read in the order it is written, because that is the order
+/// it is built in: a later property replaces an earlier one. A spread may hold
+/// either flag, so it makes both unknown, and unknown is not missing; a flag
+/// written `false` after the spread is off whatever the spread held.
 fn missing<'a>(options: Option<Node<'a>>, src: &str) -> Option<Vec<(&'static str, &'static str)>> {
     let Some(options) = options else { return Some(FLAGS.to_vec()) };
     let options = unwrap(options);
     if options.kind() != "object" {
         return None;
     }
-    Some(
-        FLAGS
-            .iter()
-            .filter(|(flag, _)| match property(options, src, flag).map(unwrap) {
-                // Absent, or turned off in as many words.
-                None => true,
-                Some(value) => text(value, src) == "false",
-            })
-            .copied()
-            .collect(),
-    )
+    // Per flag: is it missing as far as the object has been read.
+    let mut absent = [true; FLAGS.len()];
+    let mut cursor = options.walk();
+    for member in options.named_children(&mut cursor) {
+        match member.kind() {
+            "spread_element" => absent = [false; FLAGS.len()],
+            "pair" => {
+                let Some(key) = member.child_by_field_name("key") else { continue };
+                let key = text(key, src).trim_matches(|c| c == '"' || c == '\'');
+                let Some(flag) = FLAGS.iter().position(|(name, _)| *name == key) else { continue };
+                // Turned off in as many words, or set to anything else.
+                absent[flag] = member.child_by_field_name("value").is_some_and(|v| text(unwrap(v), src) == "false");
+            }
+            // `{ httpOnly }`: a variable under the flag's name, which is a value
+            // that is neither `true` nor `false`.
+            "shorthand_property_identifier" => {
+                if let Some(flag) = FLAGS.iter().position(|(name, _)| *name == text(member, src)) {
+                    absent[flag] = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(FLAGS.iter().zip(absent).filter(|(_, absent)| *absent).map(|(flag, _)| *flag).collect())
 }
 
 /// The cookie's name as the evidence says it: the literal when there is one,
@@ -262,6 +284,34 @@ mod tests {
         )
         .is_empty());
         assert!(evidence("res.cookie(\"s\", t, options);\n").is_empty());
+    }
+
+    /// A spread is options the call site does not spell out. All six findings
+    /// the public benchmark's second wave gave this rule were this shape,
+    /// `{ ...cookieOptions, maxAge }` with both flags set in `cookieOptions`, and
+    /// all six were false. A flag the object does not write may be inside the
+    /// spread, so it is unknown and not missing.
+    #[test]
+    fn a_flag_that_may_be_inside_a_spread_is_not_missing() {
+        assert!(evidence("res.cookie(\"session\", token, { ...cookieOptions, maxAge });\n").is_empty());
+        assert!(evidence("res.cookie(\"__Host-auth\", \"token\", { path: \"/\", ...options });\n").is_empty());
+        assert_eq!(
+            evidence("res.cookie(\"s\", t, { ...base, httpOnly: true, secure: false });\n"),
+            vec!["cookie s set without secure"],
+            "written off after the spread is off whatever the spread held"
+        );
+        assert!(
+            evidence("res.cookie(\"s\", t, { secure: false, ...base });\n").is_empty(),
+            "a spread after the flag can turn it back on"
+        );
+    }
+
+    /// `{ httpOnly, secure }` passes two variables under the flags' names. Like
+    /// any value that is neither `true` nor `false`, each counts as set.
+    #[test]
+    fn a_shorthand_flag_counts_as_set() {
+        assert!(evidence("res.cookie(\"s\", t, { httpOnly, secure });\n").is_empty());
+        assert_eq!(evidence("res.cookie(\"s\", t, { httpOnly });\n"), vec!["cookie s set without secure"]);
     }
 
     #[test]
