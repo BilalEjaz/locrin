@@ -57,11 +57,15 @@ pub fn extract(file: &ParsedFile) -> Vec<TestCase> {
     let own = own_runner_names(file);
     let mut out = Vec::new();
     visit(root, &mut |node| {
-        if node.kind() != "call_expression" || value_is_used(node) {
+        if node.kind() != "call_expression" {
             return;
         }
         let Some(callee) = case_callee(node, src) else { return };
-        if callee.kind() == "identifier" && own.contains(text(callee, src)) {
+        // Asked only of a call that is spelled like a case, and after the
+        // spelling check: finding a node's parent walks down from the root, so
+        // asking it of every call in the file costs the file's depth each time.
+        // A test holding 45,000 nested calls took minutes that way.
+        if value_is_used(node) || (callee.kind() == "identifier" && own.contains(text(callee, src))) {
             return;
         }
         let args = named_args(node);
