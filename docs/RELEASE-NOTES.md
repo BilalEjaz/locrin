@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.0.0
+
+1.0 is a statement about evidence, not about features. Locrin's defaults have
+been set by measurement since 0.6.0: a rule ships on only if it holds 85
+percent precision on the public benchmark, where two models label every
+finding the engine makes on agent-written changes
+(https://github.com/BilalEjaz/locrin-benchmark). For this release the
+benchmark grew a second wave of 98 changes, chosen because they touch the
+subjects of the rules the first wave could not score, and every rule that
+ships on was then put through it. A rule that scored under the line is off, or
+its false positives had one cause and that cause is fixed; a rule the corpus
+still cannot score says why in the public table. The measurement of 1.0.0
+itself is published in the benchmark repository after the release.
+
+Two engine defects the second wave exposed are fixed as well: a parse error in
+one file no longer hides unused exports in the modules it imports, and a
+deeply nested generated file no longer ends the run.
+
 ### What changes without opting in
 
 Three rules are off by default: `leftover-debug`, `html-injection` and

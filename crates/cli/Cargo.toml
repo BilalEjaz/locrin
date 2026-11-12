@@ -13,10 +13,10 @@ name = "locrin"
 path = "src/main.rs"
 
 [dependencies]
-locrin-core = { path = "../core", version = "0.6.1" }
-locrin-rules = { path = "../rules", version = "0.6.1" }
-locrin-reporters = { path = "../reporters", version = "0.6.1" }
-locrin-mcp = { path = "../mcp", version = "0.6.1" }
+locrin-core = { path = "../core", version = "1.0.0" }
+locrin-rules = { path = "../rules", version = "1.0.0" }
+locrin-reporters = { path = "../reporters", version = "1.0.0" }
+locrin-mcp = { path = "../mcp", version = "1.0.0" }
 anyhow.workspace = true
 clap.workspace = true
 serde = { workspace = true }
