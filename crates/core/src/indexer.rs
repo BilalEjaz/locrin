@@ -1,6 +1,6 @@
 //! Puts one parsed file into every table the index keeps about a file.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::edges;
 use crate::imports;
@@ -10,22 +10,40 @@ use crate::resolve::Resolver;
 use crate::symbols;
 use crate::ALLOW_MARK;
 
-/// Every import the file has, syntactic ones first. A file whose tree came back
-/// with errors also gets the text scan merged in, because tree-sitter's recovery
-/// drops whole statements and the leftover edge set would otherwise let a broken
-/// file make the modules it really imports look dead. Syntactic entries win where
-/// both found the same specifier: they carry the names and bindings.
+/// Every import the file has, syntactic ones first.
 ///
-/// Every import of such a file also takes the whole module. A clause recovery did
-/// keep may still be a truncated one, and a name missing from it would make a
-/// live export look dead; more edges is the safe direction (spec 3.2).
+/// A file whose tree came back with errors is read more carefully, because
+/// tree-sitter recovers from an error by dropping and patching nodes, and an
+/// import it lost or cut short would let a broken file make a module it really
+/// uses look dead. More edges is the safe direction (spec 3.2), so:
+///
+/// - an import statement recovery patched takes the whole module, since the
+///   names left on it may not be all of them;
+/// - a specifier the text names more often than the tree read it has lost a
+///   statement to recovery, and the text scan's entry for it, the whole module,
+///   is added.
+///
+/// An import statement the parser read whole keeps its names. One parse error
+/// elsewhere in a file is no reason to distrust it, and treating it as one made
+/// a single unreadable line in a test file hide every unused export of every
+/// module that test imports.
 fn file_imports(file: &ParsedFile) -> Vec<imports::Import> {
-    let mut found = imports::extract(file);
-    if file.has_error {
-        found.iter_mut().filter(|i| !i.names.iter().any(|n| n == "*")).for_each(|i| i.names.push("*".into()));
-        let known: HashSet<String> = found.iter().map(|i| i.specifier.clone()).collect();
-        found
-            .extend(imports::extract_text_fallback(&file.source).into_iter().filter(|i| !known.contains(&i.specifier)));
+    if !file.has_error {
+        return imports::extract(file);
+    }
+    let mut found = Vec::new();
+    let mut read: HashMap<String, usize> = HashMap::new();
+    for (mut import, patched) in imports::extract_marking_patched(file) {
+        if patched && !import.names.iter().any(|n| n == "*") {
+            import.names.push("*".into());
+        }
+        *read.entry(import.specifier.clone()).or_default() += 1;
+        found.push(import);
+    }
+    for (import, named) in imports::text_fallback_counted(&file.source) {
+        if named > read.get(&import.specifier).copied().unwrap_or(0) {
+            found.push(import);
+        }
     }
     found
 }
@@ -115,28 +133,84 @@ mod tests {
         dir.join("index.db")
     }
 
-    /// A file the parser could not read is an unknown importer of every module it
-    /// names, not only of the ones recovery dropped. A clause tree-sitter did
-    /// recover may be a truncated one, so the names on it cannot be trusted to be
-    /// all of them, and a missing name would make a live export look dead.
+    /// The imports of a file that failed to parse, as (specifier, names), in the
+    /// order `file_imports` gives them.
+    fn broken_imports(rel: &str, source: &str) -> Vec<(String, Vec<String>)> {
+        use crate::parse::parse_source;
+        use std::path::Path;
+
+        let file = parse_source(Path::new(rel), rel, source.to_string()).unwrap();
+        assert!(file.has_error, "the fixture must be a file that failed to parse");
+        file_imports(&file).into_iter().map(|i| (i.specifier, i.names)).collect()
+    }
+
+    fn names_of<'a>(found: &'a [(String, Vec<String>)], specifier: &str) -> Vec<&'a Vec<String>> {
+        found.iter().filter(|(s, _)| s == specifier).map(|(_, names)| names).collect()
+    }
+
+    fn star() -> Vec<String> {
+        vec!["*".to_string()]
+    }
+
+    /// A parse error somewhere else in the file says nothing about an import
+    /// statement the parser read from its first token to its last. The grammar
+    /// errors on Vitest's `await importOriginal<typeof import("./lib")>()`, a line
+    /// most mocked test files carry; widening every import of such a file to the
+    /// whole module made every export of every module it names look used, and on
+    /// one measured repository that hid 620 modules from `dead-export`.
     #[test]
-    fn every_import_of_a_parse_failed_file_takes_the_whole_module() {
+    fn an_import_read_whole_keeps_its_names_in_a_file_that_failed_to_parse() {
+        let source = "import { a } from \"./a\";\nimport { vi } from \"vitest\";\nvi.mock(\"./lib\", async (original: any) => ({ ...(await original<typeof import(\"./lib\")>()), b: 1 }));\nimport { c } from \"./c\";\n";
+        let found = broken_imports("src/a.test.ts", source);
+        assert_eq!(names_of(&found, "./a"), vec![&vec!["a".to_string()]], "{found:?}");
+        assert_eq!(names_of(&found, "./c"), vec![&vec!["c".to_string()]], "{found:?}");
+        assert!(names_of(&found, "./lib").iter().any(|n| n.contains(&"*".to_string())), "{found:?}");
+    }
+
+    /// An import statement recovery had to patch is another matter: the names on
+    /// it cannot be trusted to be all of them, and a missing name would make a
+    /// live export look dead. It takes the whole module.
+    #[test]
+    fn an_import_the_parser_patched_takes_the_whole_module() {
+        let found = broken_imports("src/e.ts", "import { a, ) b } from \"./a\";\nimport { c } from \"./c\";\n");
+        assert_eq!(names_of(&found, "./a").len(), 1, "{found:?}");
+        assert!(names_of(&found, "./a")[0].contains(&"*".to_string()), "{found:?}");
+        assert_eq!(names_of(&found, "./c"), vec![&vec!["c".to_string()]], "{found:?}");
+    }
+
+    /// An import recovery dropped altogether is found by the text scan and takes
+    /// the whole module, while the one read whole before the error keeps its name.
+    #[test]
+    fn an_import_recovery_dropped_takes_the_whole_module() {
+        let found = broken_imports(
+            "src/broken.tsx",
+            "import { a } from \"./a\";\nconst shell = <View>;\nimport { b } from \"./b\";\n",
+        );
+        assert_eq!(names_of(&found, "./a"), vec![&vec!["a".to_string()]], "{found:?}");
+        assert_eq!(names_of(&found, "./b"), vec![&star()], "{found:?}");
+    }
+
+    /// The dropped import can name a module an earlier, whole statement names
+    /// too. The earlier statement's names are then not all the file takes from
+    /// that module, so the module is still taken whole.
+    #[test]
+    fn a_dropped_import_of_a_module_another_statement_names_takes_the_whole_module() {
+        let found = broken_imports(
+            "src/twice.tsx",
+            "import { a } from \"./m\";\nconst shell = <View>;\nimport { b } from \"./m\";\n",
+        );
+        assert!(names_of(&found, "./m").iter().any(|n| n.contains(&"*".to_string())), "{found:?}");
+    }
+
+    #[test]
+    fn a_clean_file_keeps_the_names_it_read() {
         use crate::parse::parse_source;
         use std::path::Path;
 
         let clean =
             parse_source(Path::new("src/ok.tsx"), "src/ok.tsx", "import { a } from \"./a\";\n".to_string()).unwrap();
         assert!(!clean.has_error);
-        assert_eq!(file_imports(&clean)[0].names, vec!["a".to_string()], "a clean file keeps the names it read");
-
-        let source = "import { a } from \"./a\";\nconst shell = <View>;\nimport { b } from \"./b\";\n";
-        let broken = parse_source(Path::new("src/broken.tsx"), "src/broken.tsx", source.to_string()).unwrap();
-        assert!(broken.has_error, "the fixture must be a file that failed to parse");
-        let found = file_imports(&broken);
-        let mut specifiers: Vec<&str> = found.iter().map(|i| i.specifier.as_str()).collect();
-        specifiers.sort();
-        assert_eq!(specifiers, vec!["./a", "./b"], "both the recovered and the dropped import are edges");
-        assert!(found.iter().all(|i| i.names.iter().any(|n| n == "*")), "{found:?}");
+        assert_eq!(file_imports(&clean)[0].names, vec!["a".to_string()]);
     }
 
     #[test]

@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### What changes without opting in
+
+`dead-export` reports more, because a file with a parse error no longer counts
+as using everything in every module it imports. Such a file is excluded from
+the rules, and until now each of its imports was also widened to the whole
+module, on the reasoning that names read from a broken tree cannot be trusted.
+That was too broad. The TypeScript grammar errors on a line most mocked Vitest
+files carry, `await importOriginal<typeof import("./mod")>()`, and one such
+line made a test file an importer of every export of every module it names. On
+one measured repository 223 of 2,767 files had a parse error, 219 of them
+tests, and between them they marked 620 modules as wholly used: the public
+benchmark recorded 49 unused exports in one change to that repository and the
+engine reported none of them.
+
+An import statement the parser read from its first token to its last now keeps
+its names, whatever else in the file failed to parse. An import statement that
+recovery patched (an ERROR or MISSING node inside it, or the statement sitting
+inside an ERROR node) still takes the whole module, and so does a module the
+text of the file imports more often than the tree read, which is how an import
+that recovery dropped shows up. On the repository above the change adds 468
+`dead-export` findings and removes none, the 49 recorded misses among them.
+Expect new findings in a project that mocks modules with `importOriginal`; a
+baseline taken before this release will not hold them.
+
 ## 0.6.1
 
 ### What changes without opting in

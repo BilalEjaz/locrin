@@ -329,6 +329,51 @@ fn removing_an_import_surfaces_a_dead_export_on_a_full_check() {
     assert!(evidence.contains("`dropped`"), "{evidence}");
 }
 
+/// A test file the parser cannot read whole still says which names it imports.
+/// The grammar errors on Vitest's `importOriginal<typeof import("./lib")>()`, and
+/// a file with a parse error used to count as an importer of everything in every
+/// module it names, so an export nothing uses stayed hidden for as long as one
+/// such test imported its module.
+#[test]
+fn a_test_the_parser_cannot_read_does_not_hide_a_dead_export() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function kept(): number {
+  return 1;
+}
+export function dropped(): number {
+  return 2;
+}
+",
+    )
+    .unwrap();
+    let test = "import { expect, it, vi } from \"vitest\";
+import { kept } from \"./lib\";
+vi.mock(\"./clean\", async (original: any) => ({ ...(await original<typeof import(\"./clean\")>()), extra: 1 }));
+it(\"keeps\", () => {
+  expect(kept()).toBe(1);
+});
+";
+    std::fs::write(dir.path().join("src/lib.test.ts"), test).unwrap();
+    let out = locrin(dir.path()).args(["check", "--json"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("parse errors in src/lib.test.ts"),
+        "the fixture must be a file that failed to parse: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dead: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule"] == "dead-export" && f["file"] == "src/lib.ts")
+        .map(|f| f["evidence"].as_str().unwrap())
+        .collect();
+    assert_eq!(dead.len(), 1, "{v}");
+    assert!(dead[0].contains("`dropped`"), "{v}");
+}
+
 #[test]
 fn unused_import_blocks_and_names_the_binding() {
     let dir = copy_fixture();

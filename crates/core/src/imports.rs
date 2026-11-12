@@ -180,7 +180,10 @@ fn call(node: Node, src: &str) -> Option<Import> {
     Some(Import { specifier, kind, line: line(node), names: vec!["*".into()], bindings: vec![] })
 }
 
-fn walk(node: Node, src: &str, out: &mut Vec<Import>) {
+/// `inside_error` is whether an ancestor of `node` is an ERROR node. Each import
+/// is pushed with whether recovery patched its statement, which
+/// [`extract_marking_patched`] defines.
+fn walk(node: Node, src: &str, inside_error: bool, out: &mut Vec<(Import, bool)>) {
     let found = match node.kind() {
         "import_statement" => import_statement(node, src),
         "export_statement" => export_statement(node, src),
@@ -188,17 +191,29 @@ fn walk(node: Node, src: &str, out: &mut Vec<Import>) {
         _ => None,
     };
     if let Some(i) = found {
-        out.push(i);
+        out.push((i, inside_error || node.has_error()));
     }
+    let inside_error = inside_error || node.is_error();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        walk(child, src, out);
+        walk(child, src, inside_error, out);
     }
 }
 
 pub fn extract(file: &ParsedFile) -> Vec<Import> {
+    extract_marking_patched(file).into_iter().map(|(import, _)| import).collect()
+}
+
+/// Every import [`extract`] gives, each with whether recovery patched its
+/// statement: an ERROR or MISSING node sits inside it, or it sits inside an
+/// ERROR node itself. The parser skips a token it cannot place by leaving an
+/// ERROR node where the token was, and invents one it needs as a MISSING node,
+/// so a statement with neither in it and none above it was read from its first
+/// token to its last and its names are all of them. A patched statement's names
+/// may not be. In a file that parsed cleanly nothing is patched.
+pub fn extract_marking_patched(file: &ParsedFile) -> Vec<(Import, bool)> {
     let mut out = Vec::new();
-    walk(file.tree.root_node(), &file.source, &mut out);
+    walk(file.tree.root_node(), &file.source, false, &mut out);
     out
 }
 
@@ -319,8 +334,15 @@ fn tokenize(source: &str) -> Vec<Tok> {
 /// as the whole module (`*`), because the engine cannot tell which names a broken
 /// file uses, and a file it cannot read must never make another file look dead.
 pub fn extract_text_fallback(source: &str) -> Vec<Import> {
+    text_fallback_counted(source).into_iter().map(|(import, _)| import).collect()
+}
+
+/// What [`extract_text_fallback`] gives, each specifier with the number of times
+/// the text names it. The caller compares that with how many statements the
+/// tree read for the same specifier: more in the text means recovery dropped one.
+pub fn text_fallback_counted(source: &str) -> Vec<(Import, usize)> {
     let toks = tokenize(source);
-    let mut out: Vec<Import> = Vec::new();
+    let mut out: Vec<(Import, usize)> = Vec::new();
     for (i, tok) in toks.iter().enumerate() {
         let Tok::Literal(specifier, line) = tok else { continue };
         let before = |n: usize| i.checked_sub(n).map(|k| &toks[k]);
@@ -330,16 +352,23 @@ pub fn extract_text_fallback(source: &str) -> Vec<Import> {
             Some(Tok::Punct('(')) => matches!(before(2), Some(Tok::Word(w)) if w == "import" || w == "require"),
             _ => false,
         };
-        if !triggered || out.iter().any(|x| &x.specifier == specifier) {
+        if !triggered {
             continue;
         }
-        out.push(Import {
-            specifier: specifier.clone(),
-            kind: ImportKind::Import,
-            line: *line,
-            names: vec!["*".into()],
-            bindings: vec![],
-        });
+        if let Some((_, times)) = out.iter_mut().find(|(x, _)| &x.specifier == specifier) {
+            *times += 1;
+            continue;
+        }
+        out.push((
+            Import {
+                specifier: specifier.clone(),
+                kind: ImportKind::Import,
+                line: *line,
+                names: vec!["*".into()],
+                bindings: vec![],
+            },
+            1,
+        ));
     }
     out
 }
