@@ -469,7 +469,13 @@ fn index_files(
         .collect();
     for Parsed { hash, is_changed, stat, file, skipped } in parsed {
         let Some(parsed) = file else { continue };
-        if parsed.has_error {
+        if parsed.too_deep {
+            eprintln!(
+                "warning: {} is nested more than {} levels deep; excluded from rules",
+                parsed.rel,
+                locrin_core::parse::MAX_TREE_DEPTH
+            );
+        } else if parsed.has_error {
             eprintln!("warning: parse errors in {}; excluded from rules", parsed.rel);
         }
         if is_changed {

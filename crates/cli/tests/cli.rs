@@ -374,6 +374,94 @@ it(\"keeps\", () => {
     assert!(dead[0].contains("`dropped`"), "{v}");
 }
 
+/// A union type or a string concatenation is a left-nested tree, one level per
+/// member, and every rule that walks a tree recurses once per level. A generated
+/// file with a 19,307-member union (an AWS IAM action list) overflowed the stack
+/// and killed the run with no report at all. The run now has the stack for it,
+/// and the rules still read the file: the unused import in it is reported.
+#[test]
+fn a_twenty_thousand_member_union_is_read_and_does_not_end_the_run() {
+    let dir = copy_fixture();
+    let members: Vec<String> = (0..20_000).map(|i| format!("  | \"action:{i}\"")).collect();
+    let parts: Vec<String> = (0..20_000).map(|i| format!("\"p{i}\"")).collect();
+    let big = format!(
+        "import {{ ok }} from \"./clean\";
+export type Action =
+{};
+export const joined = {};
+",
+        members.join(
+            "
+"
+        ),
+        parts.join(" + ")
+    );
+    std::fs::write(dir.path().join("src/generated.ts"), big).unwrap();
+    let out = locrin(dir.path()).args(["check", "--sarif"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(matches!(out.status.code(), Some(0) | Some(1)), "status {:?}: {stderr}", out.status);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let in_big: Vec<&str> = v["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/generated.ts")
+        .map(|r| r["ruleId"].as_str().unwrap())
+        .collect();
+    assert!(in_big.contains(&"unused-import"), "{in_big:?} {stderr}");
+}
+
+/// Past `MAX_TREE_DEPTH` no stack is trusted: the file is not walked, the run
+/// says so and carries on, and the file still counts as using the modules it
+/// imports, so an export only it uses is not called dead.
+#[test]
+fn a_file_nested_past_the_limit_is_skipped_with_a_warning_and_still_imports() {
+    let dir = copy_fixture();
+    std::fs::write(
+        dir.path().join("src/lib.ts"),
+        "export function onlyDeepUsesIt(): number {
+  return 1;
+}
+",
+    )
+    .unwrap();
+    let n = 100_010;
+    let deep = format!(
+        "import {{ onlyDeepUsesIt }} from \"./lib\";
+export const table = {}onlyDeepUsesIt(){};
+",
+        "[".repeat(n),
+        "]".repeat(n)
+    );
+    std::fs::write(dir.path().join("src/deep.ts"), deep).unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { table } from \"./deep\";
+export const t = table;
+",
+    )
+    .unwrap();
+    let out = locrin(dir.path()).args(["check", "--sarif"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(matches!(out.status.code(), Some(0) | Some(1)), "status {:?}: {stderr}", out.status);
+    assert!(
+        stderr.contains("warning: src/deep.ts is nested more than 100000 levels deep; excluded from rules"),
+        "{stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let on_lib_or_deep: Vec<String> = v["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            let uri = &r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"];
+            uri == "src/lib.ts" || uri == "src/deep.ts"
+        })
+        .map(|r| r.to_string())
+        .collect();
+    assert!(on_lib_or_deep.is_empty(), "{on_lib_or_deep:?}");
+}
+
 #[test]
 fn unused_import_blocks_and_names_the_binding() {
     let dir = copy_fixture();
