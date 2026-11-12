@@ -17,6 +17,10 @@ pub struct ParsedFile {
     pub source: String,
     pub tree: Tree,
     pub has_error: bool,
+    /// The tree was nested more than [`MAX_TREE_DEPTH`] levels deep. `tree` is
+    /// then an empty one and `has_error` is set, so the file is excluded from the
+    /// rules and counts as an importer of every module its text names.
+    pub too_deep: bool,
     /// The file's symbol table, extracted on first use by
     /// [`crate::symbols::symbols_of`] and shared from then on.
     ///
@@ -87,12 +91,54 @@ fn is_tolerated_jsx_text_error(node: Node, src: &str) -> bool {
     !children.any(|c| c.has_error())
 }
 
+/// The deepest tree the engine walks.
+///
+/// Everything that reads a tree recurses once per level of nesting, and a stack
+/// overflow cannot be caught: it ends the process with no report. The command
+/// line runs on stacks sized for this many levels with room to spare (a debug
+/// build with every rule on walks twice this on them, in each of the eight
+/// shapes of nesting tried), and a tree deeper than this is not walked at all. Nesting like that is data written as code, a generated union or table
+/// with one level per entry, and the largest met so far had 19,307.
+pub const MAX_TREE_DEPTH: usize = 100_000;
+
+/// Whether any node sits more than `limit` levels below `root`. A cursor walk,
+/// so it cannot overflow on the tree it is measuring.
+fn deeper_than(root: Node, limit: usize) -> bool {
+    let mut cursor = root.walk();
+    let mut depth = 0usize;
+    loop {
+        if cursor.goto_first_child() {
+            depth += 1;
+            if depth > limit {
+                return true;
+            }
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return false;
+            }
+            depth -= 1;
+        }
+    }
+}
+
 pub fn parse_source(path: &Path, rel: &str, source: String) -> Option<ParsedFile> {
     let language = Language::from_path(path)?;
     let mut parser = Parser::new();
     parser.set_language(&language.grammar()).expect("grammar version matches tree-sitter runtime");
-    let tree = parser.parse(parser_bytes(&source).as_ref(), None)?;
-    let has_error = has_blocking_error(tree.root_node(), &source);
+    let mut tree = parser.parse(parser_bytes(&source).as_ref(), None)?;
+    // A level of nesting costs at least a byte of source, give or take the few
+    // wrapper nodes the grammar puts around one token, so a file much shorter
+    // than the limit cannot reach it and is not measured. The factor of four is
+    // the allowance for those wrappers.
+    let too_deep = source.len() >= MAX_TREE_DEPTH / 4 && deeper_than(tree.root_node(), MAX_TREE_DEPTH);
+    if too_deep {
+        // Handing on the real tree would leave every walker, present and future,
+        // to remember not to descend it. An empty tree has nothing to descend.
+        tree = parser.parse("", None)?;
+    }
+    let has_error = too_deep || has_blocking_error(tree.root_node(), &source);
     Some(ParsedFile {
         path: path.to_path_buf(),
         rel: rel.to_string(),
@@ -100,6 +146,7 @@ pub fn parse_source(path: &Path, rel: &str, source: String) -> Option<ParsedFile
         source,
         tree,
         has_error,
+        too_deep,
         symbols: OnceLock::new(),
     })
 }
@@ -250,6 +297,54 @@ mod tests {
         // before the file is read, so a missing file is not an error here.
         let rb = dir.join("sub").join("script.rb");
         assert!(parse_file(&dir, &rb).unwrap().is_none());
+    }
+
+    /// A tree nested past the limit is not handed to anything that could walk it.
+    /// The rules recurse once per level and an overflowed stack ends the process
+    /// with no report, so the file is marked unreadable and carries an empty tree:
+    /// there is nothing in it for a walker to descend, whichever walker it is.
+    #[test]
+    fn a_tree_nested_past_the_limit_is_handed_on_empty() {
+        let n = MAX_TREE_DEPTH + 10;
+        let src = format!(
+            "import {{ a }} from \"./a\";
+export const n = {}{};
+",
+            "[".repeat(n),
+            "]".repeat(n)
+        );
+        let p = parse_source(Path::new("x/deep.ts"), "x/deep.ts", src.clone()).unwrap();
+        assert!(p.too_deep);
+        assert!(
+            p.has_error,
+            "a file the engine will not walk is excluded from the rules like any other it cannot read"
+        );
+        assert_eq!(p.tree.root_node().child_count(), 0);
+        assert_eq!(p.source, src, "the text is kept: the import scan and the allow marks read it");
+    }
+
+    /// The limit is on depth and nothing else. A file with far more nodes than
+    /// the limit, none of them deep, is read like any other, and so is a tree a
+    /// little inside the limit.
+    #[test]
+    fn a_large_or_nearly_too_deep_file_is_read() {
+        let wide = "export const a = [1, 2, 3];
+"
+        .repeat(20_000);
+        let p = parse_source(Path::new("x/wide.ts"), "x/wide.ts", wide).unwrap();
+        assert!(!p.too_deep && !p.has_error);
+        assert_eq!(p.tree.root_node().child_count(), 20_000);
+
+        let n = MAX_TREE_DEPTH - 100;
+        let src = format!(
+            "export const n = {}{};
+",
+            "[".repeat(n),
+            "]".repeat(n)
+        );
+        let p = parse_source(Path::new("x/near.ts"), "x/near.ts", src).unwrap();
+        assert!(!p.too_deep && !p.has_error);
+        assert_eq!(p.tree.root_node().child_count(), 1);
     }
 
     /// The JSX-text scanner refuses a bare `&` (tree-sitter-javascript #366),

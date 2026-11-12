@@ -26,6 +26,18 @@ that recovery dropped shows up. On the repository above the change adds 468
 Expect new findings in a project that mocks modules with `importOriginal`; a
 baseline taken before this release will not hold them.
 
+A deeply nested file no longer ends the run. A union type, a string
+concatenation and a chain of calls are trees with one level per member, the
+rules walk a tree by recursion, and the default thread stacks end near two
+thousand levels: a generated file with a 19,307-member union overflowed the
+stack, and the process died with no report and an exit code that is none of 0,
+1 and 2. The engine now runs on stacks sized for 100,000 levels, which costs
+address space and no memory until a deep tree is met, and such a file is read
+and reported on like any other. A file nested deeper than 100,000 levels is
+not walked: the run prints `warning: <file> is nested more than 100000 levels
+deep; excluded from rules`, carries on, and treats the file as using the whole
+of every module its text imports.
+
 ## 0.6.1
 
 ### What changes without opting in

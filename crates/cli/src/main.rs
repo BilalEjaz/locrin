@@ -296,12 +296,37 @@ fn real_main() -> anyhow::Result<i32> {
     }
 }
 
+/// The stack every thread that walks a syntax tree runs on.
+///
+/// A union type, a string concatenation and a chain of method calls are all
+/// left-nested trees, one level per member, and the rules walk trees by
+/// recursion, one frame per level. The default stacks (1 MiB for the main thread
+/// on Windows, 2 MiB for a pool thread) end near two thousand levels, and a
+/// generated file passes that easily: a 19,307-member union of IAM action names
+/// overflowed the stack and killed the run without a report. An overflow is not
+/// a panic and cannot be caught, so the only fix is not to have one.
+///
+/// This is address space, not memory: a thread's stack is committed a page at a
+/// time as it is used, so a run that never meets a deep tree pays nothing for
+/// it. `locrin_core::parse::MAX_TREE_DEPTH` is the other half: a tree deeper
+/// than this stack is good for is not walked at all.
+const STACK_BYTES: usize = 256 * 1024 * 1024;
+
 fn main() -> ExitCode {
     // The default hook prints its own multi-line panic report before the
     // unwind reaches us, so a caught panic would speak twice. Silence it and
     // let the arm below be the single line an operator reads.
     std::panic::set_hook(Box::new(|_| {}));
-    let result = std::panic::catch_unwind(real_main);
+    // The pool is built before anything can use it; a second build is refused,
+    // which is the only way this fails, and then the pool that exists is used.
+    let _ = rayon::ThreadPoolBuilder::new().stack_size(STACK_BYTES).build_global();
+    let result = match std::thread::Builder::new().stack_size(STACK_BYTES).spawn(|| std::panic::catch_unwind(real_main))
+    {
+        Ok(worker) => worker.join().unwrap_or_else(Err),
+        // No address space for that stack. The run is still worth having on the
+        // stack there is: only a deeply nested file is at risk on it.
+        Err(_) => std::panic::catch_unwind(real_main),
+    };
     match result {
         Ok(Ok(code)) => ExitCode::from(code as u8),
         Ok(Err(e)) => {
